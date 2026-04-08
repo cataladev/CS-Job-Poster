@@ -292,7 +292,13 @@ class JobFilter:
         if not job.normalized_locations:
             return False
         for location in job.normalized_locations:
-            if "remote us" in location or " usa" in location or location == "us":
+            if (
+                "remote us" in location
+                or location == "us"
+                or location == "usa"
+                or location.endswith(" usa")
+                or " united states" in location
+            ):
                 return True
             tokens = set(location.split())
             if tokens.intersection(US_LOCATION_TOKENS):

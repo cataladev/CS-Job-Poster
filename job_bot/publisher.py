@@ -49,6 +49,7 @@ SHARED_HOST_SUFFIXES = (
     "workatastartup.com",
     "simplify.jobs",
 )
+FALLBACK_COMPANY_EMOJI = "🧌"
 
 
 class DiscordPublisher:
@@ -100,7 +101,11 @@ class DiscordPublisher:
             description=self._compact_summary(job.summary),
             color=discord.Color.blue(),
         )
-        embed.add_field(name="Company", value=job.company or "Unknown", inline=True)
+        embed.add_field(
+            name="Company",
+            value=self._display_company_name(job.company, logo_url),
+            inline=True,
+        )
         embed.add_field(name="Location", value=job.location or "Unknown", inline=True)
         embed.add_field(name="Track", value=job.track.replace("_", " ").title(), inline=True)
         embed.add_field(name="Source(s)", value=", ".join(job.source_names) or "Unknown", inline=False)
@@ -124,6 +129,12 @@ class DiscordPublisher:
             embed.set_thumbnail(url=logo_url)
         embed.set_footer(text="Internship Aggregator Bot")
         return embed
+
+    def _display_company_name(self, company: str, logo_url: Optional[str]) -> str:
+        base = company or "Unknown"
+        if logo_url:
+            return base
+        return f"{FALLBACK_COMPANY_EMOJI} {base}"
 
     async def _resolve_logo_url(self, job: CanonicalJob) -> Optional[str]:
         if not self.database or not job.normalized_company:
