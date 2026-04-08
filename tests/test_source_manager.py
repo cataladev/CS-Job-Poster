@@ -55,6 +55,7 @@ async def test_scheduler_registers_fixed_daily_run_hours(config_factory) -> None
     try:
         jobs = scheduler.scheduler.get_jobs()
         assert len(jobs) == 2
+        assert str(scheduler.scheduler.timezone) == "America/New_York"
         hours = set()
         for job in jobs:
             hour_field = next(field for field in job.trigger.fields if field.name == "hour")
