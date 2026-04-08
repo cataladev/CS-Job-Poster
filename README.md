@@ -46,7 +46,7 @@ tests/
 ## Setup
 
 1. Create a Discord bot application in the [Discord Developer Portal](https://discord.com/developers/applications).
-2. Enable the `MESSAGE CONTENT INTENT` under Bot settings.
+2. Enable the `MESSAGE CONTENT INTENT` under Bot settings if you want the prefix commands such as `!ping` and `!runjobs` to work. Without that toggle, the scheduled bot can still connect only if the code is changed to avoid privileged intents, but the current command-based setup requires it.
 3. Invite the bot to your server with permissions to read and send messages in the target channel.
 4. Copy your bot token and channel IDs into `.env`.
 
@@ -98,6 +98,8 @@ python bot.py
 - company career pages
 
 The bot also auto-discovers `greenhouse`, `lever`, `ashby`, and `workday` seeds from GitHub apply URLs and stores them in SQLite, so downstream coverage expands automatically over time.
+
+Note: the live SimplifyJobs repositories currently resolve from the `dev` branch in `config/sources.yaml`. If those repos change their default branch later, update the branch setting there.
 
 ## How GitHub Ingestion Works
 
@@ -177,6 +179,15 @@ WantedBy=multi-user.target
 ```bash
 pytest
 ```
+
+For local runtime testing:
+
+```bash
+source .venv/bin/activate
+python bot.py
+```
+
+If you hit `discord.errors.PrivilegedIntentsRequired`, enable Message Content Intent for the bot in the Discord developer portal and restart it.
 
 ## Limitations and Notes
 
