@@ -6,6 +6,7 @@ from typing import List, Optional
 
 import discord
 from discord.ext import commands
+from rapidfuzz import fuzz
 
 from job_bot.database import Database
 from job_bot.models import AppConfig, CanonicalJob
@@ -34,6 +35,14 @@ class DiscordPublisher:
             if not channel_id:
                 continue
             if await self.database.is_posted(job.id, channel_id):
+                continue
+            if await self._is_probable_repeat_for_channel(job, channel_id):
+                self.logger.info(
+                    "Skipping probable repeat for %s - %s in channel %s",
+                    job.company,
+                    job.title,
+                    channel_id,
+                )
                 continue
             channel = self.bot.get_channel(channel_id)
             if channel is None:
@@ -68,3 +77,38 @@ class DiscordPublisher:
         embed.set_footer(text="Internship Aggregator Bot")
         return embed
 
+    async def _is_probable_repeat_for_channel(self, job: CanonicalJob, channel_id: int) -> bool:
+        candidates = await self.database.get_posted_candidates(
+            channel_id=channel_id,
+            track=job.track,
+            normalized_company=job.normalized_company,
+        )
+        for candidate in candidates:
+            if candidate.id == job.id:
+                continue
+            if self._is_probable_repeat(job, candidate):
+                return True
+        return False
+
+    def _is_probable_repeat(self, job: CanonicalJob, candidate: CanonicalJob) -> bool:
+        if job.track != candidate.track:
+            return False
+        if job.normalized_company != candidate.normalized_company:
+            return False
+        if job.canonical_url == candidate.canonical_url:
+            return True
+
+        title_score = fuzz.token_set_ratio(job.normalized_title, candidate.normalized_title)
+        location_score = fuzz.token_set_ratio(
+            " ".join(job.normalized_locations),
+            " ".join(candidate.normalized_locations),
+        )
+        same_season = (job.season_term or "") == (candidate.season_term or "")
+
+        if same_season and title_score >= 95:
+            return True
+        if same_season and title_score >= 90 and location_score >= 85:
+            return True
+        if title_score >= 98 and location_score >= 92:
+            return True
+        return False

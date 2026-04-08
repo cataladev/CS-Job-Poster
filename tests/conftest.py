@@ -34,7 +34,7 @@ def config_factory(tmp_path):
             request_retries=0,
             source_concurrency=2,
             publish_delay_seconds=0.0,
-            max_job_age_hours=24,
+            max_job_age_hours=0,
             user_agent="test-agent",
             source_settings=source_settings or {},
         )

@@ -4,41 +4,42 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from job_bot.models import AppConfig, JobPosting
 
 
-SOFTWARE_ROLE_TOKENS = {
-    "software",
+SOFTWARE_ROLE_PHRASES = {
     "software engineer",
     "software engineering",
-    "developer",
     "software developer",
     "application development",
-    "application engineer",
     "web development",
     "web developer",
-    "backend",
-    "frontend",
-    "front end",
-    "fullstack",
-    "full stack",
-    "platform",
-    "systems",
-    "ml",
-    "machine learning",
-    "ai",
-    "artificial intelligence",
-    "firmware",
-    "embedded",
-    "ios",
-    "android",
-    "cloud",
-    "devops",
-    "site reliability",
-    "sre",
-    "infrastructure",
-    "automation",
+    "backend engineer",
+    "backend developer",
+    "frontend engineer",
+    "frontend developer",
+    "front end engineer",
+    "front end developer",
+    "fullstack engineer",
+    "fullstack developer",
+    "full stack engineer",
+    "full stack developer",
+    "platform engineer",
+    "systems engineer",
+    "machine learning engineer",
+    "ml engineer",
+    "ai engineer",
+    "data engineer",
+    "devops engineer",
+    "site reliability engineer",
+    "embedded engineer",
+    "firmware engineer",
+    "ios engineer",
+    "android engineer",
+    "mobile engineer",
+    "mobile developer",
 }
 NON_SOFTWARE_DISCIPLINE_TOKENS = {
     "mechanical",
@@ -74,6 +75,27 @@ ROLE_DENY_TOKENS = {
     "customer success",
     "account executive",
     "designer",
+    "analyst",
+    "analytics",
+    "operations",
+    "audit",
+    "business intelligence",
+    "business technology",
+    "support",
+    "technical support",
+    "workforce",
+    "planning",
+    "gis",
+    "demographics",
+    "sharepoint",
+    "knowledge management",
+    "product manager",
+    "product management",
+    "commercial",
+    "sustainability",
+    "scientist",
+    "data science",
+    "research scientist",
 }
 SENIORITY_DENY_TOKENS = {
     "senior",
@@ -214,7 +236,10 @@ class JobFilter:
         age_hours = self._job_age_hours(job)
         if age_hours is None:
             return FilterDecision(False, "unknown_age")
-        if age_hours > self.config.max_job_age_hours:
+        if self.config.max_job_age_hours == 0:
+            if not self._is_zero_day_role(job):
+                return FilterDecision(False, "age_filter")
+        elif age_hours > self.config.max_job_age_hours:
             return FilterDecision(False, "age_filter")
 
         return FilterDecision(True, None)
@@ -226,24 +251,29 @@ class JobFilter:
         summary_text: str,
     ) -> bool:
         title_context = " ".join([title_text, employment_text]).strip()
-        combined_text = " ".join([title_context, summary_text]).strip()
 
         if self._has_any_phrase(title_context, ROLE_DENY_TOKENS):
             return False
         if self._has_any_phrase(title_context, NON_SOFTWARE_DISCIPLINE_TOKENS):
             return False
-        if self._has_any_phrase(title_context, SOFTWARE_ROLE_TOKENS):
+        if "developer" in title_context:
+            return True
+        if "software" in title_context and self._has_any_phrase(
+            title_context, {"engineer", "engineering", "developer"}
+        ):
+            return True
+        if self._has_any_phrase(title_context, SOFTWARE_ROLE_PHRASES):
             return True
 
         # Let summaries rescue generic titles like "Intern" only when the summary
         # contains a clear software-role signal rather than a generic engineering header.
-        if self._has_any_phrase(summary_text, SOFTWARE_ROLE_TOKENS) and (
+        if self._has_any_phrase(summary_text, SOFTWARE_ROLE_PHRASES.union({"software engineer", "software developer"})) and (
             self._has_any_phrase(title_text, INTERNSHIP_TOKENS)
             or self._has_any_phrase(title_text, NEW_GRAD_TOKENS)
         ):
             return True
 
-        return self._has_any_phrase(combined_text, {"software engineer", "software developer"})
+        return False
 
     def _has_internship_signal(self, text: str) -> bool:
         return self._has_any_phrase(text, INTERNSHIP_TOKENS)
@@ -276,8 +306,21 @@ class JobFilter:
             if parsed_age is not None:
                 return parsed_age
         if job.posted_date:
-            return self._parse_posted_date(job.posted_date)
+            return self._posted_date_age_hours(job.posted_date)
         return None
+
+    def _is_zero_day_role(self, job: JobPosting) -> bool:
+        raw_age = str(job.raw_data.get("age", "")).strip().lower()
+        if raw_age:
+            parsed_age = self._parse_relative_age(raw_age)
+            return parsed_age is not None and parsed_age < 24
+        if not job.posted_date:
+            return False
+        posted_at = self._parse_posted_datetime(job.posted_date)
+        if posted_at is None:
+            return False
+        schedule_tz = ZoneInfo(self.config.schedule_timezone)
+        return posted_at.astimezone(schedule_tz).date() == datetime.now(schedule_tz).date()
 
     def _parse_relative_age(self, value: str) -> Optional[float]:
         if value in {"today", "new", "just now"}:
@@ -299,12 +342,11 @@ class JobFilter:
             return amount / 60.0
         return None
 
-    def _parse_posted_date(self, value: str) -> Optional[float]:
+    def _parse_posted_datetime(self, value: str) -> Optional[datetime]:
         raw = str(value).strip()
         if not raw:
             return None
 
-        parsed: Optional[datetime] = None
         if raw.isdigit():
             timestamp = int(raw)
             if timestamp > 10_000_000_000:
@@ -322,6 +364,12 @@ class JobFilter:
 
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+
+    def _posted_date_age_hours(self, value: str) -> Optional[float]:
+        parsed = self._parse_posted_datetime(value)
+        if parsed is None:
+            return None
 
         age = datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)
         return max(age.total_seconds() / 3600, 0.0)

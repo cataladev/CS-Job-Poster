@@ -282,6 +282,28 @@ class Database:
             rows = cursor.fetchall()
         return [self._row_to_canonical(row) for row in rows]
 
+    async def get_posted_candidates(
+        self,
+        *,
+        channel_id: int,
+        track: str,
+        normalized_company: str,
+    ) -> List[CanonicalJob]:
+        async with self._lock:
+            cursor = self._connection.execute(
+                """
+                SELECT DISTINCT c.*
+                FROM canonical_jobs c
+                JOIN discord_posts d ON d.canonical_id = c.id
+                WHERE d.channel_id = ? AND c.track = ? AND c.normalized_company = ?
+                ORDER BY c.last_seen DESC
+                LIMIT 100
+                """,
+                (str(channel_id), track, normalized_company),
+            )
+            rows = cursor.fetchall()
+        return [self._row_to_canonical(row) for row in rows]
+
     async def save_job(
         self,
         job: JobPosting,

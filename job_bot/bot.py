@@ -163,12 +163,12 @@ async def run_bot() -> None:
         ]
         await ctx.send("\n".join(lines))
 
-    @bot.command(name="helpjobs")
-    async def helpjobs(ctx: commands.Context) -> None:
+    async def _send_helpjobs(ctx: commands.Context) -> None:
         await ctx.send(
             "\n".join(
                 [
                     "!ping - health check",
+                    "!help - show this help message",
                     "!runjobs - trigger a manual discovery run",
                     "!stats - show stored job stats",
                     "!sources - list configured sources",
@@ -179,6 +179,14 @@ async def run_bot() -> None:
                 ]
             )
         )
+
+    @bot.command(name="help")
+    async def help_command(ctx: commands.Context) -> None:
+        await _send_helpjobs(ctx)
+
+    @bot.command(name="helpjobs")
+    async def helpjobs(ctx: commands.Context) -> None:
+        await _send_helpjobs(ctx)
 
     try:
         await bot.start(config.discord_token)
