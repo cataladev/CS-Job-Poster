@@ -86,6 +86,7 @@ def load_config() -> AppConfig:
         request_retries=int(os.getenv("REQUEST_RETRIES", "2")),
         source_concurrency=int(os.getenv("SOURCE_CONCURRENCY", "6")),
         publish_delay_seconds=float(os.getenv("PUBLISH_DELAY_SECONDS", "1.0")),
+        max_job_age_hours=int(os.getenv("MAX_JOB_AGE_HOURS", "24")),
         user_agent=os.getenv(
             "USER_AGENT",
             "internship-aggregator-bot/1.0 (+https://github.com/SimplifyJobs)",

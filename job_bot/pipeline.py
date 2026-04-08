@@ -61,15 +61,16 @@ class JobPipeline:
                 priority_results = await source_manager.run_priority_sources()
                 stats.sources_checked += len(priority_results)
                 candidate_post_ids.update(await self._process_results(priority_results, stats))
+                await self._publish_candidates(candidate_post_ids, stats)
 
-                secondary_results = await source_manager.run_secondary_sources()
-                stats.sources_checked += len(secondary_results)
-                candidate_post_ids.update(await self._process_results(secondary_results, stats))
+                async for result in source_manager.iter_secondary_sources():
+                    stats.sources_checked += 1
+                    new_candidate_ids = await self._process_results([result], stats)
+                    if not new_candidate_ids:
+                        continue
+                    candidate_post_ids.update(new_candidate_ids)
+                    await self._publish_candidates(new_candidate_ids, stats)
 
-            canonical_jobs = await self.database.get_canonical_jobs(sorted(candidate_post_ids))
-            posted_ids = await self.publisher.publish_jobs(canonical_jobs)
-            stats.jobs_posted = len(posted_ids)
-            stats.posted_canonical_ids.extend(posted_ids)
             stats.finished_at = utc_now()
             return stats
 
@@ -127,6 +128,17 @@ class JobPipeline:
                 error="; ".join(result.errors) if result.errors else None,
             )
         return candidate_post_ids
+
+    async def _publish_candidates(self, canonical_ids: Set[int], stats: RunStats) -> None:
+        pending_ids = set(canonical_ids) - set(stats.posted_canonical_ids)
+        if not pending_ids:
+            return
+        canonical_jobs = await self.database.get_canonical_jobs(sorted(pending_ids))
+        posted_ids = await self.publisher.publish_jobs(canonical_jobs)
+        if not posted_ids:
+            return
+        stats.jobs_posted += len(posted_ids)
+        stats.posted_canonical_ids.extend(posted_ids)
 
     async def _discover_seed(self, job: JobPosting) -> None:
         urls = [job.canonical_url or job.url] + list(job.alternate_urls)

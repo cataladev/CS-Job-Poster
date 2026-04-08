@@ -13,6 +13,7 @@ ASHBY_UUID_RE = re.compile(r"/([0-9a-fA-F-]{32,36})/(?:application|job)?/?$")
 ICIMS_JOB_RE = re.compile(r"/jobs?/(\d+)")
 SMARTRECRUITERS_RE = re.compile(r"/([0-9]{9,})/?$")
 RIPPLING_RE = re.compile(r"/jobs?/([0-9a-fA-F-]{8,36})")
+LOCALE_RE = re.compile(r"^[a-z]{2}(?:-[A-Z]{2})?$")
 
 
 @dataclass
@@ -80,7 +81,8 @@ def extract_board_seed(url: str, track: str) -> Optional[ExtractedSeed]:
 
     if "myworkdayjobs.com" in parsed.netloc and parts:
         tenant = parsed.netloc.split(".")[0]
-        site = parts[0]
+        site_index = 1 if len(parts) > 1 and LOCALE_RE.match(parts[0]) else 0
+        site = parts[site_index]
         token = json.dumps({"host": parsed.netloc, "tenant": tenant, "site": site}, sort_keys=True)
         return ExtractedSeed("workday", token, track, url)
 

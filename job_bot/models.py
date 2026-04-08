@@ -135,6 +135,7 @@ class AppConfig:
     request_retries: int
     source_concurrency: int
     publish_delay_seconds: float
+    max_job_age_hours: int
     user_agent: str
     source_settings: Dict[str, SourceSettings]
 

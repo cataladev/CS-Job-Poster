@@ -76,6 +76,7 @@ See `.env.example`. Important values:
 - `ENABLE_NEW_GRAD_SOURCE`
 - `ENABLED_SOURCES`
 - `SOURCE_CONFIG_PATH`
+- `MAX_JOB_AGE_HOURS`
 
 ## Install and Run
 
@@ -186,6 +187,8 @@ For local runtime testing:
 source .venv/bin/activate
 python bot.py
 ```
+
+With the current defaults, the bot only publishes jobs with a known age of `24` hours or less. GitHub rows use the Simplify `Age` column when present, and ATS sources fall back to their `posted_date` metadata.
 
 If you hit `discord.errors.PrivilegedIntentsRequired`, enable Message Content Intent for the bot in the Discord developer portal and restart it.
 
