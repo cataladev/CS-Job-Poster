@@ -1,0 +1,12 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "job-bot"
+version = "0.1.0"
+description = "GitHub-first internship aggregator Discord bot"
+requires-python = ">=3.11"
+
+[tool.setuptools.packages.find]
+include = ["job_bot*"]

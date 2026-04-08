@@ -1,0 +1,144 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+@dataclass
+class JobPosting:
+    title: str
+    company: str
+    locations: List[str]
+    source_name: str
+    track: str
+    url: str
+    source_job_id: Optional[str] = None
+    canonical_url: Optional[str] = None
+    summary: str = ""
+    posted_date: Optional[str] = None
+    date_found: datetime = field(default_factory=utc_now)
+    internship_season: Optional[str] = None
+    season_term: Optional[str] = None
+    employment_type: Optional[str] = None
+    remote_status: str = "unknown"
+    source_priority: int = 100
+    raw_data: Dict[str, Any] = field(default_factory=dict)
+    status: str = "active"
+    normalized_company: str = ""
+    normalized_title: str = ""
+    normalized_locations: List[str] = field(default_factory=list)
+    canonical_location: str = ""
+    external_ids: Dict[str, str] = field(default_factory=dict)
+    alternate_urls: List[str] = field(default_factory=list)
+    row_hash: Optional[str] = None
+    dedupe_fingerprint: Optional[str] = None
+
+    @property
+    def location_display(self) -> str:
+        if not self.locations:
+            return "Unknown"
+        return " | ".join(self.locations)
+
+
+@dataclass
+class CanonicalJob:
+    id: Optional[int]
+    track: str
+    title: str
+    company: str
+    location: str
+    canonical_url: str
+    summary: str
+    season_term: Optional[str]
+    employment_type: Optional[str]
+    remote_status: str
+    status: str
+    normalized_company: str
+    normalized_title: str
+    normalized_locations: List[str]
+    dedupe_fingerprint: str
+    source_names: List[str]
+    first_seen: datetime
+    last_seen: datetime
+
+
+@dataclass
+class DedupeDecision:
+    is_duplicate: bool
+    canonical_id: Optional[int]
+    reason: str
+    score: Optional[float] = None
+    matched_job: Optional[CanonicalJob] = None
+
+
+@dataclass
+class SourceResult:
+    source_name: str
+    track: str
+    jobs: List[JobPosting]
+    fetched_at: datetime = field(default_factory=utc_now)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    errors: List[str] = field(default_factory=list)
+    skipped: bool = False
+
+
+@dataclass
+class RunStats:
+    started_at: datetime = field(default_factory=utc_now)
+    finished_at: Optional[datetime] = None
+    sources_checked: int = 0
+    jobs_fetched: int = 0
+    jobs_filtered: int = 0
+    duplicates_removed: int = 0
+    jobs_posted: int = 0
+    jobs_new: int = 0
+    errors: List[str] = field(default_factory=list)
+    posted_canonical_ids: List[int] = field(default_factory=list)
+
+
+@dataclass
+class SourceSettings:
+    name: str
+    source_type: str
+    enabled: bool
+    priority: int
+    track: str
+    experimental: bool = False
+    settings: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class AppConfig:
+    discord_token: str
+    discord_channel_id: int
+    discord_new_grad_channel_id: Optional[int]
+    cron_interval_minutes: int
+    sqlite_db_path: str
+    remote_only: bool
+    us_only: bool
+    include_coops: bool
+    season_filter: List[str]
+    company_blacklist: List[str]
+    keyword_allowlist: List[str]
+    keyword_denylist: List[str]
+    enable_playwright: bool
+    log_level: str
+    enabled_sources: List[str]
+    source_config_path: str
+    enable_new_grad_source: bool
+    request_timeout_seconds: int
+    request_retries: int
+    source_concurrency: int
+    publish_delay_seconds: float
+    user_agent: str
+    source_settings: Dict[str, SourceSettings]
+
+    def channel_id_for_track(self, track: str) -> Optional[int]:
+        if track == "new_grad":
+            return self.discord_new_grad_channel_id
+        return self.discord_channel_id
