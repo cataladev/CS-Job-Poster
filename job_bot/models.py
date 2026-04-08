@@ -35,6 +35,7 @@ class JobPosting:
     canonical_location: str = ""
     external_ids: Dict[str, str] = field(default_factory=dict)
     alternate_urls: List[str] = field(default_factory=list)
+    provenance_tags: List[str] = field(default_factory=list)
     row_hash: Optional[str] = None
     dedupe_fingerprint: Optional[str] = None
 
@@ -63,8 +64,59 @@ class CanonicalJob:
     normalized_locations: List[str]
     dedupe_fingerprint: str
     source_names: List[str]
+    provenance_tags: List[str]
     first_seen: datetime
     last_seen: datetime
+
+
+@dataclass
+class WatchlistCompany:
+    id: int
+    company: str
+    normalized_company: str
+    careers_url: str
+    homepage_url: str
+    country: str
+    categories: List[str]
+    tier: str
+    scan_cadence: str
+    tracks: List[str]
+    seed_source: str
+    notes: str
+    active: bool
+    last_scan_at: Optional[datetime]
+    next_scan_at: Optional[datetime]
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass
+class CompanyRequest:
+    id: int
+    company: str
+    normalized_company: str
+    careers_url: str
+    requester_user_id: str
+    requester_channel_id: str
+    status: str
+    admin_notes: str
+    approver_user_id: Optional[str]
+    watchlist_company_id: Optional[int]
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass
+class CompanyScanTarget:
+    id: int
+    company_id: int
+    target_type: str
+    locator: Dict[str, Any]
+    confidence: float
+    active: bool
+    verified_at: Optional[datetime]
+    created_at: datetime
+    updated_at: datetime
 
 
 @dataclass
@@ -139,6 +191,8 @@ class AppConfig:
     publish_delay_seconds: float
     max_job_age_hours: int
     user_agent: str
+    discord_admin_role_ids: List[int]
+    company_seed_path: str
     source_settings: Dict[str, SourceSettings]
 
     def channel_id_for_track(self, track: str) -> Optional[int]:

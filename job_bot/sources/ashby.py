@@ -9,18 +9,92 @@ from bs4 import BeautifulSoup
 from job_bot.models import JobPosting, SourceResult
 from job_bot.sources.base import BaseSource, SourceContext
 from job_bot.utils.html import collapse_whitespace
+from job_bot.watchlist import TrackClassifier, WatchlistService, next_scan_at_for_cadence
 
 
 class AshbySource(BaseSource):
     async def fetch(self, context: SourceContext) -> SourceResult:
         tokens = await self._board_tokens(context)
+        watchlist_targets = await context.database.get_due_company_scan_targets(
+            target_type="ashby",
+            track=self.track,
+            limit=int(self.settings.settings.get("limit", 250)),
+        )
+        classifier = TrackClassifier()
+        watchlist_service = WatchlistService(context.config, context.database)
         jobs: List[JobPosting] = []
+        errors: List[str] = []
+        seen: Set[str] = set()
+
         for token in tokens:
-            board_url = f"https://jobs.ashbyhq.com/{token}"
-            html_text, _, _ = await context.http_client.get_text(board_url)
-            parsed_jobs = self._parse_board(board_url, token, html_text)
-            jobs.extend(parsed_jobs)
-        return SourceResult(self.name, self.track, jobs, metadata={"boards": len(tokens)})
+            seen.add(token)
+            try:
+                jobs.extend(await self._fetch_board(context, token, classifier))
+            except Exception as exc:  # pragma: no cover
+                errors.append(f"{token}: {exc}")
+
+        for target in watchlist_targets:
+            locator = json.loads(target["locator"])
+            token = locator["token"]
+            if token in seen:
+                continue
+            metadata = watchlist_service.build_watchlist_metadata(target)
+            try:
+                target_jobs = await self._fetch_board(
+                    context,
+                    token,
+                    classifier,
+                    company_name=target["company"],
+                    metadata=metadata,
+                )
+                jobs.extend(target_jobs)
+                await context.database.mark_watchlist_company_scanned(
+                    company_id=int(target["company_id"]),
+                    track=self.track,
+                    target_type="ashby",
+                    jobs_found=len(target_jobs),
+                    success=True,
+                    next_scan_at=next_scan_at_for_cadence(target["scan_cadence"]),
+                )
+            except Exception as exc:  # pragma: no cover
+                errors.append(f"{target['company']}: {exc}")
+                await context.database.mark_watchlist_company_scanned(
+                    company_id=int(target["company_id"]),
+                    track=self.track,
+                    target_type="ashby",
+                    jobs_found=0,
+                    success=False,
+                    next_scan_at=next_scan_at_for_cadence(target["scan_cadence"]),
+                    error=str(exc),
+                )
+
+        return SourceResult(
+            self.name,
+            self.track,
+            jobs,
+            metadata={"boards": len(tokens) + len(watchlist_targets)},
+            errors=errors,
+        )
+
+    async def _fetch_board(
+        self,
+        context: SourceContext,
+        token: str,
+        classifier: TrackClassifier,
+        *,
+        company_name: str | None = None,
+        metadata: Dict[str, Any] | None = None,
+    ) -> List[JobPosting]:
+        board_url = f"https://jobs.ashbyhq.com/{token}"
+        html_text, _, _ = await context.http_client.get_text(board_url)
+        parsed_jobs = self._parse_board(
+            board_url,
+            token,
+            html_text,
+            company_name=company_name,
+            metadata=metadata,
+        )
+        return [job for job in parsed_jobs if classifier.matches(job, self.track)]
 
     async def _board_tokens(self, context: SourceContext) -> List[str]:
         tokens: Set[str] = set(self.settings.settings.get("board_tokens", []))
@@ -28,8 +102,22 @@ class AshbySource(BaseSource):
             tokens.add(row["token"])
         return sorted(tokens)
 
-    def _parse_board(self, board_url: str, token: str, html_text: str) -> List[JobPosting]:
-        jobs = self._extract_from_next_data(board_url, token, html_text)
+    def _parse_board(
+        self,
+        board_url: str,
+        token: str,
+        html_text: str,
+        *,
+        company_name: str | None = None,
+        metadata: Dict[str, Any] | None = None,
+    ) -> List[JobPosting]:
+        jobs = self._extract_from_next_data(
+            board_url,
+            token,
+            html_text,
+            company_name=company_name,
+            metadata=metadata,
+        )
         if jobs:
             return jobs
 
@@ -51,19 +139,28 @@ class AshbySource(BaseSource):
             found.append(
                 JobPosting(
                     title=title,
-                    company=self._display_name(token),
+                    company=company_name or self._display_name(token),
                     locations=[location or "Unknown"],
                     source_name=self.name,
                     track=self.track,
                     url=absolute,
                     canonical_url=absolute.replace("/application", ""),
                     summary="",
-                    raw_data={"board_token": token},
+                    raw_data={"board_token": token, **(metadata or {})},
+                    provenance_tags=list((metadata or {}).get("watchlist_tags", [])),
                 )
             )
         return found
 
-    def _extract_from_next_data(self, board_url: str, token: str, html_text: str) -> List[JobPosting]:
+    def _extract_from_next_data(
+        self,
+        board_url: str,
+        token: str,
+        html_text: str,
+        *,
+        company_name: str | None = None,
+        metadata: Dict[str, Any] | None = None,
+    ) -> List[JobPosting]:
         soup = BeautifulSoup(html_text, "html.parser")
         script = soup.find("script", id="__NEXT_DATA__")
         if not script or not script.string:
@@ -102,7 +199,7 @@ class AshbySource(BaseSource):
             jobs.append(
                 JobPosting(
                     title=collapse_whitespace(title),
-                    company=self._display_name(token),
+                    company=company_name or self._display_name(token),
                     locations=[location or "Unknown"],
                     source_name=self.name,
                     track=self.track,
@@ -111,7 +208,8 @@ class AshbySource(BaseSource):
                     source_job_id=item.get("id"),
                     summary="",
                     employment_type=item.get("employmentType"),
-                    raw_data={"board_token": token, "raw": item},
+                    raw_data={"board_token": token, "raw": item, **(metadata or {})},
+                    provenance_tags=list((metadata or {}).get("watchlist_tags", [])),
                 )
             )
         return jobs
@@ -130,4 +228,3 @@ class AshbySource(BaseSource):
 
     def _display_name(self, token: str) -> str:
         return token.replace("-", " ").replace("_", " ").title()
-

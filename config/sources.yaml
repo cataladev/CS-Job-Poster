@@ -23,11 +23,32 @@ sources:
         files:
           - README.md
 
+  company_watchlist_internship:
+    type: company_pages
+    enabled: true
+    priority: 5
+    track: internship
+    limit: 175
+
+  company_watchlist_new_grad:
+    type: company_pages
+    enabled: true
+    priority: 5
+    track: new_grad
+    limit: 175
+
   greenhouse:
     type: greenhouse
     enabled: true
     priority: 10
     track: internship
+    board_tokens: []
+
+  greenhouse_new_grad:
+    type: greenhouse
+    enabled: true
+    priority: 10
+    track: new_grad
     board_tokens: []
 
   lever:
@@ -37,6 +58,13 @@ sources:
     track: internship
     board_tokens: []
 
+  lever_new_grad:
+    type: lever
+    enabled: true
+    priority: 10
+    track: new_grad
+    board_tokens: []
+
   ashby:
     type: ashby
     enabled: true
@@ -44,11 +72,26 @@ sources:
     track: internship
     board_tokens: []
 
+  ashby_new_grad:
+    type: ashby
+    enabled: true
+    priority: 10
+    track: new_grad
+    board_tokens: []
+
   workday:
     type: workday
     enabled: true
     priority: 12
     track: internship
+    board_tokens: []
+    page_size: 20
+
+  workday_new_grad:
+    type: workday
+    enabled: true
+    priority: 12
+    track: new_grad
     board_tokens: []
     page_size: 20
 
@@ -67,13 +110,6 @@ sources:
     track: internship
     listing_urls:
       - https://wellfound.com/jobs?query=software%20engineer%20intern
-
-  company_pages:
-    type: company_pages
-    enabled: true
-    priority: 30
-    track: internship
-    pages: []
 
   linkedin:
     type: linkedin

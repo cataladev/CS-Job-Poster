@@ -31,6 +31,7 @@ def _canonical_job(
         normalized_locations=normalized_locations or ["new york ny"],
         dedupe_fingerprint=f"fingerprint-{job_id}",
         source_names=["github_simplify_internships"],
+        provenance_tags=[],
         first_seen=datetime.now(timezone.utc),
         last_seen=datetime.now(timezone.utc),
     )
