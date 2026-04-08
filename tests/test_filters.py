@@ -160,3 +160,48 @@ def test_filter_rejects_generic_ai_intern_titles(config_factory) -> None:
     decision = job_filter.evaluate(job)
     assert decision.accepted is False
     assert decision.reason == "non_engineering"
+
+
+def test_filter_rejects_non_us_roles_when_us_only_enabled(config_factory) -> None:
+    config = config_factory()
+    config.us_only = True
+    job_filter = JobFilter(config)
+    job = normalize_job_posting(
+        JobPosting(
+            title="Software Engineer Intern",
+            company="Example",
+            locations=["Toronto, ON"],
+            source_name="github",
+            track="internship",
+            url="https://example.com/job/8",
+            summary="Backend intern role",
+            raw_data={"age": "0d"},
+        )
+    )
+
+    decision = job_filter.evaluate(job)
+
+    assert decision.accepted is False
+    assert decision.reason == "us_only"
+
+
+def test_filter_accepts_us_roles_when_us_only_enabled(config_factory) -> None:
+    config = config_factory()
+    config.us_only = True
+    job_filter = JobFilter(config)
+    job = normalize_job_posting(
+        JobPosting(
+            title="Software Engineer Intern",
+            company="Example",
+            locations=["United States"],
+            source_name="github",
+            track="internship",
+            url="https://example.com/job/9",
+            summary="Backend intern role",
+            raw_data={"age": "0d"},
+        )
+    )
+
+    decision = job_filter.evaluate(job)
+
+    assert decision.accepted is True

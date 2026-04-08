@@ -131,3 +131,18 @@ def test_build_embed_sets_thumbnail_when_logo_url_present(config_factory) -> Non
     )
 
     assert embed.thumbnail.url == "https://www.google.com/s2/favicons?sz=128&domain_url=https%3A%2F%2Fopenai.com"
+
+
+def test_build_embed_uses_troll_emoji_when_logo_url_missing(config_factory) -> None:
+    publisher = DiscordPublisher(config_factory(), database=None)  # type: ignore[arg-type]
+    job = _canonical_job(
+        job_id=4,
+        title="Software Engineer Intern",
+        normalized_title="software engineer intern",
+        canonical_url="https://example.com/jobs/4",
+    )
+
+    embed = publisher._build_embed(job, logo_url=None)
+
+    company_field = next(field for field in embed.fields if field.name == "Company")
+    assert company_field.value == "🧌 Stripe"
