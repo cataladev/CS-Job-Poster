@@ -40,6 +40,7 @@ async def test_pipeline_posts_one_canonical_job_for_duplicates(config_factory, m
                             track="internship",
                             url="https://linkedin.example/jobs/1",
                             summary="Summer 2026 internship",
+                            raw_data={"age": "0d"},
                         )
                     ],
                 )
@@ -59,10 +60,15 @@ async def test_pipeline_posts_one_canonical_job_for_duplicates(config_factory, m
                             track="internship",
                             url="https://job-boards.greenhouse.io/stripe/jobs/12345",
                             summary="Summer 2026 internship",
+                            raw_data={"age": "0d"},
                         )
                     ],
                 )
             ]
+
+        async def iter_secondary_sources(self):
+            for result in await self.run_secondary_sources():
+                yield result
 
     monkeypatch.setattr("job_bot.pipeline.SourceManager", FakeSourceManager)
 
@@ -72,4 +78,3 @@ async def test_pipeline_posts_one_canonical_job_for_duplicates(config_factory, m
     assert stats.jobs_posted == 1
     assert len(publisher.jobs) == 1
     assert persisted["total_canonical_jobs"] == 1
-

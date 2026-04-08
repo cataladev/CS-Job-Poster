@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 from typing import List
 
 from job_bot.models import RunStats, SourceResult
@@ -32,6 +33,21 @@ class SourceManager:
                 continue
             tasks.append(self._fetch_with_limit(semaphore, source))
         return await asyncio.gather(*tasks) if tasks else []
+
+    async def iter_secondary_sources(self) -> AsyncIterator[SourceResult]:
+        semaphore = asyncio.Semaphore(self.context.config.source_concurrency)
+        tasks = [
+            asyncio.create_task(self._fetch_with_limit(semaphore, source))
+            for source in self.list_enabled_sources()
+            if source.phase != "priority"
+        ]
+        try:
+            for task in asyncio.as_completed(tasks):
+                yield await task
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
 
     async def _fetch_with_limit(self, semaphore: asyncio.Semaphore, source: BaseSource) -> SourceResult:
         async with semaphore:

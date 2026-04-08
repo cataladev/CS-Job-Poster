@@ -51,15 +51,18 @@ async def run_bot() -> None:
 
     @bot.command(name="runjobs")
     async def runjobs(ctx: commands.Context) -> None:
-        message = await ctx.send("Running job discovery pipeline...")
+        message = await ctx.send(
+            "Running job discovery pipeline. New jobs will post as sources finish."
+        )
         stats = await pipeline.run(trigger="manual")
-        await message.edit(
-            content=(
+        await ctx.send(
+            (
                 f"Run complete. fetched={stats.jobs_fetched} filtered={stats.jobs_filtered} "
                 f"duplicates={stats.duplicates_removed} posted={stats.jobs_posted} "
                 f"errors={len(stats.errors)}"
             )
         )
+        await message.delete()
 
     @bot.command(name="stats")
     async def stats_command(ctx: commands.Context) -> None:
