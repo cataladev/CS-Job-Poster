@@ -457,6 +457,22 @@ class Database:
                 (normalized, normalized),
             ).fetchone()
 
+    async def get_company_branding(self, normalized_company: str) -> Optional[sqlite3.Row]:
+        async with self._lock:
+            return self._connection.execute(
+                """
+                SELECT company, normalized_company, homepage_url, careers_url
+                FROM company_watchlist
+                WHERE normalized_company = ?
+                ORDER BY
+                    CASE WHEN homepage_url <> '' THEN 0 ELSE 1 END,
+                    active DESC,
+                    updated_at DESC
+                LIMIT 1
+                """,
+                (normalized_company,),
+            ).fetchone()
+
     async def get_due_watchlist_companies(
         self,
         *,
