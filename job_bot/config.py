@@ -24,6 +24,18 @@ def _parse_csv(value: Optional[str]) -> List[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+def _parse_int_csv(value: Optional[str], default: List[int]) -> List[int]:
+    if not value:
+        return default
+    parsed: List[int] = []
+    for item in value.split(","):
+        token = item.strip()
+        if not token:
+            continue
+        parsed.append(int(token))
+    return parsed or default
+
+
 def _load_yaml(path: Path) -> Dict[str, Any]:
     if not path.exists():
         return {}
@@ -67,6 +79,8 @@ def load_config() -> AppConfig:
         discord_channel_id=int(os.getenv("DISCORD_CHANNEL_ID", "0")),
         discord_new_grad_channel_id=int(new_grad_channel_id) if new_grad_channel_id else None,
         cron_interval_minutes=int(os.getenv("CRON_INTERVAL_MINUTES", "30")),
+        scheduled_run_hours=_parse_int_csv(os.getenv("SCHEDULED_RUN_HOURS"), [12, 20]),
+        schedule_timezone=os.getenv("SCHEDULE_TIMEZONE", "America/New_York"),
         sqlite_db_path=os.getenv("SQLITE_DB_PATH", "job_bot.db"),
         remote_only=_parse_bool(os.getenv("REMOTE_ONLY")),
         us_only=_parse_bool(os.getenv("US_ONLY")),

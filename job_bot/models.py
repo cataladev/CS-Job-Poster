@@ -118,6 +118,8 @@ class AppConfig:
     discord_channel_id: int
     discord_new_grad_channel_id: Optional[int]
     cron_interval_minutes: int
+    scheduled_run_hours: List[int]
+    schedule_timezone: str
     sqlite_db_path: str
     remote_only: bool
     us_only: bool

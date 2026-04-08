@@ -64,6 +64,8 @@ See `.env.example`. Important values:
 - `DISCORD_CHANNEL_ID`
 - `DISCORD_NEW_GRAD_CHANNEL_ID`
 - `CRON_INTERVAL_MINUTES`
+- `SCHEDULED_RUN_HOURS`
+- `SCHEDULE_TIMEZONE`
 - `SQLITE_DB_PATH`
 - `REMOTE_ONLY`
 - `US_ONLY`
@@ -86,6 +88,8 @@ source .venv/bin/activate
 pip install -r requirements.txt
 python bot.py
 ```
+
+By default the scheduler now runs twice per day at `12:00 PM` and `8:00 PM` in `America/New_York`. You can change those hours with `SCHEDULED_RUN_HOURS`.
 
 ## Source Configuration
 
