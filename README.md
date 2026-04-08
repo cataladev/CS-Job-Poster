@@ -192,7 +192,7 @@ source .venv/bin/activate
 python bot.py
 ```
 
-With the current defaults, the bot only publishes jobs with a known age of `24` hours or less. GitHub rows use the Simplify `Age` column when present, and ATS sources fall back to their `posted_date` metadata.
+With the current defaults, the bot only publishes jobs with a known age of `0d`, meaning the posting is from today. GitHub rows use the Simplify `Age` column when present, and ATS sources fall back to their `posted_date` metadata.
 
 If you hit `discord.errors.PrivilegedIntentsRequired`, enable Message Content Intent for the bot in the Discord developer portal and restart it.
 
