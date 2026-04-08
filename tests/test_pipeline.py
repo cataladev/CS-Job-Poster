@@ -78,3 +78,9 @@ async def test_pipeline_posts_one_canonical_job_for_duplicates(config_factory, m
     assert stats.jobs_posted == 1
     assert len(publisher.jobs) == 1
     assert persisted["total_canonical_jobs"] == 1
+
+
+def test_track_channel_routing(config_factory) -> None:
+    config = config_factory()
+    assert config.channel_id_for_track("internship") == 111
+    assert config.channel_id_for_track("new_grad") == 222
