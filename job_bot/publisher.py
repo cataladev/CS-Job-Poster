@@ -64,6 +64,12 @@ class DiscordPublisher:
         embed.add_field(name="Location", value=job.location or "Unknown", inline=True)
         embed.add_field(name="Track", value=job.track.replace("_", " ").title(), inline=True)
         embed.add_field(name="Source(s)", value=", ".join(job.source_names) or "Unknown", inline=False)
+        if job.provenance_tags:
+            embed.add_field(
+                name="Watchlist",
+                value=", ".join(job.provenance_tags),
+                inline=False,
+            )
         embed.add_field(
             name="Season",
             value=job.season_term or "Unknown",

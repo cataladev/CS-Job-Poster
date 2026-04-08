@@ -8,19 +8,20 @@ Production-oriented Python Discord bot that ingests high-signal internship feeds
   - `SimplifyJobs/Summer2026-Internships`
   - `SimplifyJobs/New-Grad-Positions`
 - Async source architecture using `aiohttp`
+- Watchlist-first company discovery after the GitHub passes, backed by a seed snapshot and user-request flow
 - Fixed run pipeline:
   1. GitHub Simplify repos
   2. Normalize and dedupe
-  3. Auto-discover ATS seeds from apply URLs
-  4. Query downstream sources
+  3. Sync approved watchlist companies and due scan targets
+  4. Query downstream ATS and company-page sources
   5. Global dedupe
   6. Post only new canonical jobs
 - Strong layered deduplication:
   - canonical URL and external job IDs
   - strong fingerprint on normalized company/title/season/location
   - fuzzy fallback via RapidFuzz
-- SQLite persistence for canonical jobs, variants, fingerprints, Discord posts, source history, dedupe matches, GitHub state, and discovered board seeds
-- Discord commands for health, manual runs, stats, recent jobs, sources, dedupe checks, and summaries
+- SQLite persistence for canonical jobs, variants, fingerprints, Discord posts, source history, dedupe matches, GitHub state, discovered board seeds, company watchlist entries, requests, scan targets, and scan history
+- Discord commands for health, manual runs, stats, recent jobs, sources, dedupe checks, summaries, and company watchlist management
 
 ## Project Layout
 
@@ -63,10 +64,12 @@ See `.env.example`. Important values:
 - `DISCORD_TOKEN`
 - `DISCORD_CHANNEL_ID`
 - `DISCORD_NEW_GRAD_CHANNEL_ID`
+- `DISCORD_ADMIN_ROLE_IDS`
 - `CRON_INTERVAL_MINUTES`
 - `SCHEDULED_RUN_HOURS`
 - `SCHEDULE_TIMEZONE`
 - `SQLITE_DB_PATH`
+- `COMPANY_SEED_PATH`
 - `REMOTE_ONLY`
 - `US_ONLY`
 - `INCLUDE_COOPS`
@@ -100,9 +103,26 @@ By default the scheduler now runs twice per day at `12:00 PM` and `8:00 PM` in `
 - track routing (`internship` vs `new_grad`)
 - static board seeds
 - listing URLs for HTML-based sources
-- company career pages
+- watchlist-backed company page scanning
 
 The bot also auto-discovers `greenhouse`, `lever`, `ashby`, and `workday` seeds from GitHub apply URLs and stores them in SQLite, so downstream coverage expands automatically over time.
+
+## Company Watchlist
+
+- The repo includes a seeded watchlist snapshot at [`data/company_watchlist_seed.csv`](/Users/carlos/Development/Job%20Bot/data/company_watchlist_seed.csv).
+- The snapshot is imported on startup and with `!synccompanies`.
+- Approved watchlist companies create resolved scan targets such as `greenhouse`, `lever`, `ashby`, `workday`, or generic `company_page`.
+- Requested and top-tier companies scan every run. The long tail is staggered with `2d` and `7d` cadences.
+
+Company commands:
+
+- `!requestcompany <company> | <careers_url>`
+- `!companyrequests [pending|approved|denied|all]`
+- `!approvecompany <request_id>`
+- `!denycompany <request_id> [reason]`
+- `!companies [query]`
+- `!companyinfo <company|id>`
+- `!synccompanies`
 
 Note: the live SimplifyJobs repositories currently resolve from the `dev` branch in `config/sources.yaml`. If those repos change their default branch later, update the branch setting there.
 

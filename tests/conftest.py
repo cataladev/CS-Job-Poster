@@ -36,6 +36,8 @@ def config_factory(tmp_path):
             publish_delay_seconds=0.0,
             max_job_age_hours=0,
             user_agent="test-agent",
+            discord_admin_role_ids=[999],
+            company_seed_path=str(tmp_path / "company_watchlist_seed.csv"),
             source_settings=source_settings or {},
         )
 

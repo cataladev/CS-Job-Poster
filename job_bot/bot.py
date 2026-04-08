@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections import Counter
 from typing import List
@@ -16,6 +17,7 @@ from job_bot.publisher import DiscordPublisher
 from job_bot.scheduler import BotScheduler
 from job_bot.sources import build_sources
 from job_bot.utils.normalization import canonicalize_url
+from job_bot.watchlist import WatchlistService
 
 
 async def run_bot() -> None:
@@ -30,6 +32,14 @@ async def run_bot() -> None:
 
     database = Database(config.sqlite_db_path)
     await database.initialize()
+    watchlist_service = WatchlistService(config, database)
+    seed_stats = await watchlist_service.sync_seed()
+    logger.info(
+        "Watchlist seed sync complete: rows=%s companies=%s targets=%s",
+        seed_stats["rows"],
+        seed_stats["companies_upserted"],
+        seed_stats["targets_upserted"],
+    )
 
     publisher = DiscordPublisher(config, database)
     pipeline = JobPipeline(config, database, publisher)
@@ -44,6 +54,26 @@ async def run_bot() -> None:
     async def on_ready() -> None:
         logger.info("Bot ready as %s", bot.user)
         scheduler.start()
+
+    def _is_admin(ctx: commands.Context) -> bool:
+        if getattr(ctx.author, "guild_permissions", None) and ctx.author.guild_permissions.manage_guild:
+            return True
+        author_role_ids = {role.id for role in getattr(ctx.author, "roles", [])}
+        return bool(author_role_ids.intersection(set(config.discord_admin_role_ids)))
+
+    def _require_admin(ctx: commands.Context) -> bool:
+        if _is_admin(ctx):
+            return True
+        raise commands.CheckFailure("Admin access required.")
+
+    @bot.event
+    async def on_command_error(ctx: commands.Context, error: Exception) -> None:
+        if isinstance(error, commands.CheckFailure):
+            await ctx.send(str(error))
+            return
+        if isinstance(error, commands.CommandNotFound):
+            return
+        raise error
 
     @bot.command(name="ping")
     async def ping(ctx: commands.Context) -> None:
@@ -173,6 +203,13 @@ async def run_bot() -> None:
                     "!stats - show stored job stats",
                     "!sources - list configured sources",
                     "!recent - show the most recent jobs",
+                    "!requestcompany <company> | <careers_url> - request a company",
+                    "!companyrequests [pending|approved|denied|all] - admin request queue",
+                    "!approvecompany <request_id> - approve a company request",
+                    "!denycompany <request_id> [reason] - deny a company request",
+                    "!companies [query] - list watchlist companies",
+                    "!companyinfo <company|id> - show watchlist details",
+                    "!synccompanies - reimport the company watchlist seed",
                     "!dedupecheck <url or text> - test duplicate detection",
                     "!season [value] - show season filter configuration",
                     "!summary [daily|weekly] - show recent summary stats",
@@ -187,6 +224,115 @@ async def run_bot() -> None:
     @bot.command(name="helpjobs")
     async def helpjobs(ctx: commands.Context) -> None:
         await _send_helpjobs(ctx)
+
+    @bot.command(name="requestcompany")
+    async def requestcompany(ctx: commands.Context, *, value: str) -> None:
+        if "|" not in value:
+            await ctx.send("Use `!requestcompany Company Name | https://company.com/careers`")
+            return
+        company, careers_url = [part.strip() for part in value.split("|", 1)]
+        try:
+            request_id = await watchlist_service.request_company(
+                company=company,
+                careers_url=careers_url,
+                requester_user_id=str(ctx.author.id),
+                requester_channel_id=str(ctx.channel.id),
+            )
+        except ValueError as exc:
+            await ctx.send(str(exc))
+            return
+        await ctx.send(f"Request submitted as #{request_id}: {company}")
+
+    @bot.command(name="companyrequests")
+    async def companyrequests(ctx: commands.Context, status: str = "pending") -> None:
+        _require_admin(ctx)
+        requests = await watchlist_service.list_requests(status=status if status != "all" else None)
+        if not requests:
+            await ctx.send("No company requests found.")
+            return
+        lines = [
+            f"#{row['id']} [{row['status']}] {row['company']} | {row['careers_url']}"
+            for row in requests
+        ]
+        await ctx.send("\n".join(lines[:20]))
+
+    @bot.command(name="approvecompany")
+    async def approvecompany(ctx: commands.Context, request_id: int) -> None:
+        _require_admin(ctx)
+        try:
+            company = await watchlist_service.approve_request(
+                request_id=request_id,
+                approver_user_id=str(ctx.author.id),
+            )
+        except ValueError as exc:
+            await ctx.send(str(exc))
+            return
+        await ctx.send(f"Approved {company['company']} into the watchlist.")
+
+    @bot.command(name="denycompany")
+    async def denycompany(ctx: commands.Context, request_id: int, *, reason: str = "Denied") -> None:
+        _require_admin(ctx)
+        try:
+            await watchlist_service.deny_request(
+                request_id=request_id,
+                approver_user_id=str(ctx.author.id),
+                reason=reason,
+            )
+        except ValueError as exc:
+            await ctx.send(str(exc))
+            return
+        await ctx.send(f"Denied request #{request_id}.")
+
+    @bot.command(name="companies")
+    async def companies(ctx: commands.Context, *, query: str = "") -> None:
+        rows = await watchlist_service.list_companies(query=query, limit=20)
+        if not rows:
+            await ctx.send("No companies matched that query.")
+            return
+        lines = []
+        for row in rows:
+            categories = ", ".join(json.loads(row["categories"] or "[]"))
+            lines.append(
+                f"#{row['id']} {row['company']} [{row['tier']}] {categories} | {row['careers_url']}"
+            )
+        await ctx.send("\n".join(lines))
+
+    @bot.command(name="companyinfo")
+    async def companyinfo(ctx: commands.Context, *, query: str) -> None:
+        result = await watchlist_service.get_company_info(query)
+        if not result:
+            await ctx.send("Company not found in watchlist.")
+            return
+        company = result["company"]
+        targets = result["targets"]
+        target_lines = []
+        for target in targets[:10]:
+            locator = json.loads(target["locator"])
+            display = locator.get("url") or locator.get("token") or locator
+            target_lines.append(f"{target['target_type']}: {display}")
+        await ctx.send(
+            "\n".join(
+                [
+                    f"#{company['id']} {company['company']}",
+                    f"Tier: {company['tier']}",
+                    f"Categories: {', '.join(json.loads(company['categories'] or '[]'))}",
+                    f"Tracks: {', '.join(json.loads(company['tracks'] or '[]'))}",
+                    f"Careers: {company['careers_url']}",
+                    f"Last scan: {company['last_scan_at'] or 'never'}",
+                    f"Next scan: {company['next_scan_at'] or 'now'}",
+                    "Targets: " + (" | ".join(target_lines) if target_lines else "none"),
+                ]
+            )
+        )
+
+    @bot.command(name="synccompanies")
+    async def synccompanies(ctx: commands.Context) -> None:
+        _require_admin(ctx)
+        stats = await watchlist_service.sync_seed()
+        await ctx.send(
+            f"Watchlist sync complete. rows={stats['rows']} companies={stats['companies_upserted']} "
+            f"targets={stats['targets_upserted']}"
+        )
 
     try:
         await bot.start(config.discord_token)
