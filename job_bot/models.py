@@ -169,7 +169,6 @@ class AppConfig:
     discord_token: str
     discord_channel_id: int
     discord_new_grad_channel_id: Optional[int]
-    cron_interval_minutes: int
     scheduled_run_hours: List[int]
     schedule_timezone: str
     sqlite_db_path: str
@@ -180,7 +179,6 @@ class AppConfig:
     company_blacklist: List[str]
     keyword_allowlist: List[str]
     keyword_denylist: List[str]
-    enable_playwright: bool
     log_level: str
     enabled_sources: List[str]
     source_config_path: str

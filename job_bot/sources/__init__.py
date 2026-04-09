@@ -9,10 +9,7 @@ from job_bot.sources.base import BaseSource
 from job_bot.sources.company_pages import CompanyPagesSource
 from job_bot.sources.github_simplify import GitHubSimplifySource
 from job_bot.sources.greenhouse import GreenhouseSource
-from job_bot.sources.handshake import HandshakeSource
-from job_bot.sources.indeed import IndeedSource
 from job_bot.sources.lever import LeverSource
-from job_bot.sources.linkedin import LinkedInSource
 from job_bot.sources.wellfound import WellfoundSource
 from job_bot.sources.workday import WorkdaySource
 from job_bot.sources.yc import YCombinatorSource
@@ -27,9 +24,6 @@ SOURCE_REGISTRY: Dict[str, Type[BaseSource]] = {
     "yc": YCombinatorSource,
     "wellfound": WellfoundSource,
     "company_pages": CompanyPagesSource,
-    "linkedin": LinkedInSource,
-    "indeed": IndeedSource,
-    "handshake": HandshakeSource,
 }
 
 
@@ -41,4 +35,3 @@ def build_sources(config: AppConfig) -> List[BaseSource]:
             continue
         sources.append(source_cls(settings))
     return sorted(sources, key=lambda source: source.priority)
-
