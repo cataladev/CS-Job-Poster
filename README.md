@@ -99,7 +99,6 @@ Important env values:
 - `DISCORD_TOKEN`
 - `DISCORD_CHANNEL_ID`
 - `DISCORD_NEW_GRAD_CHANNEL_ID`
-- `DISCORD_ADMIN_ROLE_IDS`
 - `ENABLE_NEW_GRAD_SOURCE`
 - `SQLITE_DB_PATH`
 - `SCHEDULED_RUN_HOURS`
@@ -197,7 +196,7 @@ Watchlist commands:
 - `!companies [query]`
 - `!companyinfo <company|id>`
 
-Restricted commands:
+Admin-only commands:
 
 - `!runjobs`
 - `!stats`
@@ -210,7 +209,7 @@ Restricted commands:
 - `!denycompany <request_id> [reason]`
 - `!synccompanies`
 
-Restricted access is granted only to members who have at least one role listed in `DISCORD_ADMIN_ROLE_IDS`.
+Admin-only commands require Discord `Administrator` permission in the server.
 
 ## How the Pipeline Works
 

@@ -111,4 +111,4 @@ Please include concrete examples:
 - `job_bot/watchlist.py`
   Keep watchlist imports idempotent and strict about branded homepages.
 - `job_bot/bot.py`
-  Restricted commands should fail before any side effects occur.
+  Admin-only commands should fail before any side effects occur.

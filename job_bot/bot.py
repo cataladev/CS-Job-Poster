@@ -29,27 +29,22 @@ COMPANIES_STOP_EMOJI = "⏹️"
 DEFAULT_PAGE_SIZE = 10
 RECENT_PAGE_SIZE = 8
 HELP_PAGE_SIZE = 8
-DEFAULT_RESTRICTED_ROLE_IDS = {
-    486629374758748180,
-    616312021314437149,
-    1491561308401696778,
-}
 
 
-def user_has_any_allowed_role(user: Any, allowed_role_ids: set[int]) -> bool:
-    author_role_ids = {role.id for role in getattr(user, "roles", [])}
-    return bool(author_role_ids.intersection(allowed_role_ids))
+def user_has_admin_privileges(user: Any) -> bool:
+    permissions = getattr(user, "guild_permissions", None)
+    return bool(permissions and permissions.administrator)
 
 
-def ensure_user_has_allowed_role(user: Any, allowed_role_ids: set[int]) -> bool:
-    if user_has_any_allowed_role(user, allowed_role_ids):
+def ensure_user_has_admin_privileges(user: Any) -> bool:
+    if user_has_admin_privileges(user):
         return True
-    raise commands.CheckFailure("This command requires one of the allowed roles.")
+    raise commands.CheckFailure("This command requires Discord administrator privileges.")
 
 
-def build_restricted_role_check(allowed_role_ids: set[int]):
+def build_admin_only_check():
     def predicate(ctx: commands.Context) -> bool:
-        return ensure_user_has_allowed_role(ctx.author, allowed_role_ids)
+        return ensure_user_has_admin_privileges(ctx.author)
 
     return commands.check(predicate)
 
@@ -243,10 +238,9 @@ async def run_bot() -> None:
             with contextlib.suppress(discord.HTTPException):
                 await message.remove_reaction(reaction.emoji, user)
 
-    allowed_role_ids = set(config.discord_admin_role_ids or DEFAULT_RESTRICTED_ROLE_IDS)
     # Restricted commands use a real command check instead of an in-command guard so
     # unauthorized users never trigger any side effects or interim "working..." messages.
-    restricted_command = build_restricted_role_check(allowed_role_ids)
+    restricted_command = build_admin_only_check()
 
     @bot.event
     async def on_command_error(ctx: commands.Context, error: Exception) -> None:
@@ -404,20 +398,20 @@ async def run_bot() -> None:
         entries = [
             "`!ping` - health check",
             "`!help` - show this help message",
-            "`!runjobs` - trigger a manual discovery run [restricted]",
-            "`!stats` - show stored job stats [restricted]",
-            "`!sources` - list configured sources [restricted]",
+            "`!runjobs` - trigger a manual discovery run [admin only]",
+            "`!stats` - show stored job stats [admin only]",
+            "`!sources` - list configured sources [admin only]",
             "`!recent` - show the most recent jobs",
             "`!requestcompany <company> | <careers_url> | [homepage_url]` - request a company",
-            "`!companyrequests [pending|approved|denied|all]` - request queue [restricted]",
-            "`!approvecompany <request_id>` - approve a company request [restricted]",
-            "`!denycompany <request_id> [reason]` - deny a company request [restricted]",
+            "`!companyrequests [pending|approved|denied|all]` - request queue [admin only]",
+            "`!approvecompany <request_id>` - approve a company request [admin only]",
+            "`!denycompany <request_id> [reason]` - deny a company request [admin only]",
             "`!companies [query]` - list watchlist companies",
             "`!companyinfo <company|id>` - show watchlist details",
-            "`!synccompanies` - reimport the company watchlist seed [restricted]",
-            "`!dedupecheck <url or text>` - test duplicate detection [restricted]",
-            "`!season [value]` - show season filter configuration [restricted]",
-            "`!summary [daily|weekly]` - show recent summary stats [restricted]",
+            "`!synccompanies` - reimport the company watchlist seed [admin only]",
+            "`!dedupecheck <url or text>` - test duplicate detection [admin only]",
+            "`!season [value]` - show season filter configuration [admin only]",
+            "`!summary [daily|weekly]` - show recent summary stats [admin only]",
         ]
         await _send_paginated_entries(
             ctx,
