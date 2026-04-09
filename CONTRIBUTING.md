@@ -11,6 +11,7 @@ If you want to contribute, use this file as the working agreement for local setu
 - Create a local `.env` from [.env.example](/Users/carlos/Development/Job%20Bot/.env.example).
 - Do not commit secrets, tokens, or local database files.
 - Use `DATABASE_URL` for real app runs; keep `SQLITE_DB_PATH` for isolated local test DBs only.
+- If host port `5432` is already taken on your machine, set `POSTGRES_HOST_PORT` and keep `DATABASE_URL` aligned with it.
 
 ## Local Setup
 
@@ -25,10 +26,17 @@ Useful commands:
 
 ```bash
 source .venv/bin/activate
-python bot.py
+make postgres-up
+make db-migrate
+make dev-postgres
 pytest tests -q
 PYTHONPYCACHEPREFIX=.pycache python3 -m py_compile $(find job_bot tests -name '*.py' -print) bot.py
 ```
+
+Notes:
+
+- `make dev-postgres` is the preferred local run path.
+- `python bot.py` is only the underlying entrypoint once your env and database are already set up.
 
 If your shell has temp-dir issues:
 

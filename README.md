@@ -25,6 +25,7 @@ Contribution docs live in [CONTRIBUTING.md](/Users/carlos/Development/Job%20Bot/
 - Uses a watchlist system so companies can be requested and approved over time
 - Uses embeds for job posts and command output
 - Uses reaction-based pagination for list-style commands such as `!help`, `!sources`, `!recent`, `!companies`, and `!companyrequests`
+- `!help` is the main grouped command guide; `!helpjobs` is a compatibility alias for the same browser
 - Tries to show a company icon in job embeds and falls back to a troll thumbnail plus `🧌` in the company field when no safe company icon can be derived
 - Includes an opt-in process tracker with role-scoped statuses, peer discovery, and per-note moderation history split by track and season
 
@@ -279,13 +280,7 @@ User commands:
 - `!ping`
 - `!help`
 - `!helpjobs`
-- `!runjobs`
-- `!stats`
-- `!sources`
 - `!recent`
-- `!dedupecheck <url or text>`
-- `!season`
-- `!summary [daily|weekly]`
 - `!process`
 - `!visibility [open|matched|private]`
 - `!jobstatus <scope_id> <status>`
@@ -320,6 +315,11 @@ Process tracker commands:
 - `!process deletenote <note_id> [reason]` delete your own note, or admin-delete a bad note
 - `!process open|matched|private` change discovery visibility for peers; command replies still stay in DM by default
 
+Help commands:
+
+- `!help` open the full grouped command guide
+- `!helpjobs` compatibility alias for the same grouped guide
+
 Admin-only commands:
 
 - `!runjobs`
@@ -331,6 +331,7 @@ Admin-only commands:
 - `!companyrequests [pending|approved|denied|all]`
 - `!approvecompany <request_id>`
 - `!denycompany <request_id> [reason]`
+- `!firecompany <company|id>`
 - `!synccompanies`
 
 Admin-only commands require Discord `Administrator` permission in the server.
