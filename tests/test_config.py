@@ -21,3 +21,17 @@ def test_load_config_defaults_to_fixed_daily_schedule(monkeypatch, tmp_path) -> 
 
     assert config.scheduled_run_hours == [12, 20]
     assert config.schedule_timezone == "America/New_York"
+    assert config.database_url == ""
+    assert config.database_dsn == "job_bot.db"
+
+
+def test_load_config_prefers_database_url_over_sqlite_path(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    Path("config").mkdir()
+    monkeypatch.setenv("DATABASE_URL", "postgresql://jobs:secret@localhost:5432/jobbot")
+    monkeypatch.setenv("SQLITE_DB_PATH", "ignored.db")
+
+    config = load_config()
+
+    assert config.database_url == "postgresql://jobs:secret@localhost:5432/jobbot"
+    assert config.database_dsn == "postgresql://jobs:secret@localhost:5432/jobbot"

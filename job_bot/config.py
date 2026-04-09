@@ -24,12 +24,6 @@ def _parse_csv(value: Optional[str]) -> List[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
-def _parse_int_list(value: Optional[str]) -> List[int]:
-    if not value:
-        return []
-    return [int(item.strip()) for item in value.split(",") if item.strip()]
-
-
 def _parse_int_csv(value: Optional[str], default: List[int]) -> List[int]:
     if not value:
         return default
@@ -86,6 +80,7 @@ def load_config() -> AppConfig:
         discord_new_grad_channel_id=int(new_grad_channel_id) if new_grad_channel_id else None,
         scheduled_run_hours=_parse_int_csv(os.getenv("SCHEDULED_RUN_HOURS"), [12, 20]),
         schedule_timezone=os.getenv("SCHEDULE_TIMEZONE", "America/New_York"),
+        database_url=os.getenv("DATABASE_URL", ""),
         sqlite_db_path=os.getenv("SQLITE_DB_PATH", "job_bot.db"),
         remote_only=_parse_bool(os.getenv("REMOTE_ONLY")),
         us_only=_parse_bool(os.getenv("US_ONLY")),
@@ -109,7 +104,6 @@ def load_config() -> AppConfig:
             "USER_AGENT",
             "internship-aggregator-bot/1.0 (+https://github.com/SimplifyJobs)",
         ),
-        discord_admin_role_ids=_parse_int_list(os.getenv("DISCORD_ADMIN_ROLE_IDS")),
         company_seed_path=os.getenv("COMPANY_SEED_PATH", "data/company_watchlist_seed.csv"),
         source_settings=source_settings,
     )

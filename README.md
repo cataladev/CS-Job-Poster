@@ -21,12 +21,12 @@ Contribution docs live in [CONTRIBUTING.md](/Users/carlos/Development/Job%20Bot/
 - Runs on a fixed schedule at `12:00 PM` and `8:00 PM` in `America/New_York`
 - Defaults to `US_ONLY=true`
 - Defaults to `MAX_JOB_AGE_HOURS=0`, which means only same-day roles are eligible to post
-- Uses SQLite so jobs are not reposted after restart
+- Uses Postgres in production when `DATABASE_URL` is set, with SQLite fallback for local tests and throwaway runs
 - Uses a watchlist system so companies can be requested and approved over time
 - Uses embeds for job posts and command output
 - Uses reaction-based pagination for list-style commands such as `!help`, `!sources`, `!recent`, `!companies`, and `!companyrequests`
 - Tries to show a company icon in job embeds and falls back to a troll thumbnail plus `🧌` in the company field when no safe company icon can be derived
-- Includes an opt-in process tracker with visibility-scoped statuses, peer discovery, and per-company note history
+- Includes an opt-in process tracker with role-scoped statuses, peer discovery, and per-note moderation history split by track and season
 
 ## Source Order
 
@@ -71,7 +71,9 @@ High-signal files:
 - [`job_bot/dedupe.py`](job_bot/dedupe.py)
   Exact, strong, and fuzzy dedupe.
 - [`job_bot/database.py`](job_bot/database.py)
-  SQLite schema and all persistence operations.
+  Postgres-first persistence layer, schema bootstrap, and SQLite fallback for tests/local runs.
+- [`job_bot/process_tracking.py`](job_bot/process_tracking.py)
+  Shared process-tracking rules for role scopes, season/track parsing, moderation, and next-action guidance.
 - [`job_bot/watchlist.py`](job_bot/watchlist.py)
   Watchlist import, company requests, target resolution.
 - [`job_bot/sources/`](job_bot/sources)
@@ -101,6 +103,7 @@ Important env values:
 - `DISCORD_CHANNEL_ID`
 - `DISCORD_NEW_GRAD_CHANNEL_ID`
 - `ENABLE_NEW_GRAD_SOURCE`
+- `DATABASE_URL`
 - `SQLITE_DB_PATH`
 - `SCHEDULED_RUN_HOURS`
 - `SCHEDULE_TIMEZONE`
@@ -111,11 +114,18 @@ Important env values:
 
 Current default behavior in [`.env.example`](.env.example):
 
+- `DATABASE_URL=postgresql://jobbot:jobbot@localhost:5432/jobbot`
 - `SCHEDULED_RUN_HOURS=12,20`
 - `SCHEDULE_TIMEZONE=America/New_York`
 - `US_ONLY=true`
 - `MAX_JOB_AGE_HOURS=0`
 - `ENABLE_NEW_GRAD_SOURCE=false`
+
+Database behavior:
+
+- `DATABASE_URL` is the primary production setting and should point at Postgres
+- `SQLITE_DB_PATH` is only used when `DATABASE_URL` is empty
+- tests still use SQLite by default because they create isolated temp databases quickly
 
 ### 3. Discord bot setup
 
@@ -126,12 +136,62 @@ In the Discord developer portal:
 3. Invite the bot to your server with permission to read and send messages.
 4. Copy the channel IDs for the internship and new-grad channels.
 
-## Running Locally
+## Development
+
+Primary local workflow is Postgres-backed. Docker Compose is the default database path for development.
+
+### Local dev quickstart
+
+Set these values in `.env` for local development:
+
+- `DATABASE_URL=postgresql://jobbot:jobbot@localhost:5432/jobbot`
+- `DISCORD_TOKEN`
+- `DISCORD_CHANNEL_ID`
+- optionally `DISCORD_NEW_GRAD_CHANNEL_ID`
+
+Primary local commands:
+
+```bash
+make postgres-up
+make db-migrate
+make db-import-sqlite      # optional; imports existing job_bot.db into Postgres
+make dev-postgres
+```
+
+What each command does:
+
+- `make postgres-up` starts the local Postgres container and waits until it is ready
+- `make db-migrate` applies Alembic migrations to the configured `DATABASE_URL`
+- `make db-import-sqlite` copies data from `SQLITE_DB_PATH` into Postgres once
+- `make dev-postgres` starts Postgres, runs migrations, optionally imports SQLite data when `IMPORT_SQLITE=1`, then runs `python bot.py`
+
+Example first run if you want to preserve the current local SQLite data:
+
+```bash
+make postgres-up
+make db-migrate
+make db-import-sqlite
+make dev-postgres
+```
+
+Example first run if you want a fresh Postgres database:
+
+```bash
+make postgres-up
+make db-migrate
+make dev-postgres
+```
+
+The direct entrypoint is still:
 
 ```bash
 source .venv/bin/activate
 python bot.py
 ```
+
+But that is the underlying app command, not the preferred development workflow.
+
+SQLite is still acceptable for isolated tests or scratch local runs, but not as the normal development path for the real app behavior.
 
 On startup, expect logs showing:
 
@@ -156,6 +216,18 @@ mkdir -p .tmp
 TMPDIR=$PWD/.tmp source .venv/bin/activate
 TMPDIR=$PWD/.tmp pytest tests -q
 ```
+
+Postgres integration test path:
+
+```bash
+make test-postgres
+```
+
+That command:
+
+- starts the local Postgres service if needed
+- applies Alembic migrations
+- runs the Postgres integration smoke test in [`tests/test_postgres_backend.py`](/Users/carlos/Development/Job%20Bot/tests/test_postgres_backend.py)
 
 Syntax check:
 
@@ -186,10 +258,10 @@ User commands:
 - `!summary [daily|weekly]`
 - `!process`
 - `!visibility [open|matched|private]`
-- `!jobstatus <company> <status>`
+- `!jobstatus <scope_id> <status>`
 - `!myjobs`
-- `!jobpeers <company>`
-- `!jobprocess <company|id>`
+- `!jobpeers <scope_id>`
+- `!jobprocess <scope_id>`
 
 List-style commands use embed pagination with reactions:
 
@@ -205,12 +277,18 @@ Watchlist commands:
 
 Process tracker commands:
 
-- `!process` join the process tracker and show usage
-- `!process <company> <save|hide|applied|oa|interview|rejected|offer>` set your current status
-- `!process <company|id>` view visible company process stats
-- `!process <company|id> notes` view visible note history
-- `!process <company|id> | <note>` append a new process note without overwriting older notes
-- `!process peers <company>` find visible peers for that company
+- `!process` opt in and show your active tracked roles in DM
+- `!process set <company> | <role> | <season> | <status>` create or update a role scope
+- `!process set <company> | <role> | <track> | <season> | <status>` when track cannot be inferred cleanly
+- `!process company <company>` list tracked role scopes for that company
+- `!process view <scope_id>` show visible process state for one role scope
+- `!process status <scope_id> <status>` update one role scope quickly
+- `!process peers <scope_id>` find visible peers for one role scope
+- `!process notes <scope_id>` read visible note history for one role scope
+- `!process note <scope_id> | <note>` append a new note without overwriting older notes
+- `!process report <note_id> [reason]` report leaked/private content
+- `!process deletenote <note_id> [reason]` delete your own note, or admin-delete a bad note
+- `!process open|matched|private` change discovery visibility for peers; command replies still stay in DM by default
 
 Admin-only commands:
 
@@ -289,6 +367,11 @@ The database stores:
 
 This is what prevents reposting across restarts and across platforms.
 
+Production recommendation:
+
+- run the bot against Postgres through `DATABASE_URL`
+- keep SQLite for tests, ad hoc local runs, or one-off fixtures
+
 ## GitHub Simplify Ingestion
 
 GitHub parsing lives in [`job_bot/sources/github_simplify.py`](job_bot/sources/github_simplify.py).
@@ -322,6 +405,37 @@ It includes:
 - resolved scan targets like `greenhouse`, `lever`, `ashby`, `workday`, and `company_page`
 
 If you want the bot to cover a company reliably, this is the first place to look.
+
+## Process Tracking
+
+Process tracking is role-scoped, not company-scoped.
+
+That means:
+
+- `Software Engineer Intern • Summer 2027` and `Software Engineer • New Grad • Fall 2027` are different scopes
+- notes are stored in their own table and preserved as history instead of being overwritten into one field
+- peer discovery is filtered by your visibility plus the exact role scope
+- bot replies for process commands are DM-first to avoid leaking sensitive recruiting details into public channels
+
+Visibility affects who can discover your role scope:
+
+- `private`: only you can see your process data
+- `matched`: other users only see you when they track the same role scope too
+- `open`: anyone in the process community can discover your visible role scope
+
+Moderation and anti-spam guardrails:
+
+- notes block links, contact info, and common leaked/private content patterns
+- note creation, status updates, and note reports are rate-limited
+- users can report notes
+- users can delete their own notes
+- server admins can delete problematic notes
+
+What `!process` should show in practice:
+
+- the active companies and exact role scopes you are tracking
+- the last update time for each scope
+- a “Next:” prompt that tells you whether to follow up, wait, finish an OA, or update where the process is stuck
 
 ## Most Common Changes
 
@@ -359,18 +473,53 @@ Scheduler code is in [`job_bot/scheduler.py`](job_bot/scheduler.py).
 
 ## Operational Notes
 
-- The bot persists state in SQLite, so test runs affect future dedupe and posting behavior.
-- If you want a clean local run, point `SQLITE_DB_PATH` at a different file instead of reusing the live DB.
+- In production, the bot should persist state in Postgres through `DATABASE_URL`.
+- Local tests and local scratch runs still default to SQLite, so those test runs affect future dedupe and posting behavior if they reuse the same local file.
+- If you want a clean local run, point `SQLITE_DB_PATH` at a different file instead of reusing the same local SQLite file.
 - Some secondary sources are noisy or brittle. A source returning errors does not crash the whole run.
 - `wellfound` and some `workday` boards can fail frequently; that is expected unless those adapters are improved.
 - If `!runjobs` appears to do nothing, check whether the run found `0` new canonical jobs after filtering and dedupe.
 - Company logos now use strict verified branding only: cached provider logos first, then verified branded favicons, then the troll fallback.
 - Shared ATS hosts are intentionally not used as branded homepage domains. If a company is requested manually, pass a real company homepage as the optional third argument when you have one.
 - `!synccompanies` performs a branding backfill and refreshes already-posted embeds when a better verified logo becomes available.
+- Process commands default to DM replies in guilds. Visibility changes peer discovery only; it does not make command output public.
+- Legacy company-only process data is still migrated into synthetic `General / Legacy` scopes so older local databases do not lose history.
 
-## Deployment
+## Production
 
-For a VPS, run it under `systemd`, `tmux`, or another long-lived supervisor.
+Production must use Postgres through `DATABASE_URL`.
+
+Minimum production requirements:
+
+- Python 3.11
+- Postgres
+- `.env` with `DATABASE_URL`
+- Discord bot token and channel IDs
+
+Recommended deployment flow:
+
+1. Clone the repo on the server.
+2. Create the virtualenv.
+3. Install requirements.
+4. Create `.env`.
+5. Run Alembic migrations.
+6. Optionally import legacy SQLite data once.
+7. Start the bot under `systemd`.
+
+Example:
+
+```bash
+git clone https://github.com/cataladev/CS-Job-Poster.git
+cd CS-Job-Poster
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+.venv/bin/alembic upgrade head
+.venv/bin/python scripts/import_sqlite_to_postgres.py   # optional, one-time
+```
+
+After that, run the bot under a long-lived supervisor such as `systemd`.
 
 Example `systemd` unit:
 
@@ -388,6 +537,26 @@ EnvironmentFile=/opt/cs-job-poster/.env
 
 [Install]
 WantedBy=multi-user.target
+```
+
+Before starting or restarting the service on a deploy, run migrations against the production `DATABASE_URL`:
+
+```bash
+cd /opt/cs-job-poster
+source .venv/bin/activate
+alembic upgrade head
+systemctl restart cs-job-poster
+```
+
+Update / redeploy sequence:
+
+```bash
+cd /opt/cs-job-poster
+git pull --ff-only
+source .venv/bin/activate
+pip install -r requirements.txt
+alembic upgrade head
+systemctl restart cs-job-poster
 ```
 
 ## Working Rules For This Repo

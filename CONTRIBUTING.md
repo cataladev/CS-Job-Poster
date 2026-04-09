@@ -10,6 +10,7 @@ If you want to contribute, use this file as the working agreement for local setu
 - Use Python `3.11`.
 - Create a local `.env` from [.env.example](/Users/carlos/Development/Job%20Bot/.env.example).
 - Do not commit secrets, tokens, or local database files.
+- Use `DATABASE_URL` for real app runs; keep `SQLITE_DB_PATH` for isolated local test DBs only.
 
 ## Local Setup
 
@@ -74,6 +75,7 @@ Add or update tests when you change:
 - command permissions
 - branding/logo resolution
 - watchlist import or approval flow
+- process tracking scope, privacy, or moderation behavior
 
 ## Filing Issues
 
@@ -112,3 +114,7 @@ Please include concrete examples:
   Keep watchlist imports idempotent and strict about branded homepages.
 - `job_bot/bot.py`
   Admin-only commands should fail before any side effects occur.
+- `job_bot/process_tracking.py`
+  Keep process state role-scoped and DM-first, and do not weaken note privacy or moderation rules casually.
+
+Open follow-up work that is intentionally not bundled into every change lives in [TODO.md](/Users/carlos/Development/Job%20Bot/TODO.md).

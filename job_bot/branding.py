@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import logging
 import re
-import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import urljoin, urlparse
 
-from job_bot.database import Database
+from job_bot.database import Database, DbRow
 from job_bot.models import AppConfig, CanonicalJob, JobPosting
 from job_bot.utils.http import AsyncHttpClient
 from job_bot.utils.normalization import canonicalize_url
@@ -120,7 +119,7 @@ class BrandingResolver:
     async def ensure_company_branding(
         self,
         *,
-        company_row: sqlite3.Row,
+        company_row: DbRow,
         job_url: str = "",
         force: bool = False,
         http_client: Optional[AsyncHttpClient] = None,

@@ -15,6 +15,29 @@ from rapidfuzz import fuzz
 
 from job_bot.config import configure_logging, load_config
 from job_bot.database import Database
+from job_bot.process_tracking import (
+    PROCESS_NOTE_RATE_LIMIT_MAX,
+    PROCESS_NOTE_RATE_LIMIT_WINDOW_SECONDS,
+    PROCESS_REPORT_RATE_LIMIT_MAX,
+    PROCESS_REPORT_RATE_LIMIT_WINDOW_SECONDS,
+    PROCESS_STATUS_RATE_LIMIT_MAX,
+    PROCESS_STATUS_RATE_LIMIT_WINDOW_SECONDS,
+    PROCESS_VISIBILITY_DEFAULT,
+    build_process_next_action,
+    clean_process_note,
+    format_process_status,
+    format_process_visibility,
+    infer_process_track,
+    normalize_process_status,
+    normalize_process_track,
+    normalize_role_title,
+    normalize_process_visibility,
+    normalize_season_term,
+    parse_process_note_command,
+    parse_process_status_command,
+    process_scope_score,
+    validate_process_note,
+)
 from job_bot.pipeline import JobPipeline
 from job_bot.publisher import DiscordPublisher
 from job_bot.scheduler import BotScheduler
@@ -33,43 +56,7 @@ HELP_PAGE_SIZE = 8
 JOB_PEER_PAGE_SIZE = 10
 MY_JOBS_PAGE_SIZE = 10
 
-JOB_VISIBILITY_DEFAULT = "matched"
-JOB_VISIBILITY_LABELS = {
-    "matched": "Matched Only",
-    "open": "Open",
-    "private": "Private",
-}
-JOB_STATUS_LABELS = {
-    "save": "Saved",
-    "hide": "Hidden",
-    "applied": "Applied",
-    "oa_received": "OA Received",
-    "interview": "Interview",
-    "rejected": "Rejected",
-    "offer": "Offer",
-}
-JOB_STATUS_ALIASES = {
-    "save": "save",
-    "saved": "save",
-    "bookmark": "save",
-    "bookmarked": "save",
-    "hide": "hide",
-    "hidden": "hide",
-    "applied": "applied",
-    "apply": "applied",
-    "application_sent": "applied",
-    "oa": "oa_received",
-    "oa_received": "oa_received",
-    "oareceived": "oa_received",
-    "online_assessment": "oa_received",
-    "onlineassessment": "oa_received",
-    "interview": "interview",
-    "interviews": "interview",
-    "rejected": "rejected",
-    "reject": "rejected",
-    "offer": "offer",
-    "offered": "offer",
-}
+JOB_VISIBILITY_DEFAULT = PROCESS_VISIBILITY_DEFAULT
 JOB_STATUS_ORDER = {
     "save": 0,
     "applied": 1,
@@ -178,77 +165,33 @@ def build_companies_embed(rows: Sequence[Any], *, page_index: int, query: str = 
 
 
 def normalize_job_visibility(value: str) -> Optional[str]:
-    cleaned = value.strip().lower().replace("-", "_").replace(" ", "_")
-    aliases = {
-        "matched": "matched",
-        "match": "matched",
-        "matched_only": "matched",
-        "open": "open",
-        "everyone": "open",
-        "public": "open",
-        "private": "private",
-        "hidden": "private",
-        "off": "private",
-    }
-    return aliases.get(cleaned)
+    return normalize_process_visibility(value)
 
 
 def format_job_visibility(visibility: str) -> str:
-    return JOB_VISIBILITY_LABELS.get(visibility, visibility.replace("_", " ").title())
+    return format_process_visibility(visibility)
 
 
 def normalize_job_tracking_status(value: str) -> Optional[str]:
-    cleaned = value.strip().lower().replace("-", "_").replace(" ", "_")
-    return JOB_STATUS_ALIASES.get(cleaned)
+    return normalize_process_status(value)
 
 
 def parse_jobstatus_input(value: str) -> Optional[tuple[str, str]]:
     raw = value.strip()
     if not raw:
         return None
-    if "|" in raw:
-        company_query, status_input = [part.strip() for part in raw.split("|", 1)]
-        status = normalize_job_tracking_status(status_input)
-        if company_query and status:
-            return company_query, status
-        return None
-
     tokens = raw.split()
-    if len(tokens) < 2:
-        return None
-
-    for suffix_length in (2, 1):
-        if len(tokens) <= suffix_length:
-            continue
-        company_query = " ".join(tokens[:-suffix_length]).strip()
-        status_input = " ".join(tokens[-suffix_length:]).strip()
-        status = normalize_job_tracking_status(status_input)
-        if company_query and status:
-            return company_query, status
+    if len(tokens) == 2 and tokens[0].isdigit():
+        status = normalize_job_tracking_status(tokens[1])
+        if status:
+            return tokens[0], status
     return None
-
-
-def parse_jobprocess_input(value: str) -> Optional[tuple[str, Optional[str], bool]]:
-    raw = value.strip()
-    if not raw:
-        return None
-    if "|" in raw:
-        company_query, note = [part.strip() for part in raw.split("|", 1)]
-        if not company_query or not note:
-            return None
-        return company_query, note, False
-
-    lowered = raw.lower()
-    for suffix in (" comments", " comment", " notes", " note"):
-        if lowered.endswith(suffix) and len(raw) > len(suffix):
-            return raw[: -len(suffix)].strip(), None, True
-    return raw, None, False
 
 
 def parse_process_command_input(value: str) -> tuple[str, str]:
     raw = value.strip()
     if not raw:
-        return "help", ""
+        return "dashboard", ""
 
     if normalize_job_visibility(raw):
         return "visibility", raw
@@ -258,57 +201,50 @@ def parse_process_command_input(value: str) -> tuple[str, str]:
     action_aliases = {
         "help": "help",
         "menu": "help",
-        "me": "myjobs",
-        "my": "myjobs",
-        "mine": "myjobs",
+        "me": "dashboard",
+        "my": "dashboard",
+        "mine": "dashboard",
         "peer": "jobpeers",
         "peers": "jobpeers",
         "visibility": "visibility",
         "vis": "visibility",
         "status": "jobstatus",
         "set": "jobstatus",
+        "track": "jobstatus",
+        "view": "jobprocess",
         "stat": "jobprocess",
         "stats": "jobprocess",
-        "note": "jobprocess",
-        "notes": "jobprocess",
-        "comment": "jobprocess",
-        "comments": "jobprocess",
+        "note": "processnote",
+        "notes": "processnotes",
+        "comment": "processnote",
+        "comments": "processnotes",
+        "report": "processreport",
+        "deletenote": "processdeletenote",
+        "delete": "processdeletenote",
+        "company": "processcompany",
     }
     if action in action_aliases:
         resolved = action_aliases[action]
-        if action in {"note", "notes", "comment", "comments"} and tail:
-            return resolved, f"{tail} notes"
         return resolved, tail
 
     if parse_jobstatus_input(raw):
         return "jobstatus", raw
-    return "jobprocess", raw
+    return "processcompany", raw
 
 
 def format_job_tracking_status(status: str) -> str:
-    return JOB_STATUS_LABELS.get(status, status.replace("_", " ").title())
+    return format_process_status(status)
 
 
 def job_status_sort_key(status: str) -> int:
     return JOB_STATUS_ORDER.get(status, 99)
 
 
-def job_statuses_help_text() -> str:
-    return ", ".join(f"`{name}`" for name in ["save", "hide", "applied", "oa", "interview", "rejected", "offer"])
-
-
 def jobstatus_usage_text() -> str:
     return (
-        f"Use `!process status Company Name status` or `!jobstatus Company Name status` "
-        f"where status is one of {job_statuses_help_text()}."
-    )
-
-
-def jobprocess_usage_text() -> str:
-    return (
-        "Use `!process <company|id>` for company stats, "
-        "`!process <company|id> notes` for notes, or "
-        "`!process <company|id> | <note>` to save your note."
+        "Use `!process set Company | Role Title | Season | Status` "
+        "or `!process set Company | Role Title | Track | Season | Status`.\n"
+        "Quick updates also support `!process status <scope_id> status`."
     )
 
 
@@ -316,14 +252,19 @@ def build_process_help_message(*, visibility: str, joined: bool) -> str:
     lines = [
         "You're in the job-process community." if joined else "Job process commands",
         f"`Visibility:` {visibility}",
+        "Process replies stay in DM by default. Visibility only controls peer discovery.",
         "",
         "`Use:`",
-        "• `!process nvidia oa` set your status",
-        "• `!process peers nvidia` find peers",
-        "• `!process nvidia` view company process stats",
-        "• `!process nvidia notes` view notes",
-        "• `!process nvidia | recruiter said 2 rounds` save your note",
-        "• `!process me` view your tracker",
+        "• `!process` or `!process me` view your active tracked roles",
+        "• `!process set Stripe | Software Engineer Intern | Summer 2027 | applied` track a role",
+        "• `!process company Stripe` list role scopes for that company",
+        "• `!process status 12 interview` update a tracked scope",
+        "• `!process view 12` view one role scope",
+        "• `!process peers 12` find peers for one role scope",
+        "• `!process note 12 | recruiter said 2 rounds` save a note",
+        "• `!process notes 12` read visible notes",
+        "• `!process report 34 leaked oa details` report a note",
+        "• `!process deletenote 34` delete your own note",
         "• `!process open` or `!process visibility open` change discovery",
         "",
         JOB_COMMUNITY_RULES,
@@ -332,7 +273,7 @@ def build_process_help_message(*, visibility: str, joined: bool) -> str:
 
 
 def _clean_job_process_note(note: str) -> str:
-    return " ".join(note.strip().split())[:400]
+    return clean_process_note(note)
 
 
 def _latest_process_note_text(row: Any) -> str:
@@ -355,6 +296,17 @@ def _job_process_counts_text(rows: Sequence[Any]) -> str:
         if counts.get(status)
     ]
     return " • ".join(parts) if parts else "No visible statuses yet."
+
+
+def _format_process_scope_line(scope: Any) -> str:
+    return (
+        f"`#{scope['id']}` **{scope['role_title']}**\n"
+        f"`{scope['track']}` • `{scope['season_term']}` • **{scope['company']}**"
+    )
+
+
+def _format_process_scope_title(scope: Any) -> str:
+    return f"{scope['company']} • {scope['role_title']} • {scope['season_term']}"
 
 
 def _format_relative_timestamp(value: str, *, default: str = "just now") -> str:
@@ -556,11 +508,16 @@ def build_help_entries() -> List[str]:
         "`!dedupecheck <url or text>` - test duplicate detection [admin only]",
         "`!season [value]` - show season filter configuration [admin only]",
         "`!summary [daily|weekly]` - show recent summary stats [admin only]",
-        "`!process` - join the process tracker and show examples",
-        "`!process nvidia oa` - set your status",
-        "`!process peers nvidia` - find peers",
-        "`!process nvidia` - view company process stats",
-        "`!process nvidia | recruiter said 2 rounds` - save your note",
+        "`!process` - DM-first dashboard for your active tracked roles",
+        "`!process set Company | Role | Season | Status` - track a role scope",
+        "`!process company Company` - list role scopes for one company",
+        "`!process view <scope_id>` - view one role scope",
+        "`!process status <scope_id> <status>` - update one role scope",
+        "`!process peers <scope_id>` - find peers for one role scope",
+        "`!process notes <scope_id>` - read visible notes",
+        "`!process note <scope_id> | <note>` - save a note",
+        "`!process report <note_id> [reason]` - report leaked/private content",
+        "`!process deletenote <note_id> [reason]` - delete your own note",
     ]
 
 
@@ -590,10 +547,10 @@ def build_quick_help_embed(*, is_admin: bool) -> discord.Embed:
         name="Community",
         value="\n".join(
             [
-                "`!process` open the menu",
-                "`!process nvidia oa` update status",
-                "`!process peers nvidia` find peers",
-                "`!process nvidia` stats / notes",
+                "`!process` private dashboard",
+                "`!process set Stripe | SWE Intern | Summer 2027 | applied` track a role",
+                "`!process company Stripe` list role scopes",
+                "`!process view 12` role stats / notes",
             ]
         ),
         inline=False,
@@ -624,7 +581,7 @@ async def run_bot() -> None:
     if not config.discord_channel_id:
         raise RuntimeError("DISCORD_CHANNEL_ID is required")
 
-    database = Database(config.sqlite_db_path)
+    database = Database(config.database_dsn)
     await database.initialize()
     watchlist_service = WatchlistService(config, database)
     seed_stats = await watchlist_service.sync_seed(force_brand_refresh=False)
@@ -767,7 +724,7 @@ async def run_bot() -> None:
         if profile:
             return profile
         await ctx.send(
-            "Run `!process` first to opt in. Default visibility is `matched`, and you can change it with `!visibility`."
+            "Run `!process` first to opt in. Default visibility is `private`, and you can change it with `!visibility`."
         )
         return None
 
@@ -799,9 +756,10 @@ async def run_bot() -> None:
         profile: Optional[Any] = None,
         force_dm: bool = False,
     ) -> Optional[Any]:
+        # Process updates are treated as sensitive community data. In guilds we
+        # always reply over DM and delete the invoking message when possible so
+        # status updates or notes do not leak into public channels by default.
         if not ctx.guild:
-            return ctx
-        if not force_dm and (not profile or profile["visibility"] == "open"):
             return ctx
         try:
             destination = ctx.author.dm_channel or await ctx.author.create_dm()
@@ -829,6 +787,100 @@ async def run_bot() -> None:
             return
         await destination.send(content)
 
+    async def _resolve_process_scope_for_set(
+        *,
+        company_query: str,
+        role_title: str,
+        season_term: str,
+        explicit_track: Optional[str],
+    ) -> tuple[Optional[Any], Optional[Any], Optional[str]]:
+        company = await database.find_watchlist_company(company_query)
+        if not company:
+            return None, None, "Company not found in watchlist. Use `!companies [query]` to search."
+
+        normalized_company = company["normalized_company"]
+        normalized_role = normalize_role_title(role_title)
+        canonical_candidates = await database.search_text(
+            f"{company['company']} {role_title} {season_term}",
+            limit=25,
+        )
+        canonical_candidates = [
+            candidate
+            for candidate in canonical_candidates
+            if candidate.normalized_company == normalized_company
+        ]
+
+        best_candidate = None
+        best_score = 0.0
+        for candidate in canonical_candidates:
+            if explicit_track and candidate.track != explicit_track:
+                continue
+            score = process_scope_score(
+                role_title,
+                candidate.title,
+                season_term,
+                candidate.season_term or "",
+            )
+            if score > best_score:
+                best_candidate = candidate
+                best_score = score
+
+        canonical_track = best_candidate.track if best_candidate else None
+        resolved_track = explicit_track or infer_process_track(
+            role_title=role_title,
+            canonical_track=canonical_track,
+        )
+        if resolved_track is None:
+            return None, None, (
+                "I could not infer whether that role is `internship` or `new_grad`. "
+                "Use `!process set Company | Role | Track | Season | Status`."
+            )
+
+        resolved_role_title = best_candidate.title if best_candidate and best_score >= 85 else role_title
+        resolved_season_term = (
+            best_candidate.season_term
+            if best_candidate and best_candidate.season_term and best_score >= 85
+            else season_term
+        )
+        scope = await database.upsert_process_role_scope(
+            company_id=int(company["id"]),
+            canonical_job_id=best_candidate.id if best_candidate and best_score >= 85 else None,
+            company=company["company"],
+            normalized_company=normalized_company,
+            role_title=resolved_role_title,
+            normalized_role_title=normalize_role_title(resolved_role_title),
+            track=resolved_track,
+            season_term=resolved_season_term,
+            canonical_job_url=best_candidate.canonical_url if best_candidate and best_score >= 85 else "",
+            scope_origin="canonical" if best_candidate and best_score >= 85 else "manual",
+        )
+        return company, scope, None
+
+    async def _rate_limit_process_action(
+        *,
+        user_id: str,
+        event_type: str,
+        max_events: int,
+        window_seconds: int,
+        failure_message: str,
+        ctx: commands.Context,
+        profile: Any,
+    ) -> bool:
+        recent_count = await database.count_recent_process_activity(
+            user_id=user_id,
+            event_type=event_type,
+            since_seconds=window_seconds,
+        )
+        if recent_count >= max_events:
+            await _send_process_message(
+                ctx,
+                failure_message,
+                profile=profile,
+                force_dm=True,
+            )
+            return False
+        return True
+
     async def _handle_visibility(
         ctx: commands.Context,
         profile: Any,
@@ -840,6 +892,7 @@ async def run_bot() -> None:
                 f"Your visibility is `{format_job_visibility(profile['visibility'])}`. "
                 "Use `!process open`, `!process matched`, or `!process private` to change it.",
                 profile=profile,
+                force_dm=True,
             )
             return
         visibility = normalize_job_visibility(value)
@@ -848,6 +901,7 @@ async def run_bot() -> None:
                 ctx,
                 "Visibility must be one of `matched`, `open`, or `private`.",
                 profile=profile,
+                force_dm=True,
             )
             return
         updated = await database.update_job_community_visibility(str(ctx.author.id), visibility)
@@ -858,6 +912,7 @@ async def run_bot() -> None:
             ctx,
             f"Visibility updated to `{format_job_visibility(updated['visibility'])}`.",
             profile=updated,
+            force_dm=True,
         )
 
     async def _handle_jobstatus(
@@ -865,67 +920,110 @@ async def run_bot() -> None:
         profile: Any,
         value: str,
     ) -> None:
-        parsed = parse_jobstatus_input(value)
-        if not parsed:
-            await _send_process_message(ctx, jobstatus_usage_text(), profile=profile)
-            return
-        company_query, status = parsed
-        company = await database.find_watchlist_company(company_query)
-        if not company:
-            await _send_process_message(
-                ctx,
-                "Company not found in watchlist. Use `!companies [query]` to search.",
-                profile=profile,
-            )
-            return
-        await database.upsert_job_application_status(
-            user_id=str(ctx.author.id),
-            company_id=int(company["id"]),
-            status=status,
-        )
-        if status == "hide":
-            await _send_process_message(
-                ctx,
-                f"Set your status for **{company['company']}** to `{format_job_tracking_status(status)}`. "
-                "You will not appear in peer lookups for this company.",
-                profile=profile,
-            )
+        user_id = str(ctx.author.id)
+        if not await _rate_limit_process_action(
+            user_id=user_id,
+            event_type="status_update",
+            max_events=PROCESS_STATUS_RATE_LIMIT_MAX,
+            window_seconds=PROCESS_STATUS_RATE_LIMIT_WINDOW_SECONDS,
+            failure_message="Too many process status updates. Wait a few minutes and try again.",
+            ctx=ctx,
+            profile=profile,
+        ):
             return
 
-        visibility = profile["visibility"]
-        if visibility == "private":
-            visibility_note = "Your profile is still `Private`, so others cannot discover you yet."
-        elif visibility == "matched":
-            visibility_note = "Matched peers can see you only if they also track this company."
+        quick_update = parse_jobstatus_input(value)
+        if quick_update:
+            scope_id = int(quick_update[0])
+            status = quick_update[1]
+            scope = await database.get_process_role_scope(scope_id)
+            if not scope:
+                await _send_process_message(
+                    ctx,
+                    "Role scope not found. Use `!process company Company Name` to list scope IDs.",
+                    profile=profile,
+                    force_dm=True,
+                )
+                return
         else:
-            visibility_note = "Open peers can discover you from this company."
+            parsed = parse_process_status_command(value)
+            if not parsed:
+                await _send_process_message(ctx, jobstatus_usage_text(), profile=profile, force_dm=True)
+                return
+            company_query, role_title, season_term, status, explicit_track = parsed
+            _, scope, error_message = await _resolve_process_scope_for_set(
+                company_query=company_query,
+                role_title=role_title,
+                season_term=season_term,
+                explicit_track=explicit_track,
+            )
+            if error_message:
+                await _send_process_message(ctx, error_message, profile=profile, force_dm=True)
+                return
+            if scope is None:
+                await _send_process_message(
+                    ctx,
+                    "I couldn't resolve that role scope.",
+                    profile=profile,
+                    force_dm=True,
+                )
+                return
+            scope_id = int(scope["id"])
+
+        status_row = await database.upsert_process_role_status(
+            user_id=user_id,
+            scope_id=scope_id,
+            status=status,
+        )
+        await database.record_process_activity(
+            user_id=user_id,
+            event_type="status_update",
+            scope_id=scope_id,
+            metadata={"status": status},
+        )
+        visibility = format_job_visibility(profile["visibility"])
+        next_action = build_process_next_action(status, status_row["updated_at"])
         await _send_process_message(
             ctx,
-            f"Set your status for **{company['company']}** to `{format_job_tracking_status(status)}`. "
-            f"{visibility_note}",
+            (
+                f"Tracked **{status_row['company']}** • **{status_row['role_title']}** "
+                f"(`#{scope_id}` • `{status_row['track']}` • `{status_row['season_term']}`)\n"
+                f"Status: `{format_job_tracking_status(status)}`\n"
+                f"Visibility: `{visibility}`\n"
+                f"Next: {next_action}"
+            ),
             profile=profile,
+            force_dm=True,
         )
 
     async def _handle_myjobs(
         ctx: commands.Context,
         profile: Any,
+        *,
+        joined_recently: bool = False,
     ) -> None:
-        rows = await database.list_job_application_statuses_for_user(
+        rows = await database.list_process_role_statuses_for_user(
             str(ctx.author.id),
+            active_only=True,
             limit=100,
         )
         if not rows:
             await _send_process_message(
                 ctx,
-                "You have not tracked any companies yet. Use `!process nvidia applied` to start.",
+                build_process_help_message(
+                    visibility=format_job_visibility(profile["visibility"]),
+                    joined=joined_recently,
+                ),
                 profile=profile,
                 force_dm=True,
             )
             return
         entries = [
             (
-                f"**{row['company']}**\n"
-                f"`{format_job_tracking_status(row['status'])}` • updated {_format_relative_timestamp(row['updated_at'])}"
+                f"`#{row['scope_id']}` **{row['company']}** • **{row['role_title']}**\n"
+                f"`{row['track']}` • `{row['season_term']}` • "
+                f"`{format_job_tracking_status(row['status'])}` • updated {_format_relative_timestamp(row['updated_at'])}\n"
+                f"Next: {build_process_next_action(row['status'], row['updated_at'])}"
                 + _latest_process_note_text(row)
             )
             for row in rows
@@ -935,16 +1033,19 @@ async def run_bot() -> None:
             return
         await _send_paginated_entries(
             ctx,
-            title="Your Process Tracker",
+            title="Your Active Process Roles",
             entries=entries,
             page_size=MY_JOBS_PAGE_SIZE,
-            description=f"Visibility: `{format_job_visibility(profile['visibility'])}`",
+            description=(
+                f"Visibility: `{format_job_visibility(profile['visibility'])}`\n"
+                "Track by role, not just company. Use the scope IDs here for status, notes, and peers."
+            ),
             color=discord.Color.dark_blue(),
             destination=destination,
             reaction_user_id=ctx.author.id,
         )
 
-    async def _handle_jobpeers(
+    async def _handle_process_company(
         ctx: commands.Context,
         profile: Any,
         query: str,
@@ -955,35 +1056,106 @@ async def run_bot() -> None:
                 ctx,
                 "Company not found in watchlist. Use `!companies [query]` to search.",
                 profile=profile,
+                force_dm=True,
             )
             return
-        own_status = await database.get_job_application_status(
-            user_id=str(ctx.author.id),
+        scopes = await database.list_process_role_scopes_for_company(
             company_id=int(company["id"]),
+            limit=100,
+        )
+        if not scopes:
+            await _send_process_message(
+                ctx,
+                f"No process role scopes exist for **{company['company']}** yet. "
+                "Use `!process set Company | Role | Season | Status` to create one.",
+                profile=profile,
+                force_dm=True,
+            )
+            return
+
+        entries = []
+        for scope in scopes:
+            own_status = await database.get_process_role_status(
+                user_id=str(ctx.author.id),
+                scope_id=int(scope["id"]),
+            )
+            include_matched = bool(own_status and own_status["status"] != "hide")
+            peers = await database.list_process_role_peers(
+                scope_id=int(scope["id"]),
+                requester_user_id=str(ctx.author.id),
+                include_matched=include_matched,
+                limit=100,
+            )
+            visible_rows: List[Any] = list(peers)
+            if own_status and own_status["status"] != "hide":
+                visible_rows = [own_status, *visible_rows]
+            summary = _job_process_counts_text(visible_rows)
+            own_status_text = (
+                f"Your status: `{format_job_tracking_status(own_status['status'])}` • "
+                f"{build_process_next_action(own_status['status'], own_status['updated_at'])}"
+                if own_status
+                else "Your status: not tracked yet."
+            )
+            entries.append(
+                f"{_format_process_scope_line(scope)}\n"
+                f"Visible community: {summary}\n"
+                f"{own_status_text}"
+            )
+
+        destination = await _resolve_process_destination(ctx, profile=profile, force_dm=True)
+        if destination is None:
+            return
+        await _send_paginated_entries(
+            ctx,
+            title=f"Process Roles • {company['company']}",
+            entries=entries,
+            page_size=JOB_PEER_PAGE_SIZE,
+            description="Use a scope ID for `!process view`, `!process note`, `!process status`, or `!process peers`.",
+            color=discord.Color.orange(),
+            destination=destination,
+            reaction_user_id=ctx.author.id,
+        )
+
+    async def _handle_jobpeers(
+        ctx: commands.Context,
+        profile: Any,
+        query: str,
+    ) -> None:
+        if not query.strip().isdigit():
+            await _send_process_message(
+                ctx,
+                "Use `!process peers <scope_id>`.",
+                profile=profile,
+                force_dm=True,
+            )
+            return
+        scope = await database.get_process_role_scope(int(query.strip()))
+        if not scope:
+            await _send_process_message(
+                ctx,
+                "Role scope not found. Use `!process company Company Name` to list scope IDs.",
+                profile=profile,
+                force_dm=True,
+            )
+            return
+        own_status = await database.get_process_role_status(
+            user_id=str(ctx.author.id),
+            scope_id=int(scope["id"]),
         )
         include_matched = bool(own_status and own_status["status"] != "hide")
-        peers = await database.list_job_peers(
-            company_id=int(company["id"]),
+        peers = await database.list_process_role_peers(
+            scope_id=int(scope["id"]),
             requester_user_id=str(ctx.author.id),
             include_matched=include_matched,
             limit=100,
         )
         if not peers:
-            if include_matched:
-                await _send_process_message(
-                    ctx,
-                    f"No opted-in peers are currently visible for **{company['company']}**.",
-                    profile=profile,
-                    force_dm=True,
-                )
-            else:
-                await _send_process_message(
-                    ctx,
-                    f"No open peers are currently visible for **{company['company']}**. "
-                    "Set your own status on that company to unlock `matched` peers too.",
-                    profile=profile,
-                    force_dm=True,
-                )
+            await _send_process_message(
+                ctx,
+                f"No visible peers are currently available for **{scope['role_title']}** (`#{scope['id']}`).",
+                profile=profile,
+                force_dm=True,
+            )
             return
         labels: dict[str, str] = {}
         for row in peers:
@@ -999,11 +1171,11 @@ async def run_bot() -> None:
             for row in peers
         ]
         description = (
-            f"Company: **{company['company']}**\n"
+            f"{_format_process_scope_title(scope)}\n"
             + (
-                "Showing `open` and `matched` peers because you also track this company."
+                "Showing `open` and `matched` peers because you also track this role."
                 if include_matched
-                else "Showing `open` peers only. Track this company yourself to unlock `matched` peers too."
+                else "Showing `open` peers only. Track this role yourself to unlock `matched` peers too."
             )
             + f"\n{JOB_COMMUNITY_RULES}"
         )
@@ -1026,142 +1198,323 @@ async def run_bot() -> None:
         profile: Any,
         value: str,
     ) -> None:
-        parsed = parse_jobprocess_input(value)
-        if not parsed:
+        if not value.strip().isdigit():
             await _send_process_message(
                 ctx,
-                jobprocess_usage_text(),
+                "Use `!process view <scope_id>`.",
                 profile=profile,
                 force_dm=True,
             )
             return
-        company_query, note, notes_only = parsed
-        company = await database.find_watchlist_company(company_query)
-        if not company:
+        scope = await database.get_process_role_scope(int(value.strip()))
+        if not scope:
             await _send_process_message(
                 ctx,
-                "Company not found in watchlist. Use `!companies [query]` to search.",
+                "Role scope not found.",
                 profile=profile,
                 force_dm=True,
             )
             return
-        own_status = await database.get_job_application_status(
+        own_status = await database.get_process_role_status(
             user_id=str(ctx.author.id),
-            company_id=int(company["id"]),
+            scope_id=int(scope["id"]),
         )
-
-        if note is not None:
-            cleaned_note = _clean_job_process_note(note)
-            if not cleaned_note:
-                await _send_process_message(
-                    ctx,
-                    "Notes cannot be empty.",
-                    profile=profile,
-                    force_dm=True,
-                )
-                return
-            current_status = own_status["status"] if own_status else "save"
-            await database.upsert_job_application_status(
-                user_id=str(ctx.author.id),
-                company_id=int(company["id"]),
-                status=current_status,
-            )
-            await database.add_process_note(
-                user_id=str(ctx.author.id),
-                company_id=int(company["id"]),
-                body=cleaned_note,
-            )
-            await _send_process_message(
-                ctx,
-                f"Saved your note for **{company['company']}** under `{format_job_tracking_status(current_status)}`.",
-                profile=profile,
-                force_dm=True,
-            )
-            return
-
         include_matched = bool(own_status and own_status["status"] != "hide")
-        peers = await database.list_job_peers(
-            company_id=int(company["id"]),
+        peers = await database.list_process_role_peers(
+            scope_id=int(scope["id"]),
             requester_user_id=str(ctx.author.id),
             include_matched=include_matched,
             limit=100,
         )
-
         visible_rows: List[Any] = list(peers)
         if own_status and own_status["status"] != "hide":
             visible_rows = [own_status, *visible_rows]
-
         if not visible_rows:
             await _send_process_message(
                 ctx,
-                f"No visible process data is available for **{company['company']}** yet.",
+                f"No visible process data is available for **{scope['role_title']}** (`#{scope['id']}`) yet.",
                 profile=profile,
                 force_dm=True,
             )
             return
-
         count_summary = _job_process_counts_text(visible_rows)
         description_lines = [
-            f"Company: **{company['company']}**",
+            _format_process_scope_title(scope),
             f"Visible statuses: {count_summary}",
-            (
-                "Scope: `open` + `matched` peers"
-                if include_matched
-                else "Scope: `open` peers only"
-            ),
         ]
-        if own_status and own_status["status"] != "hide":
+        if own_status:
             description_lines.append(
-                f"Your status: `{format_job_tracking_status(own_status['status'])}`"
+                f"Your status: `{format_job_tracking_status(own_status['status'])}` • {build_process_next_action(own_status['status'], own_status['updated_at'])}"
             )
-
-        entry_rows = visible_rows
-        if notes_only:
-            entry_rows = await database.list_process_notes(
-                company_id=int(company["id"]),
-                requester_user_id=str(ctx.author.id),
-                include_matched=include_matched,
-                limit=100,
-            )
-            if not entry_rows:
-                await _send_process_message(
-                    ctx,
-                    f"No visible notes are available for **{company['company']}** yet.",
-                    profile=profile,
-                    force_dm=True,
-                )
-                return
-
         labels: dict[str, str] = {}
-        for row in entry_rows:
+        for row in visible_rows:
             if row["user_id"] == str(ctx.author.id):
                 continue
             labels[row["user_id"]] = await _community_user_label(ctx, row["user_id"])
         entries = [
             (
                 f"**{'You' if row['user_id'] == str(ctx.author.id) else labels[row['user_id']]}**\n"
-                + (
-                    f"`{format_job_tracking_status(row['status'])}` • noted {_format_relative_timestamp(row['created_at'])}\n"
-                    f"Note: {row['body']}"
-                    if notes_only
-                    else f"`{format_job_tracking_status(row['status'])}` • updated {_format_relative_timestamp(row['updated_at'])}"
-                    + _latest_process_note_text(row)
-                )
+                f"`{format_job_tracking_status(row['status'])}` • updated {_format_relative_timestamp(row['updated_at'])}"
+                + _latest_process_note_text(row)
             )
-            for row in entry_rows
+            for row in visible_rows
         ]
         destination = await _resolve_process_destination(ctx, profile=profile, force_dm=True)
         if destination is None:
             return
         await _send_paginated_entries(
             ctx,
-            title="Job Process",
+            title="Role Process View",
             entries=entries,
             page_size=JOB_PEER_PAGE_SIZE,
             description="\n".join(description_lines),
             color=discord.Color.orange(),
             destination=destination,
             reaction_user_id=ctx.author.id,
+        )
+
+    async def _handle_process_notes(
+        ctx: commands.Context,
+        profile: Any,
+        value: str,
+    ) -> None:
+        if not value.strip().isdigit():
+            await _send_process_message(
+                ctx,
+                "Use `!process notes <scope_id>`.",
+                profile=profile,
+                force_dm=True,
+            )
+            return
+        scope = await database.get_process_role_scope(int(value.strip()))
+        if not scope:
+            await _send_process_message(ctx, "Role scope not found.", profile=profile, force_dm=True)
+            return
+        own_status = await database.get_process_role_status(
+            user_id=str(ctx.author.id),
+            scope_id=int(scope["id"]),
+        )
+        include_matched = bool(own_status and own_status["status"] != "hide")
+        rows = await database.list_process_role_notes(
+            scope_id=int(scope["id"]),
+            requester_user_id=str(ctx.author.id),
+            include_matched=include_matched,
+            limit=100,
+        )
+        if not rows:
+            await _send_process_message(
+                ctx,
+                f"No visible notes are available for **{scope['role_title']}** (`#{scope['id']}`) yet.",
+                profile=profile,
+                force_dm=True,
+            )
+            return
+        labels: dict[str, str] = {}
+        for row in rows:
+            if row["user_id"] == str(ctx.author.id):
+                continue
+            labels[row["user_id"]] = await _community_user_label(ctx, row["user_id"])
+        entries = [
+            (
+                f"`note #{row['id']}` **{'You' if row['user_id'] == str(ctx.author.id) else labels[row['user_id']]}**\n"
+                f"`{format_job_tracking_status(row['status'])}` • noted {_format_relative_timestamp(row['created_at'])}\n"
+                f"{row['body']}"
+            )
+            for row in rows
+        ]
+        destination = await _resolve_process_destination(ctx, profile=profile, force_dm=True)
+        if destination is None:
+            return
+        await _send_paginated_entries(
+            ctx,
+            title="Role Notes",
+            entries=entries,
+            page_size=JOB_PEER_PAGE_SIZE,
+            description=_format_process_scope_title(scope),
+            color=discord.Color.teal(),
+            destination=destination,
+            reaction_user_id=ctx.author.id,
+        )
+
+    async def _handle_process_note(
+        ctx: commands.Context,
+        profile: Any,
+        value: str,
+    ) -> None:
+        parsed = parse_process_note_command(value)
+        if not parsed:
+            await _send_process_message(
+                ctx,
+                "Use `!process note <scope_id> | <note>`.",
+                profile=profile,
+                force_dm=True,
+            )
+            return
+        if not await _rate_limit_process_action(
+            user_id=str(ctx.author.id),
+            event_type="note_create",
+            max_events=PROCESS_NOTE_RATE_LIMIT_MAX,
+            window_seconds=PROCESS_NOTE_RATE_LIMIT_WINDOW_SECONDS,
+            failure_message="Too many notes too quickly. Wait a bit before posting another note.",
+            ctx=ctx,
+            profile=profile,
+        ):
+            return
+        scope_raw, note_text = parsed
+        if not scope_raw.isdigit():
+            await _send_process_message(
+                ctx,
+                "Use a numeric scope ID. Get one from `!process` or `!process company Company Name`.",
+                profile=profile,
+                force_dm=True,
+            )
+            return
+        scope = await database.get_process_role_scope(int(scope_raw))
+        if not scope:
+            await _send_process_message(ctx, "Role scope not found.", profile=profile, force_dm=True)
+            return
+        cleaned_note = _clean_job_process_note(note_text)
+        validation_error = validate_process_note(cleaned_note)
+        if validation_error:
+            await _send_process_message(ctx, validation_error, profile=profile, force_dm=True)
+            return
+        status_row = await database.get_process_role_status(
+            user_id=str(ctx.author.id),
+            scope_id=int(scope["id"]),
+        )
+        if not status_row:
+            status_row = await database.upsert_process_role_status(
+                user_id=str(ctx.author.id),
+                scope_id=int(scope["id"]),
+                status="save",
+            )
+        note = await database.add_process_role_note(
+            status_id=int(status_row["id"]),
+            scope_id=int(scope["id"]),
+            user_id=str(ctx.author.id),
+            body=cleaned_note,
+        )
+        await database.record_process_activity(
+            user_id=str(ctx.author.id),
+            event_type="note_create",
+            scope_id=int(scope["id"]),
+            metadata={"note_id": note["id"]},
+        )
+        await _send_process_message(
+            ctx,
+            (
+                f"Saved note `#{note['id']}` for **{scope['company']}** • **{scope['role_title']}** "
+                f"(`#{scope['id']}` • `{scope['season_term']}`)."
+            ),
+            profile=profile,
+            force_dm=True,
+        )
+
+    async def _handle_process_report(
+        ctx: commands.Context,
+        profile: Any,
+        value: str,
+    ) -> None:
+        if not await _rate_limit_process_action(
+            user_id=str(ctx.author.id),
+            event_type="note_report",
+            max_events=PROCESS_REPORT_RATE_LIMIT_MAX,
+            window_seconds=PROCESS_REPORT_RATE_LIMIT_WINDOW_SECONDS,
+            failure_message="Too many note reports too quickly. Wait a bit and try again.",
+            ctx=ctx,
+            profile=profile,
+        ):
+            return
+        raw = value.strip()
+        if not raw:
+            await _send_process_message(
+                ctx,
+                "Use `!process report <note_id> [reason]`.",
+                profile=profile,
+                force_dm=True,
+            )
+            return
+        note_id_token, _, reason = raw.partition(" ")
+        if not note_id_token.isdigit():
+            await _send_process_message(
+                ctx,
+                "Use `!process report <note_id> [reason]`.",
+                profile=profile,
+                force_dm=True,
+            )
+            return
+        note = await database.get_process_role_note(int(note_id_token))
+        if not note:
+            await _send_process_message(ctx, "Note not found.", profile=profile, force_dm=True)
+            return
+        if note["user_id"] == str(ctx.author.id):
+            await _send_process_message(
+                ctx,
+                "Use `!process deletenote <note_id>` to remove your own note.",
+                profile=profile,
+                force_dm=True,
+            )
+            return
+        updated_note = await database.report_process_role_note(
+            note_id=int(note_id_token),
+            reporter_user_id=str(ctx.author.id),
+            reason=(reason or "reported"),
+            auto_hide_threshold=1 if user_has_admin_privileges(ctx.author) else 2,
+        )
+        await database.record_process_activity(
+            user_id=str(ctx.author.id),
+            event_type="note_report",
+            scope_id=int(note["scope_id"]),
+            metadata={"note_id": int(note_id_token)},
+        )
+        if updated_note and updated_note["moderation_status"] == "hidden":
+            message = f"Reported note `#{note_id_token}`. It is now hidden pending review."
+        else:
+            message = f"Reported note `#{note_id_token}`."
+        await _send_process_message(ctx, message, profile=profile, force_dm=True)
+
+    async def _handle_process_delete_note(
+        ctx: commands.Context,
+        profile: Any,
+        value: str,
+    ) -> None:
+        raw = value.strip()
+        if not raw:
+            await _send_process_message(
+                ctx,
+                "Use `!process deletenote <note_id> [reason]`.",
+                profile=profile,
+                force_dm=True,
+            )
+            return
+        note_id_token, _, reason = raw.partition(" ")
+        if not note_id_token.isdigit():
+            await _send_process_message(
+                ctx,
+                "Use `!process deletenote <note_id> [reason]`.",
+                profile=profile,
+                force_dm=True,
+            )
+            return
+        deleted_note = await database.delete_process_role_note(
+            note_id=int(note_id_token),
+            actor_user_id=str(ctx.author.id),
+            allow_moderator_delete=user_has_admin_privileges(ctx.author),
+            reason=reason,
+        )
+        if not deleted_note:
+            await _send_process_message(
+                ctx,
+                "You can only delete your own notes unless you are a server administrator.",
+                profile=profile,
+                force_dm=True,
+            )
+            return
+        await _send_process_message(
+            ctx,
+            f"Deleted note `#{note_id_token}`.",
+            profile=profile,
+            force_dm=True,
         )
 
     @bot.command(name="ping")
@@ -1337,7 +1690,10 @@ async def run_bot() -> None:
             default_visibility=JOB_VISIBILITY_DEFAULT,
         )
         action, payload = parse_process_command_input(value)
-        if action == "help":
+        if action in {"help", "dashboard"}:
+            if action == "dashboard":
+                await _handle_myjobs(ctx, profile, joined_recently=not bool(existing))
+                return
             await _send_process_message(
                 ctx,
                 build_process_help_message(
@@ -1358,6 +1714,21 @@ async def run_bot() -> None:
             return
         if action == "jobpeers":
             await _handle_jobpeers(ctx, profile, payload)
+            return
+        if action == "processcompany":
+            await _handle_process_company(ctx, profile, payload)
+            return
+        if action == "processnote":
+            await _handle_process_note(ctx, profile, payload)
+            return
+        if action == "processnotes":
+            await _handle_process_notes(ctx, profile, payload)
+            return
+        if action == "processreport":
+            await _handle_process_report(ctx, profile, payload)
+            return
+        if action == "processdeletenote":
+            await _handle_process_delete_note(ctx, profile, payload)
             return
         await _handle_jobprocess(ctx, profile, payload)
 
