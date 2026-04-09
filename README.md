@@ -1,230 +1,359 @@
-# GitHub-First Internship Aggregator Discord Bot
+# CS Job Poster
 
-Production-oriented Python Discord bot that ingests high-signal internship feeds from GitHub first, then expands into seeded ATS/job-board discovery, aggressively deduplicates everything into canonical opportunities, and posts only new jobs to Discord.
+Discord bot that discovers fresh U.S. software internship and new-grad roles, deduplicates them across sources, and posts only new jobs into Discord.
 
-## Features
+The bot is GitHub-first:
 
-- GitHub-first ingestion from:
-  - `SimplifyJobs/Summer2026-Internships`
-  - `SimplifyJobs/New-Grad-Positions`
-- Async source architecture using `aiohttp`
-- Watchlist-first company discovery after the GitHub passes, backed by a seed snapshot and user-request flow
-- Fixed run pipeline:
-  1. GitHub Simplify repos
-  2. Normalize and dedupe
-  3. Sync approved watchlist companies and due scan targets
-  4. Query downstream ATS and company-page sources
-  5. Global dedupe
-  6. Post only new canonical jobs
-- Strong layered deduplication:
-  - canonical URL and external job IDs
-  - strong fingerprint on normalized company/title/season/location
-  - fuzzy fallback via RapidFuzz
-- SQLite persistence for canonical jobs, variants, fingerprints, Discord posts, source history, dedupe matches, GitHub state, discovered board seeds, company watchlist entries, requests, scan targets, and scan history
-- Discord commands for health, manual runs, stats, recent jobs, sources, dedupe checks, summaries, and company watchlist management
+1. Pull from the SimplifyJobs GitHub repos.
+2. Normalize and deduplicate those jobs.
+3. Expand into company watchlist and ATS sources.
+4. Deduplicate everything globally.
+5. Post only brand-new canonical jobs.
+
+This README is written for someone actively working on the codebase.
+
+## Current Behavior
+
+- Posts internships to `DISCORD_CHANNEL_ID`
+- Posts new-grad roles to `DISCORD_NEW_GRAD_CHANNEL_ID`
+- Runs on a fixed schedule at `12:00 PM` and `8:00 PM` in `America/New_York`
+- Defaults to `US_ONLY=true`
+- Defaults to `MAX_JOB_AGE_HOURS=0`, which means only same-day roles are eligible to post
+- Uses SQLite so jobs are not reposted after restart
+- Uses a watchlist system so companies can be requested and approved over time
+
+## Source Order
+
+Priority sources run first:
+
+- `github_simplify_internships`
+- `github_simplify_new_grad`
+
+Secondary sources then run behind concurrency limits:
+
+- `company_watchlist_internship`
+- `company_watchlist_new_grad`
+- `greenhouse`
+- `greenhouse_new_grad`
+- `lever`
+- `lever_new_grad`
+- `ashby`
+- `ashby_new_grad`
+- `workday`
+- `workday_new_grad`
+- `yc`
+- `wellfound`
+
+Source config lives in [`config/sources.yaml`](config/sources.yaml).
 
 ## Project Layout
 
-```text
-bot.py
-config/sources.yaml
-job_bot/
-  bot.py
-  config.py
-  database.py
-  dedupe.py
-  filters.py
-  models.py
-  pipeline.py
-  publisher.py
-  scheduler.py
-  source_manager.py
-  sources/
-  utils/
-tests/
-```
+High-signal files:
+
+- [`bot.py`](bot.py)
+  Thin entrypoint.
+- [`job_bot/bot.py`](job_bot/bot.py)
+  Discord client, commands, startup wiring.
+- [`job_bot/pipeline.py`](job_bot/pipeline.py)
+  Main run pipeline: fetch, normalize, filter, dedupe, persist, publish.
+- [`job_bot/source_manager.py`](job_bot/source_manager.py)
+  Priority vs secondary source execution and failure isolation.
+- [`job_bot/publisher.py`](job_bot/publisher.py)
+  Discord embeds, logo handling, repeat guard.
+- [`job_bot/filters.py`](job_bot/filters.py)
+  Role filtering, U.S.-only logic, age gating.
+- [`job_bot/dedupe.py`](job_bot/dedupe.py)
+  Exact, strong, and fuzzy dedupe.
+- [`job_bot/database.py`](job_bot/database.py)
+  SQLite schema and all persistence operations.
+- [`job_bot/watchlist.py`](job_bot/watchlist.py)
+  Watchlist import, company requests, target resolution.
+- [`job_bot/sources/`](job_bot/sources)
+  Individual source adapters.
+- [`tests/`](tests)
+  Coverage for parser, filters, dedupe, scheduler, publisher, pipeline, watchlist.
 
 ## Setup
 
-1. Create a Discord bot application in the [Discord Developer Portal](https://discord.com/developers/applications).
-2. Enable the `MESSAGE CONTENT INTENT` under Bot settings if you want the prefix commands such as `!ping` and `!runjobs` to work. Without that toggle, the scheduled bot can still connect only if the code is changed to avoid privileged intents, but the current command-based setup requires it.
-3. Invite the bot to your server with permissions to read and send messages in the target channel.
-4. Copy your bot token and channel IDs into `.env`.
-
-### Getting the Discord Channel ID
-
-1. Enable Developer Mode in Discord.
-2. Right-click the internship channel and choose `Copy Channel ID`.
-3. If you want a separate new-grad feed, repeat for that channel and set `DISCORD_NEW_GRAD_CHANNEL_ID`.
-
-## Environment Variables
-
-See `.env.example`. Important values:
-
-- `DISCORD_TOKEN`
-- `DISCORD_CHANNEL_ID`
-- `DISCORD_NEW_GRAD_CHANNEL_ID`
-- `DISCORD_ADMIN_ROLE_IDS`
-- `SCHEDULED_RUN_HOURS`
-- `SCHEDULE_TIMEZONE`
-- `SQLITE_DB_PATH`
-- `COMPANY_SEED_PATH`
-- `REMOTE_ONLY`
-- `US_ONLY`
-- `INCLUDE_COOPS`
-- `SEASON_FILTER`
-- `COMPANY_BLACKLIST`
-- `KEYWORD_ALLOWLIST`
-- `KEYWORD_DENYLIST`
-- `ENABLE_NEW_GRAD_SOURCE`
-- `ENABLED_SOURCES`
-- `SOURCE_CONFIG_PATH`
-- `MAX_JOB_AGE_HOURS`
-
-## Install and Run
+### 1. Create the Python environment
 
 ```bash
 python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-python bot.py
 ```
 
-By default the scheduler now runs twice per day at `12:00 PM` and `8:00 PM` in `America/New_York`. You can change those hours with `SCHEDULED_RUN_HOURS`.
-
-## Source Configuration
-
-`config/sources.yaml` controls:
-
-- source enablement
-- source priority
-- track routing (`internship` vs `new_grad`)
-- static board seeds
-- listing URLs for HTML-based sources
-- watchlist-backed company page scanning
-
-The bot also auto-discovers `greenhouse`, `lever`, `ashby`, and `workday` seeds from GitHub apply URLs and stores them in SQLite, so downstream coverage expands automatically over time.
-
-## Company Watchlist
-
-- The repo includes a seeded watchlist snapshot at [`data/company_watchlist_seed.csv`](/Users/carlos/Development/Job%20Bot/data/company_watchlist_seed.csv).
-- The snapshot is imported on startup and with `!synccompanies`.
-- Approved watchlist companies create resolved scan targets such as `greenhouse`, `lever`, `ashby`, `workday`, or generic `company_page`.
-- Requested and top-tier companies scan every run. The long tail is staggered with `2d` and `7d` cadences.
-
-Company commands:
-
-- `!requestcompany <company> | <careers_url>`
-- `!companyrequests [pending|approved|denied|all]`
-- `!approvecompany <request_id>`
-- `!denycompany <request_id> [reason]`
-- `!companies [query]`
-- `!companyinfo <company|id>`
-- `!synccompanies`
-
-Note: the live SimplifyJobs repositories currently resolve from the `dev` branch in `config/sources.yaml`. If those repos change their default branch later, update the branch setting there.
-
-## How GitHub Ingestion Works
-
-- The GitHub source runs first every cycle.
-- It fetches raw markdown with conditional requests using stored ETags.
-- It parses `README.md`, `README-Off-Season.md`, and `README-Inactive.md` from the internship repo plus `README.md` from the new-grad repo.
-- HTML tables are parsed robustly, including:
-  - continuation rows (`↳`)
-  - multi-location `<details>` cells
-  - optional `Terms` columns
-  - inactive sections
-- The source stores a stable row hash so new or changed rows can be tracked cleanly.
-
-## How Deduplication Works
-
-Each listing is normalized before dedupe:
-
-- tracking parameters are removed from URLs
-- external ATS IDs are extracted when possible
-- company names are normalized
-- title variants like `Software Engineering Intern` and `Software Engineer Intern` collapse to the same normalized form
-- shorthand locations like `NYC` and `Remote in USA` are normalized
-- season and year are derived from title, terms, summary, and raw source metadata
-
-Then the bot applies three layers:
-
-1. Exact match on canonical URL or external job ID
-2. Strong fingerprint on normalized company + title + season + location
-3. Fuzzy similarity fallback with company/title/location scoring and merge thresholds
-
-All match reasons are persisted in `dedupe_matches`.
-
-## Adding a New Source
-
-1. Create a new module under `job_bot/sources/`.
-2. Subclass `BaseSource`.
-3. Implement `fetch(context) -> SourceResult`.
-4. Register the class in `job_bot/sources/__init__.py`.
-5. Add a config entry in `config/sources.yaml`.
-
-Recommended pattern:
-
-- prefer official/public APIs where available
-- fall back to stable structured HTML or JSON-LD
-- return empty results on failure instead of raising uncaught exceptions
-
-## Deployment
-
-### Local
-
-Run `python bot.py` inside a long-lived shell, `tmux`, or `screen`.
-
-### VPS / systemd
-
-Create a virtual environment, install dependencies, and run the bot behind a `systemd` service with restart enabled.
-
-Example service:
-
-```ini
-[Unit]
-Description=Internship Aggregator Discord Bot
-After=network.target
-
-[Service]
-WorkingDirectory=/opt/job-bot
-ExecStart=/opt/job-bot/.venv/bin/python bot.py
-Restart=always
-RestartSec=5
-EnvironmentFile=/opt/job-bot/.env
-
-[Install]
-WantedBy=multi-user.target
-```
-
-## Testing
+### 2. Create your env file
 
 ```bash
-pytest
+cp .env.example .env
 ```
 
-For local runtime testing:
+Important env values:
+
+- `DISCORD_TOKEN`
+- `DISCORD_CHANNEL_ID`
+- `DISCORD_NEW_GRAD_CHANNEL_ID`
+- `DISCORD_ADMIN_ROLE_IDS`
+- `SQLITE_DB_PATH`
+- `SCHEDULED_RUN_HOURS`
+- `SCHEDULE_TIMEZONE`
+- `US_ONLY`
+- `MAX_JOB_AGE_HOURS`
+- `SOURCE_CONFIG_PATH`
+- `COMPANY_SEED_PATH`
+
+Current default behavior in [`.env.example`](.env.example):
+
+- `SCHEDULED_RUN_HOURS=12,20`
+- `SCHEDULE_TIMEZONE=America/New_York`
+- `US_ONLY=true`
+- `MAX_JOB_AGE_HOURS=0`
+
+### 3. Discord bot setup
+
+In the Discord developer portal:
+
+1. Create the application and bot.
+2. Enable `Message Content Intent`.
+3. Invite the bot to your server with permission to read and send messages.
+4. Copy the channel IDs for the internship and new-grad channels.
+
+## Running Locally
 
 ```bash
 source .venv/bin/activate
 python bot.py
 ```
 
-With the current defaults, the bot only publishes jobs with a known age of `0d`, meaning the posting is from today. GitHub rows use the Simplify `Age` column when present, and ATS sources fall back to their `posted_date` metadata.
+On startup, expect logs showing:
 
-If you hit `discord.errors.PrivilegedIntentsRequired`, enable Message Content Intent for the bot in the Discord developer portal and restart it.
+- watchlist seed sync
+- Discord login
+- bot ready
+- scheduler started at `12, 20:00 (America/New_York)`
 
-## Limitations and Notes
+## Testing
 
-- LinkedIn, Indeed, and Handshake are included as experimental opt-in sources and are disabled by default.
-- Wellfound and Y Combinator use public HTML discovery and may need selector updates over time.
-- Workday coverage depends on valid discovered or configured seeds.
-- Some ATS platforms use custom domains that do not expose enough board metadata to auto-discover every listing source perfectly.
+Full suite:
 
-## Responsible Scraping Guidance
+```bash
+source .venv/bin/activate
+pytest tests -q
+```
 
-- Respect platform terms, robots, and rate limits.
-- Prefer official/public APIs and structured feeds first.
-- Use low concurrency and backoff.
-- Disable unstable sources if they begin failing or producing noise.
-- Review any source that requires authentication, CAPTCHA bypassing, or aggressive anti-bot evasion before enabling it in production.
+If your shell environment has temp-dir issues, this is a safe fallback:
+
+```bash
+mkdir -p .tmp
+TMPDIR=$PWD/.tmp source .venv/bin/activate
+TMPDIR=$PWD/.tmp pytest tests -q
+```
+
+Syntax check:
+
+```bash
+PYTHONPYCACHEPREFIX=.pycache python3 -m py_compile $(find job_bot tests -name '*.py' -print) bot.py
+```
+
+## Manual Discord Commands
+
+User commands:
+
+- `!ping`
+- `!help`
+- `!runjobs`
+- `!stats`
+- `!sources`
+- `!recent`
+- `!dedupecheck <url or text>`
+- `!season`
+- `!summary [daily|weekly]`
+
+Watchlist commands:
+
+- `!requestcompany <company> | <careers_url>`
+- `!companies [query]`
+- `!companyinfo <company|id>`
+
+Admin-only watchlist commands:
+
+- `!companyrequests [pending|approved|denied|all]`
+- `!approvecompany <request_id>`
+- `!denycompany <request_id> [reason]`
+- `!synccompanies`
+
+Admin access is:
+
+- Discord `Manage Guild`, or
+- a role listed in `DISCORD_ADMIN_ROLE_IDS`
+
+## How the Pipeline Works
+
+The main run path is in [`job_bot/pipeline.py`](job_bot/pipeline.py).
+
+Per run:
+
+1. Open one shared async HTTP client.
+2. Run priority sources first.
+3. Normalize every raw job.
+4. Discover ATS seeds from URLs.
+5. Apply filters.
+6. Resolve duplicates.
+7. Save canonical jobs and variants.
+8. Publish any newly eligible canonicals.
+9. Run secondary sources and publish incrementally as they finish.
+
+Important implementation detail:
+
+- the bot publishes incrementally during a run, not only at the very end
+
+## Filtering Rules
+
+Filtering lives in [`job_bot/filters.py`](job_bot/filters.py).
+
+The bot is intentionally strict:
+
+- software-focused roles only
+- internship or new-grad signals required
+- rejects senior/staff/manager roles
+- rejects unrelated engineering disciplines
+- rejects non-U.S. roles when `US_ONLY=true`
+- rejects unknown-age jobs
+- rejects anything older than the configured age window
+
+Current practical default:
+
+- U.S.-only
+- same-day jobs only
+
+## Deduplication
+
+Deduplication lives in [`job_bot/dedupe.py`](job_bot/dedupe.py).
+
+It uses layered matching:
+
+1. Exact canonical URL
+2. External ATS/job IDs
+3. Strong fingerprint on normalized company, title, season, and location
+4. Fuzzy fallback with company/title/location similarity
+
+The database stores:
+
+- canonical jobs
+- job variants
+- fingerprints
+- Discord post records
+- dedupe match reasons
+
+This is what prevents reposting across restarts and across platforms.
+
+## GitHub Simplify Ingestion
+
+GitHub parsing lives in [`job_bot/sources/github_simplify.py`](job_bot/sources/github_simplify.py).
+
+It currently pulls from:
+
+- `SimplifyJobs/Summer2026-Internships`
+- `SimplifyJobs/New-Grad-Positions`
+
+It handles:
+
+- markdown tables
+- continuation rows
+- multi-location cells
+- inactive sections
+- row hashing for change tracking
+
+This source is the main broad-discovery feed.
+
+## Watchlist System
+
+Watchlist logic lives in [`job_bot/watchlist.py`](job_bot/watchlist.py).
+
+The watchlist is used to drive company-specific discovery after the GitHub pass.
+
+It includes:
+
+- seeded companies from [`data/company_watchlist_seed.csv`](data/company_watchlist_seed.csv)
+- user-submitted company requests
+- approval flow for requests
+- resolved scan targets like `greenhouse`, `lever`, `ashby`, `workday`, and `company_page`
+
+If you want the bot to cover a company reliably, this is the first place to look.
+
+## Most Common Changes
+
+### Add or tune a source
+
+1. Edit or add a source module under [`job_bot/sources/`](job_bot/sources).
+2. Register it in [`job_bot/sources/__init__.py`](job_bot/sources/__init__.py).
+3. Add config in [`config/sources.yaml`](config/sources.yaml).
+4. Add or update tests.
+
+### Change posting rules
+
+Look here:
+
+- [`job_bot/filters.py`](job_bot/filters.py)
+- [`job_bot/publisher.py`](job_bot/publisher.py)
+- [`.env.example`](.env.example)
+
+### Change dedupe behavior
+
+Look here:
+
+- [`job_bot/dedupe.py`](job_bot/dedupe.py)
+- [`job_bot/utils/normalization.py`](job_bot/utils/normalization.py)
+- [`job_bot/database.py`](job_bot/database.py)
+
+### Change the schedule
+
+Edit:
+
+- `SCHEDULED_RUN_HOURS`
+- `SCHEDULE_TIMEZONE`
+
+Scheduler code is in [`job_bot/scheduler.py`](job_bot/scheduler.py).
+
+## Operational Notes
+
+- The bot persists state in SQLite, so test runs affect future dedupe and posting behavior.
+- If you want a clean local run, point `SQLITE_DB_PATH` at a different file instead of reusing the live DB.
+- Some secondary sources are noisy or brittle. A source returning errors does not crash the whole run.
+- `wellfound` and some `workday` boards can fail frequently; that is expected unless those adapters are improved.
+- If `!runjobs` appears to do nothing, check whether the run found `0` new canonical jobs after filtering and dedupe.
+
+## Deployment
+
+For a VPS, run it under `systemd`, `tmux`, or another long-lived supervisor.
+
+Example `systemd` unit:
+
+```ini
+[Unit]
+Description=CS Job Poster
+After=network.target
+
+[Service]
+WorkingDirectory=/opt/cs-job-poster
+ExecStart=/opt/cs-job-poster/.venv/bin/python bot.py
+Restart=always
+RestartSec=5
+EnvironmentFile=/opt/cs-job-poster/.env
+
+[Install]
+WantedBy=multi-user.target
+```
+
+## Working Rules For This Repo
+
+If you are making changes:
+
+1. Read the relevant source module first.
+2. Keep source failures isolated.
+3. Preserve global dedupe guarantees.
+4. Run tests after changes.
+5. Keep docs and `.env.example` aligned with actual runtime behavior.
+
+If the README and the code disagree, trust the code and update the README.
