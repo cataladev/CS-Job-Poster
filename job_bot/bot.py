@@ -52,7 +52,6 @@ COMPANIES_NEXT_EMOJI = "➡️"
 COMPANIES_STOP_EMOJI = "⏹️"
 DEFAULT_PAGE_SIZE = 10
 RECENT_PAGE_SIZE = 6
-HELP_PAGE_SIZE = 8
 JOB_PEER_PAGE_SIZE = 10
 MY_JOBS_PAGE_SIZE = 10
 
@@ -488,86 +487,115 @@ def build_company_info_embed(company: Any, targets: Sequence[Any]) -> discord.Em
     return embed
 
 
-def build_help_entries() -> List[str]:
+def build_help_page_definitions() -> List[tuple[str, List[tuple[str, List[str]]]]]:
     return [
-        "`!ping` - health check",
-        "`!help` - show the quick help menu",
-        "`!helpjobs` - show the full command menu",
-        "`!runjobs` - trigger a manual discovery run [admin only]",
-        "`!stats` - show stored job stats [admin only]",
-        "`!sources` - list configured sources [admin only]",
-        "`!recent` - show the most recent jobs",
-        "`!requestcompany <company> | <careers_url> | [homepage_url]` - request a company",
-        "`!companyrequests [pending|approved|denied|all]` - request queue [admin only]",
-        "`!approvecompany <request_id>` - approve a company request [admin only]",
-        "`!denycompany <request_id> [reason]` - deny a company request [admin only]",
-        "`!firecompany <company|id>` - mark a watchlist company as hot [admin only]",
-        "`!companies [query]` - list watchlist companies",
-        "`!companyinfo <company|id>` - show watchlist details",
-        "`!synccompanies` - reimport the company watchlist seed [admin only]",
-        "`!dedupecheck <url or text>` - test duplicate detection [admin only]",
-        "`!season [value]` - show season filter configuration [admin only]",
-        "`!summary [daily|weekly]` - show recent summary stats [admin only]",
-        "`!process` - DM-first dashboard for your active tracked roles",
-        "`!process set Company | Role | Season | Status` - track a role scope",
-        "`!process company Company` - list role scopes for one company",
-        "`!process view <scope_id>` - view one role scope",
-        "`!process status <scope_id> <status>` - update one role scope",
-        "`!process peers <scope_id>` - find peers for one role scope",
-        "`!process notes <scope_id>` - read visible notes",
-        "`!process note <scope_id> | <note>` - save a note",
-        "`!process report <note_id> [reason]` - report leaked/private content",
-        "`!process deletenote <note_id> [reason]` - delete your own note",
+        (
+            "Browse",
+            [
+                (
+                    "Browse",
+                    [
+                        "`!ping` - health check",
+                        "`!help` - show the full grouped command guide",
+                        "`!helpjobs` - compatibility alias for the same help guide",
+                        "`!recent` - show the most recent jobs",
+                    ],
+                ),
+                (
+                    "Companies",
+                    [
+                        "`!companies [query]` - list watchlist companies",
+                        "`!companyinfo <company|id>` - show watchlist details",
+                        "`!requestcompany <company> | <careers_url> | [homepage_url]` - request a company",
+                    ],
+                ),
+                (
+                    "Requests",
+                    [
+                        "`!companyrequests [pending|approved|denied|all]` - request queue [admin only]",
+                        "`!approvecompany <request_id>` - approve a company request [admin only]",
+                        "`!denycompany <request_id> [reason]` - deny a company request [admin only]",
+                    ],
+                ),
+            ],
+        ),
+        (
+            "Process Tracking",
+            [
+                (
+                    "Process Tracking",
+                    [
+                        "`!process` - DM-first dashboard for your active tracked roles",
+                        "`!process set <company> | <role> | <season> | <status>` - track a role scope",
+                        "`!process set <company> | <role> | <track> | <season> | <status>` - set track explicitly",
+                        "`!process company <company>` - list role scopes for one company",
+                        "`!process view <scope_id>` - view one role scope",
+                        "`!process status <scope_id> <status>` - update one role scope",
+                    ],
+                ),
+                (
+                    "Process Notes And Peers",
+                    [
+                        "`!process peers <scope_id>` - find peers for one role scope",
+                        "`!process notes <scope_id>` - read visible notes",
+                        "`!process note <scope_id> | <note>` - save a note",
+                        "`!process report <note_id> [reason]` - report leaked/private content",
+                        "`!process deletenote <note_id> [reason]` - delete your own note",
+                        "`!process open|matched|private` - change peer discovery visibility",
+                    ],
+                ),
+                (
+                    "Aliases / Compatibility",
+                    [
+                        "`!visibility [open|matched|private]` - alias for visibility changes",
+                        "`!jobstatus <scope_id> <status>` - alias for role status updates",
+                        "`!myjobs` - alias for your process dashboard",
+                        "`!jobpeers <scope_id>` - alias for role peers",
+                        "`!jobprocess <scope_id>` - alias for role view",
+                    ],
+                ),
+            ],
+        ),
+        (
+            "Admin",
+            [
+                (
+                    "Admin",
+                    [
+                        "`!runjobs` - trigger a manual discovery run [admin only]",
+                        "`!stats` - show stored job stats [admin only]",
+                        "`!sources` - list configured sources [admin only]",
+                        "`!dedupecheck <url or text>` - test duplicate detection [admin only]",
+                        "`!season [value]` - show season filter configuration [admin only]",
+                        "`!summary [daily|weekly]` - show recent summary stats [admin only]",
+                        "`!firecompany <company|id>` - mark a watchlist company as hot [admin only]",
+                        "`!synccompanies` - reimport the company watchlist seed [admin only]",
+                    ],
+                )
+            ],
+        ),
     ]
 
 
-def build_quick_help_embed(*, is_admin: bool) -> discord.Embed:
+def build_help_embed(page_index: int) -> discord.Embed:
+    pages = build_help_page_definitions()
+    total_pages = len(pages)
+    safe_page_index = min(max(page_index, 0), total_pages - 1)
+    page_title, sections = pages[safe_page_index]
+
     embed = discord.Embed(
-        title="Help",
-        description="Quick command guide. Use `!helpjobs` for the full menu.",
+        title=f"Help • {page_title}",
+        description=(
+            "Process commands reply in DM by default.\n"
+            "Admin commands require Discord administrator privileges."
+        ),
         color=discord.Color.purple(),
     )
-    embed.add_field(
-        name="Browse",
-        value="\n".join(
-            [
-                "`!recent` recent jobs",
-                "`!companies [query]` companies",
-                "`!companyinfo <company|id>` company details",
-            ]
-        ),
-        inline=False,
+    for section_title, entries in sections:
+        embed.add_field(name=section_title, value="\n".join(entries), inline=False)
+    embed.set_footer(
+        text=f"Page {safe_page_index + 1}/{total_pages} • Use reactions to browse"
     )
-    embed.add_field(
-        name="Requests",
-        value="`!requestcompany <company> | <careers_url> | [homepage_url]`",
-        inline=False,
-    )
-    embed.add_field(
-        name="Community",
-        value="\n".join(
-            [
-                "`!process` private dashboard",
-                "`!process set Stripe | SWE Intern | Summer 2027 | applied` track a role",
-                "`!process company Stripe` list role scopes",
-                "`!process view 12` role stats / notes",
-            ]
-        ),
-        inline=False,
-    )
-    if is_admin:
-        embed.add_field(
-            name="Admin",
-            value="\n".join(
-                [
-                    "`!runjobs` manual run",
-                    "`!firecompany <company|id>` mark hot",
-                    "`!synccompanies` refresh watchlist",
-                ]
-            ),
-            inline=False,
-        )
-    embed.set_footer(text="This message will disappear shortly.")
     return embed
 
 
@@ -1661,20 +1689,17 @@ async def run_bot() -> None:
         await ctx.send(embed=embed)
 
     async def _send_helpjobs(ctx: commands.Context) -> None:
-        await _send_paginated_entries(
+        pages = build_help_page_definitions()
+        await _send_paginated_embed_pages(
             ctx,
-            title="Command Help",
-            entries=build_help_entries(),
-            page_size=HELP_PAGE_SIZE,
-            color=discord.Color.purple(),
+            total_items=len(pages),
+            page_size=1,
+            build_page=lambda page_index: build_help_embed(page_index),
         )
 
     @bot.command(name="help")
     async def help_command(ctx: commands.Context) -> None:
-        await ctx.send(
-            embed=build_quick_help_embed(is_admin=user_has_admin_privileges(ctx.author)),
-            delete_after=45,
-        )
+        await _send_helpjobs(ctx)
         with contextlib.suppress(discord.HTTPException):
             await ctx.message.delete()
 
