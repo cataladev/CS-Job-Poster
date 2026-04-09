@@ -184,21 +184,24 @@ List-style commands use embed pagination with reactions:
 
 Watchlist commands:
 
-- `!requestcompany <company> | <careers_url>`
+- `!requestcompany <company> | <careers_url> | [homepage_url]`
 - `!companies [query]`
 - `!companyinfo <company|id>`
 
-Admin-only watchlist commands:
+Restricted commands:
 
+- `!runjobs`
+- `!stats`
+- `!sources`
+- `!dedupecheck <url or text>`
+- `!season [value]`
+- `!summary [daily|weekly]`
 - `!companyrequests [pending|approved|denied|all]`
 - `!approvecompany <request_id>`
 - `!denycompany <request_id> [reason]`
 - `!synccompanies`
 
-Admin access is:
-
-- Discord `Manage Guild`, or
-- a role listed in `DISCORD_ADMIN_ROLE_IDS`
+Restricted access is granted only to members who have at least one role listed in `DISCORD_ADMIN_ROLE_IDS`.
 
 ## How the Pipeline Works
 
@@ -337,7 +340,9 @@ Scheduler code is in [`job_bot/scheduler.py`](job_bot/scheduler.py).
 - Some secondary sources are noisy or brittle. A source returning errors does not crash the whole run.
 - `wellfound` and some `workday` boards can fail frequently; that is expected unless those adapters are improved.
 - If `!runjobs` appears to do nothing, check whether the run found `0` new canonical jobs after filtering and dedupe.
-- If company logos do not appear, check the watchlist branding URLs first. Shared ATS hosts are intentionally skipped for logo derivation.
+- Company logos now use strict verified branding only: cached provider logos first, then verified branded favicons, then the troll fallback.
+- Shared ATS hosts are intentionally not used as branded homepage domains. If a company is requested manually, pass a real company homepage as the optional third argument when you have one.
+- `!synccompanies` performs a branding backfill and refreshes already-posted embeds when a better verified logo becomes available.
 
 ## Deployment
 

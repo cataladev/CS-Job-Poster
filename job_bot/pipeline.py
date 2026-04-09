@@ -4,6 +4,7 @@ import asyncio
 import logging
 from typing import Dict, List, Set
 
+from job_bot.branding import BrandingResolver
 from job_bot.database import Database
 from job_bot.dedupe import DedupeEngine
 from job_bot.filters import JobFilter
@@ -29,6 +30,7 @@ class JobPipeline:
         self.publisher = publisher
         self.job_filter = JobFilter(config)
         self.dedupe = DedupeEngine(database)
+        self.branding = BrandingResolver(config, database)
         self.logger = logging.getLogger(self.__class__.__name__)
         self._lock = asyncio.Lock()
 
@@ -60,14 +62,14 @@ class JobPipeline:
 
                 priority_results = await source_manager.run_priority_sources()
                 stats.sources_checked += len(priority_results)
-                new_candidate_ids, new_refresh_ids = await self._process_results(priority_results, stats)
+                new_candidate_ids, new_refresh_ids = await self._process_results(priority_results, stats, http_client)
                 candidate_post_ids.update(new_candidate_ids)
                 await self._publish_candidates(candidate_post_ids, stats)
                 await self._refresh_candidates(new_refresh_ids)
 
                 async for result in source_manager.iter_secondary_sources():
                     stats.sources_checked += 1
-                    new_candidate_ids, new_refresh_ids = await self._process_results([result], stats)
+                    new_candidate_ids, new_refresh_ids = await self._process_results([result], stats, http_client)
                     if not new_candidate_ids:
                         await self._refresh_candidates(new_refresh_ids)
                         continue
@@ -78,7 +80,12 @@ class JobPipeline:
             stats.finished_at = utc_now()
             return stats
 
-    async def _process_results(self, results: List[SourceResult], stats: RunStats) -> tuple[Set[int], Set[int]]:
+    async def _process_results(
+        self,
+        results: List[SourceResult],
+        stats: RunStats,
+        http_client: AsyncHttpClient,
+    ) -> tuple[Set[int], Set[int]]:
         candidate_post_ids: Set[int] = set()
         refresh_post_ids: Set[int] = set()
         for result in results:
@@ -115,6 +122,7 @@ class JobPipeline:
                     )
                 if created:
                     new_count += 1
+                    await self.branding.ensure_branding_for_posting(job, http_client=http_client)
                 elif refresh_required:
                     refresh_post_ids.add(canonical_id)
                 if job.status == "active":

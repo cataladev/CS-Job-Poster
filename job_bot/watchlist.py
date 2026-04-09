@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import asyncio
 import re
 import sqlite3
 from dataclasses import dataclass
@@ -11,8 +12,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
+from job_bot.branding import BrandingResolver, sanitize_brand_homepage_url
 from job_bot.database import Database
 from job_bot.models import AppConfig, JobPosting
+from job_bot.utils.http import AsyncHttpClient
 from job_bot.utils.ats import extract_board_seed
 from job_bot.utils.normalization import canonicalize_url, normalize_company_name
 
@@ -171,13 +174,26 @@ class WatchlistSeedImporter:
         self.config = config
         self.database = database
         self.resolver = WatchlistResolver()
+        self.branding = BrandingResolver(config, database)
 
-    async def import_seed(self, path: Optional[str] = None) -> Dict[str, int]:
+    async def import_seed(
+        self,
+        path: Optional[str] = None,
+        *,
+        force_brand_refresh: bool = False,
+    ) -> Dict[str, Any]:
         seed_path = Path(path or self.config.company_seed_path)
-        stats = {"rows": 0, "companies_upserted": 0, "targets_upserted": 0}
+        stats: Dict[str, Any] = {
+            "rows": 0,
+            "companies_upserted": 0,
+            "targets_upserted": 0,
+            "logos_verified": 0,
+            "branding_updated_companies": [],
+        }
         if not seed_path.exists():
             return stats
 
+        pending_company_ids: List[int] = []
         with seed_path.open("r", encoding="utf-8", newline="") as handle:
             reader = csv.DictReader(handle)
             for row in reader:
@@ -193,7 +209,7 @@ class WatchlistSeedImporter:
                     company=company,
                     normalized_company=normalized_company,
                     careers_url=careers_url,
-                    homepage_url=(row.get("homepage_url") or "").strip(),
+                    homepage_url=sanitize_brand_homepage_url((row.get("homepage_url") or "").strip()),
                     country=(row.get("country") or "US").strip(),
                     categories=categories,
                     tier=(row.get("tier") or "t3").strip(),
@@ -218,7 +234,62 @@ class WatchlistSeedImporter:
                         verified_at=_utc_now().isoformat(),
                     )
                     stats["targets_upserted"] += 1
+                pending_company_ids.append(company_id)
+
+        updated_companies, logos_verified = await self._enrich_branding(
+            pending_company_ids,
+            force=force_brand_refresh,
+        )
+        stats["branding_updated_companies"] = sorted(updated_companies)
+        stats["logos_verified"] = logos_verified
         return stats
+
+    async def _enrich_branding(
+        self,
+        company_ids: List[int],
+        *,
+        force: bool,
+    ) -> tuple[set[str], int]:
+        unique_ids = sorted(set(company_ids))
+        if not unique_ids:
+            return set(), 0
+
+        rows = []
+        for company_id in unique_ids:
+            row = await self.database.get_watchlist_company_by_id(company_id)
+            if row:
+                rows.append(row)
+        if not rows:
+            return set(), 0
+
+        semaphore = asyncio.Semaphore(max(1, min(self.config.source_concurrency, 10)))
+        updated_companies: set[str] = set()
+        logos_verified = 0
+
+        async with AsyncHttpClient(
+            timeout_seconds=self.config.request_timeout_seconds,
+            retries=self.config.request_retries,
+            user_agent=self.config.user_agent,
+        ) as http_client:
+            async def worker(company_row: sqlite3.Row) -> None:
+                nonlocal logos_verified
+                async with semaphore:
+                    try:
+                        resolution = await self.branding.ensure_company_branding(
+                            company_row=company_row,
+                            force=force,
+                            http_client=http_client,
+                        )
+                    except Exception:
+                        return
+                    if resolution.changed:
+                        updated_companies.add(company_row["normalized_company"])
+                    if resolution.logo_url:
+                        logos_verified += 1
+
+            await asyncio.gather(*(worker(row) for row in rows))
+
+        return updated_companies, logos_verified
 
 
 class WatchlistService:
@@ -227,21 +298,28 @@ class WatchlistService:
         self.database = database
         self.importer = WatchlistSeedImporter(config, database)
         self.resolver = self.importer.resolver
+        self.branding = self.importer.branding
 
-    async def sync_seed(self) -> Dict[str, int]:
-        return await self.importer.import_seed()
+    async def sync_seed(self, *, force_brand_refresh: bool = False) -> Dict[str, Any]:
+        return await self.importer.import_seed(force_brand_refresh=force_brand_refresh)
 
     async def request_company(
         self,
         *,
         company: str,
         careers_url: str,
+        homepage_url: str = "",
         requester_user_id: str,
         requester_channel_id: str,
     ) -> int:
         careers_url = canonicalize_url(careers_url.strip())
         if not self._is_valid_public_url(careers_url):
             raise ValueError("A valid public careers URL is required.")
+        sanitized_homepage = ""
+        if homepage_url.strip():
+            sanitized_homepage = sanitize_brand_homepage_url(homepage_url.strip())
+            if not sanitized_homepage:
+                raise ValueError("Homepage URL must be a valid branded public company URL.")
         normalized_company = normalize_company_name(company)
         existing_company = await self.database.find_watchlist_company(company)
         if existing_company and existing_company["careers_url"] == careers_url:
@@ -256,6 +334,7 @@ class WatchlistService:
             company=company.strip(),
             normalized_company=normalized_company,
             careers_url=careers_url,
+            homepage_url=sanitized_homepage,
             requester_user_id=requester_user_id,
             requester_channel_id=requester_channel_id,
         )
@@ -276,7 +355,7 @@ class WatchlistService:
             company=request["company"],
             normalized_company=request["normalized_company"],
             careers_url=request["careers_url"],
-            homepage_url="",
+            homepage_url=sanitize_brand_homepage_url(request["homepage_url"] or ""),
             country="US",
             categories=["requested"],
             tier="t0",
@@ -295,6 +374,12 @@ class WatchlistService:
                 confidence=target["confidence"],
                 active=True,
                 verified_at=_utc_now().isoformat(),
+            )
+        company = await self.database.get_watchlist_company_by_id(company_id)
+        if company:
+            await self.branding.ensure_company_branding(
+                company_row=company,
+                force=True,
             )
         await self.database.update_company_request(
             request_id=request_id,

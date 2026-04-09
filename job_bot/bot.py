@@ -29,6 +29,11 @@ COMPANIES_STOP_EMOJI = "⏹️"
 DEFAULT_PAGE_SIZE = 10
 RECENT_PAGE_SIZE = 8
 HELP_PAGE_SIZE = 8
+DEFAULT_RESTRICTED_ROLE_IDS = {
+    486629374758748180,
+    616312021314437149,
+    1491561308401696778,
+}
 
 
 def build_paginated_embed(
@@ -109,12 +114,14 @@ async def run_bot() -> None:
     database = Database(config.sqlite_db_path)
     await database.initialize()
     watchlist_service = WatchlistService(config, database)
-    seed_stats = await watchlist_service.sync_seed()
+    seed_stats = await watchlist_service.sync_seed(force_brand_refresh=False)
+    startup_branding_refresh_companies = seed_stats.get("branding_updated_companies", [])
     logger.info(
-        "Watchlist seed sync complete: rows=%s companies=%s targets=%s",
+        "Watchlist seed sync complete: rows=%s companies=%s targets=%s logos=%s",
         seed_stats["rows"],
         seed_stats["companies_upserted"],
         seed_stats["targets_upserted"],
+        seed_stats.get("logos_verified", 0),
     )
 
     publisher = DiscordPublisher(config, database)
@@ -126,10 +133,24 @@ async def run_bot() -> None:
     bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
     publisher.bind_bot(bot)
 
+    async def _refresh_branding_posts(normalized_companies: Sequence[str]) -> int:
+        jobs = await database.get_posted_canonical_jobs_for_companies(normalized_companies)
+        if not jobs:
+            return 0
+        refreshed = await publisher.refresh_jobs(jobs)
+        return len(refreshed)
+
     @bot.event
     async def on_ready() -> None:
         logger.info("Bot ready as %s", bot.user)
         scheduler.start()
+        if startup_branding_refresh_companies:
+            refreshed_count = await _refresh_branding_posts(startup_branding_refresh_companies)
+            if refreshed_count:
+                logger.info(
+                    "Refreshed %s posted jobs after branding sync",
+                    refreshed_count,
+                )
 
     async def _send_paginated_entries(
         ctx: commands.Context,
@@ -204,16 +225,16 @@ async def run_bot() -> None:
             with contextlib.suppress(discord.HTTPException):
                 await message.remove_reaction(reaction.emoji, user)
 
-    def _is_admin(ctx: commands.Context) -> bool:
-        if getattr(ctx.author, "guild_permissions", None) and ctx.author.guild_permissions.manage_guild:
-            return True
-        author_role_ids = {role.id for role in getattr(ctx.author, "roles", [])}
-        return bool(author_role_ids.intersection(set(config.discord_admin_role_ids)))
+    allowed_role_ids = set(config.discord_admin_role_ids or DEFAULT_RESTRICTED_ROLE_IDS)
 
-    def _require_admin(ctx: commands.Context) -> bool:
-        if _is_admin(ctx):
+    def _is_restricted_operator(ctx: commands.Context) -> bool:
+        author_role_ids = {role.id for role in getattr(ctx.author, "roles", [])}
+        return bool(author_role_ids.intersection(allowed_role_ids))
+
+    def _require_restricted_access(ctx: commands.Context) -> bool:
+        if _is_restricted_operator(ctx):
             return True
-        raise commands.CheckFailure("Admin access required.")
+        raise commands.CheckFailure("This command requires one of the allowed roles.")
 
     @bot.event
     async def on_command_error(ctx: commands.Context, error: Exception) -> None:
@@ -230,6 +251,7 @@ async def run_bot() -> None:
 
     @bot.command(name="runjobs")
     async def runjobs(ctx: commands.Context) -> None:
+        _require_restricted_access(ctx)
         message = await ctx.send(
             "Running job discovery pipeline. New jobs will post as sources finish."
         )
@@ -245,6 +267,7 @@ async def run_bot() -> None:
 
     @bot.command(name="stats")
     async def stats_command(ctx: commands.Context) -> None:
+        _require_restricted_access(ctx)
         stats = await database.get_stats()
         embed = discord.Embed(title="Job Stats", color=discord.Color.blue())
         embed.add_field(name="Canonical jobs", value=str(stats["total_canonical_jobs"]), inline=True)
@@ -255,6 +278,7 @@ async def run_bot() -> None:
 
     @bot.command(name="sources")
     async def sources_command(ctx: commands.Context) -> None:
+        _require_restricted_access(ctx)
         entries = []
         for source in build_sources(config):
             status = "enabled" if source.settings.enabled else "disabled"
@@ -294,6 +318,7 @@ async def run_bot() -> None:
 
     @bot.command(name="dedupecheck")
     async def dedupecheck_command(ctx: commands.Context, *, query: str) -> None:
+        _require_restricted_access(ctx)
         query = query.strip()
         if query.startswith("http://") or query.startswith("https://"):
             canonical = canonicalize_url(query)
@@ -330,6 +355,7 @@ async def run_bot() -> None:
 
     @bot.command(name="season")
     async def season_command(ctx: commands.Context, *, value: str = "") -> None:
+        _require_restricted_access(ctx)
         configured = ", ".join(config.season_filter) if config.season_filter else "none"
         if value:
             await ctx.send(
@@ -340,6 +366,7 @@ async def run_bot() -> None:
 
     @bot.command(name="summary")
     async def summary_command(ctx: commands.Context, period: str = "daily") -> None:
+        _require_restricted_access(ctx)
         hours = 24 if period.lower() == "daily" else 24 * 7
         jobs = await database.get_jobs_for_summary(hours)
         if not jobs:
@@ -365,20 +392,20 @@ async def run_bot() -> None:
         entries = [
             "`!ping` - health check",
             "`!help` - show this help message",
-            "`!runjobs` - trigger a manual discovery run",
-            "`!stats` - show stored job stats",
-            "`!sources` - list configured sources",
+            "`!runjobs` - trigger a manual discovery run [restricted]",
+            "`!stats` - show stored job stats [restricted]",
+            "`!sources` - list configured sources [restricted]",
             "`!recent` - show the most recent jobs",
-            "`!requestcompany <company> | <careers_url>` - request a company",
-            "`!companyrequests [pending|approved|denied|all]` - admin request queue",
-            "`!approvecompany <request_id>` - approve a company request",
-            "`!denycompany <request_id> [reason]` - deny a company request",
+            "`!requestcompany <company> | <careers_url> | [homepage_url]` - request a company",
+            "`!companyrequests [pending|approved|denied|all]` - request queue [restricted]",
+            "`!approvecompany <request_id>` - approve a company request [restricted]",
+            "`!denycompany <request_id> [reason]` - deny a company request [restricted]",
             "`!companies [query]` - list watchlist companies",
             "`!companyinfo <company|id>` - show watchlist details",
-            "`!synccompanies` - reimport the company watchlist seed",
-            "`!dedupecheck <url or text>` - test duplicate detection",
-            "`!season [value]` - show season filter configuration",
-            "`!summary [daily|weekly]` - show recent summary stats",
+            "`!synccompanies` - reimport the company watchlist seed [restricted]",
+            "`!dedupecheck <url or text>` - test duplicate detection [restricted]",
+            "`!season [value]` - show season filter configuration [restricted]",
+            "`!summary [daily|weekly]` - show recent summary stats [restricted]",
         ]
         await _send_paginated_entries(
             ctx,
@@ -399,13 +426,23 @@ async def run_bot() -> None:
     @bot.command(name="requestcompany")
     async def requestcompany(ctx: commands.Context, *, value: str) -> None:
         if "|" not in value:
-            await ctx.send("Use `!requestcompany Company Name | https://company.com/careers`")
+            await ctx.send(
+                "Use `!requestcompany Company Name | https://company.com/careers | [https://company.com]`"
+            )
             return
-        company, careers_url = [part.strip() for part in value.split("|", 1)]
+        parts = [part.strip() for part in value.split("|")]
+        if len(parts) < 2 or len(parts) > 3:
+            await ctx.send(
+                "Use `!requestcompany Company Name | https://company.com/careers | [https://company.com]`"
+            )
+            return
+        company, careers_url = parts[0], parts[1]
+        homepage_url = parts[2] if len(parts) == 3 else ""
         try:
             request_id = await watchlist_service.request_company(
                 company=company,
                 careers_url=careers_url,
+                homepage_url=homepage_url,
                 requester_user_id=str(ctx.author.id),
                 requester_channel_id=str(ctx.channel.id),
             )
@@ -416,7 +453,7 @@ async def run_bot() -> None:
 
     @bot.command(name="companyrequests")
     async def companyrequests(ctx: commands.Context, status: str = "pending") -> None:
-        _require_admin(ctx)
+        _require_restricted_access(ctx)
         requests = await watchlist_service.list_requests(status=status if status != "all" else None)
         if not requests:
             await ctx.send("No company requests found.")
@@ -436,7 +473,7 @@ async def run_bot() -> None:
 
     @bot.command(name="approvecompany")
     async def approvecompany(ctx: commands.Context, request_id: int) -> None:
-        _require_admin(ctx)
+        _require_restricted_access(ctx)
         try:
             company = await watchlist_service.approve_request(
                 request_id=request_id,
@@ -449,7 +486,7 @@ async def run_bot() -> None:
 
     @bot.command(name="denycompany")
     async def denycompany(ctx: commands.Context, request_id: int, *, reason: str = "Denied") -> None:
-        _require_admin(ctx)
+        _require_restricted_access(ctx)
         try:
             await watchlist_service.deny_request(
                 request_id=request_id,
@@ -514,6 +551,9 @@ async def run_bot() -> None:
             inline=True,
         )
         embed.add_field(name="Careers", value=company["careers_url"], inline=False)
+        embed.add_field(name="Homepage", value=company["homepage_url"] or "none", inline=False)
+        embed.add_field(name="Logo source", value=company["logo_source"] or "none", inline=True)
+        embed.add_field(name="Logo URL", value=company["logo_url"] or "none", inline=False)
         embed.add_field(name="Last scan", value=company["last_scan_at"] or "never", inline=True)
         embed.add_field(name="Next scan", value=company["next_scan_at"] or "now", inline=True)
         embed.add_field(name="Targets", value=" | ".join(target_lines) if target_lines else "none", inline=False)
@@ -521,11 +561,13 @@ async def run_bot() -> None:
 
     @bot.command(name="synccompanies")
     async def synccompanies(ctx: commands.Context) -> None:
-        _require_admin(ctx)
-        stats = await watchlist_service.sync_seed()
+        _require_restricted_access(ctx)
+        stats = await watchlist_service.sync_seed(force_brand_refresh=True)
+        refreshed_posts = await _refresh_branding_posts(stats.get("branding_updated_companies", []))
         await ctx.send(
             f"Watchlist sync complete. rows={stats['rows']} companies={stats['companies_upserted']} "
-            f"targets={stats['targets_upserted']}"
+            f"targets={stats['targets_upserted']} logos={stats.get('logos_verified', 0)} "
+            f"refreshed_posts={refreshed_posts}"
         )
 
     try:

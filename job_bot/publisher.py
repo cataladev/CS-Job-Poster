@@ -10,8 +10,10 @@ import discord
 from discord.ext import commands
 from rapidfuzz import fuzz
 
+from job_bot.branding import BrandingResolver, build_favicon_url, extract_url_host
 from job_bot.database import Database
 from job_bot.models import AppConfig, CanonicalJob
+from job_bot.utils.http import AsyncHttpClient
 from job_bot.utils.html import collapse_whitespace, strip_html
 
 
@@ -36,18 +38,6 @@ BOILERPLATE_TERMS = (
     "performance expectations",
     "ease of use",
     "cost efficiency",
-)
-SHARED_HOST_SUFFIXES = (
-    "greenhouse.io",
-    "lever.co",
-    "ashbyhq.com",
-    "myworkdayjobs.com",
-    "smartrecruiters.com",
-    "oraclecloud.com",
-    "icims.com",
-    "applytojob.com",
-    "workatastartup.com",
-    "simplify.jobs",
 )
 FALLBACK_COMPANY_EMOJI = "🧌"
 FALLBACK_COMPANY_THUMBNAIL_URL = "https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/72x72/1f9cc.png"
@@ -81,6 +71,7 @@ class DiscordPublisher:
     def __init__(self, config: AppConfig, database: Database) -> None:
         self.config = config
         self.database = database
+        self.branding = BrandingResolver(config, database)
         self.bot: Optional[commands.Bot] = None
         self.logger = logging.getLogger(self.__class__.__name__)
 
@@ -93,30 +84,35 @@ class DiscordPublisher:
 
         await self.bot.wait_until_ready()
         posted_ids: List[int] = []
-        for job in jobs:
-            if job.status != "active" or job.id is None:
-                continue
-            channel_id = self.config.channel_id_for_track(job.track)
-            if not channel_id:
-                continue
-            if await self.database.is_posted(job.id, channel_id):
-                continue
-            if await self._is_probable_repeat_for_channel(job, channel_id):
-                self.logger.info(
-                    "Skipping probable repeat for %s - %s in channel %s",
-                    job.company,
-                    job.title,
-                    channel_id,
-                )
-                continue
-            channel = self.bot.get_channel(channel_id)
-            if channel is None:
-                channel = await self.bot.fetch_channel(channel_id)
-            logo_url = await self._resolve_logo_url(job)
-            message = await channel.send(embed=self._build_embed(job, logo_url=logo_url))
-            await self.database.mark_posted(job.id, job.track, channel_id, message.id)
-            posted_ids.append(job.id)
-            await asyncio.sleep(self.config.publish_delay_seconds)
+        async with AsyncHttpClient(
+            timeout_seconds=self.config.request_timeout_seconds,
+            retries=self.config.request_retries,
+            user_agent=self.config.user_agent,
+        ) as http_client:
+            for job in jobs:
+                if job.status != "active" or job.id is None:
+                    continue
+                channel_id = self.config.channel_id_for_track(job.track)
+                if not channel_id:
+                    continue
+                if await self.database.is_posted(job.id, channel_id):
+                    continue
+                if await self._is_probable_repeat_for_channel(job, channel_id):
+                    self.logger.info(
+                        "Skipping probable repeat for %s - %s in channel %s",
+                        job.company,
+                        job.title,
+                        channel_id,
+                    )
+                    continue
+                channel = self.bot.get_channel(channel_id)
+                if channel is None:
+                    channel = await self.bot.fetch_channel(channel_id)
+                logo_url = await self._resolve_logo_url(job, http_client=http_client)
+                message = await channel.send(embed=self._build_embed(job, logo_url=logo_url))
+                await self.database.mark_posted(job.id, job.track, channel_id, message.id)
+                posted_ids.append(job.id)
+                await asyncio.sleep(self.config.publish_delay_seconds)
         return posted_ids
 
     async def refresh_jobs(self, jobs: List[CanonicalJob]) -> List[int]:
@@ -125,50 +121,55 @@ class DiscordPublisher:
 
         await self.bot.wait_until_ready()
         refreshed_ids: List[int] = []
-        for job in jobs:
-            if job.status != "active" or job.id is None:
-                continue
+        async with AsyncHttpClient(
+            timeout_seconds=self.config.request_timeout_seconds,
+            retries=self.config.request_retries,
+            user_agent=self.config.user_agent,
+        ) as http_client:
+            for job in jobs:
+                if job.status != "active" or job.id is None:
+                    continue
 
-            post_records = await self.database.get_post_records_for_canonical(job.id)
-            if not post_records:
-                continue
+                post_records = await self.database.get_post_records_for_canonical(job.id)
+                if not post_records:
+                    continue
 
-            logo_url = await self._resolve_logo_url(job)
-            embed = self._build_embed(job, logo_url=logo_url)
-            refreshed_any = False
+                logo_url = await self._resolve_logo_url(job, http_client=http_client)
+                embed = self._build_embed(job, logo_url=logo_url)
+                refreshed_any = False
 
-            for record in post_records:
-                try:
-                    channel_id = int(record["channel_id"])
-                    message_id = int(record["message_id"])
-                    channel = self.bot.get_channel(channel_id)
-                    if channel is None:
-                        channel = await self.bot.fetch_channel(channel_id)
-                    message = await channel.fetch_message(message_id)
-                    await message.edit(embed=embed)
-                    refreshed_any = True
-                except discord.NotFound:
-                    self.logger.warning(
-                        "Post record missing for canonical %s in channel %s",
-                        job.id,
-                        record["channel_id"],
-                    )
-                except discord.Forbidden:
-                    self.logger.warning(
-                        "Missing permission to refresh canonical %s in channel %s",
-                        job.id,
-                        record["channel_id"],
-                    )
-                except discord.HTTPException as exc:
-                    self.logger.warning(
-                        "Failed to refresh canonical %s in channel %s: %s",
-                        job.id,
-                        record["channel_id"],
-                        exc,
-                    )
+                for record in post_records:
+                    try:
+                        channel_id = int(record["channel_id"])
+                        message_id = int(record["message_id"])
+                        channel = self.bot.get_channel(channel_id)
+                        if channel is None:
+                            channel = await self.bot.fetch_channel(channel_id)
+                        message = await channel.fetch_message(message_id)
+                        await message.edit(embed=embed)
+                        refreshed_any = True
+                    except discord.NotFound:
+                        self.logger.warning(
+                            "Post record missing for canonical %s in channel %s",
+                            job.id,
+                            record["channel_id"],
+                        )
+                    except discord.Forbidden:
+                        self.logger.warning(
+                            "Missing permission to refresh canonical %s in channel %s",
+                            job.id,
+                            record["channel_id"],
+                        )
+                    except discord.HTTPException as exc:
+                        self.logger.warning(
+                            "Failed to refresh canonical %s in channel %s: %s",
+                            job.id,
+                            record["channel_id"],
+                            exc,
+                        )
 
-            if refreshed_any:
-                refreshed_ids.append(job.id)
+                if refreshed_any:
+                    refreshed_ids.append(job.id)
 
         return refreshed_ids
 
@@ -230,22 +231,13 @@ class DiscordPublisher:
             return base
         return f"{FALLBACK_COMPANY_EMOJI} {base}"
 
-    async def _resolve_logo_url(self, job: CanonicalJob) -> Optional[str]:
-        if self.database and job.normalized_company:
-            branding = await self.database.get_company_branding(job.normalized_company)
-            if branding:
-                logo_url = self._build_logo_thumbnail_url(
-                    homepage_url=branding["homepage_url"] or "",
-                    careers_url=branding["careers_url"] or "",
-                    canonical_url=job.canonical_url,
-                )
-                if logo_url:
-                    return logo_url
-        logo_url = self._build_logo_thumbnail_url(
-            homepage_url="",
-            careers_url="",
-            canonical_url=job.canonical_url,
-        )
+    async def _resolve_logo_url(
+        self,
+        job: CanonicalJob,
+        *,
+        http_client: Optional[AsyncHttpClient] = None,
+    ) -> Optional[str]:
+        logo_url = await self.branding.resolve_logo_url_for_job(job, http_client=http_client)
         return logo_url or FALLBACK_COMPANY_THUMBNAIL_URL
 
     def _compact_summary(self, summary: str) -> str:
@@ -293,21 +285,14 @@ class DiscordPublisher:
         canonical_url: str,
     ) -> Optional[str]:
         for candidate in (homepage_url, careers_url, canonical_url):
-            host = self._extract_brand_host(candidate)
-            if host:
-                return f"https://icons.duckduckgo.com/ip3/{host}.ico"
+            favicon_url = build_favicon_url(candidate)
+            if favicon_url:
+                return favicon_url
         return None
 
     def _extract_brand_host(self, url: str) -> Optional[str]:
-        if not url:
-            return None
-        parsed = urlparse(url)
-        if not parsed.scheme or not parsed.netloc:
-            return None
-        host = parsed.netloc.lower()
-        if any(host == suffix or host.endswith(f".{suffix}") for suffix in SHARED_HOST_SUFFIXES):
-            return None
-        return host
+        host = extract_url_host(url)
+        return host or None
 
     async def _is_probable_repeat_for_channel(self, job: CanonicalJob, channel_id: int) -> bool:
         candidates = await self.database.get_posted_candidates(
