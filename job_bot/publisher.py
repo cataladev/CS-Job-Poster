@@ -4,7 +4,7 @@ import asyncio
 import logging
 import re
 from typing import List, Optional
-from urllib.parse import urlencode, urlparse
+from urllib.parse import urlparse
 
 import discord
 from discord.ext import commands
@@ -50,6 +50,7 @@ SHARED_HOST_SUFFIXES = (
     "simplify.jobs",
 )
 FALLBACK_COMPANY_EMOJI = "🧌"
+FALLBACK_COMPANY_THUMBNAIL_URL = "https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/72x72/1f9cc.png"
 
 
 class DiscordPublisher:
@@ -137,15 +138,22 @@ class DiscordPublisher:
         return f"{FALLBACK_COMPANY_EMOJI} {base}"
 
     async def _resolve_logo_url(self, job: CanonicalJob) -> Optional[str]:
-        if not self.database or not job.normalized_company:
-            return None
-        branding = await self.database.get_company_branding(job.normalized_company)
-        if not branding:
-            return None
-        return self._build_logo_thumbnail_url(
-            homepage_url=branding["homepage_url"] or "",
-            careers_url=branding["careers_url"] or "",
+        if self.database and job.normalized_company:
+            branding = await self.database.get_company_branding(job.normalized_company)
+            if branding:
+                logo_url = self._build_logo_thumbnail_url(
+                    homepage_url=branding["homepage_url"] or "",
+                    careers_url=branding["careers_url"] or "",
+                    canonical_url=job.canonical_url,
+                )
+                if logo_url:
+                    return logo_url
+        logo_url = self._build_logo_thumbnail_url(
+            homepage_url="",
+            careers_url="",
+            canonical_url=job.canonical_url,
         )
+        return logo_url or FALLBACK_COMPANY_THUMBNAIL_URL
 
     def _compact_summary(self, summary: str) -> str:
         cleaned = collapse_whitespace(strip_html(summary))
@@ -189,16 +197,15 @@ class DiscordPublisher:
         *,
         homepage_url: str,
         careers_url: str,
+        canonical_url: str,
     ) -> Optional[str]:
-        for candidate in (homepage_url, careers_url):
-            domain_url = self._extract_brand_domain(candidate)
-            if domain_url:
-                return "https://www.google.com/s2/favicons?" + urlencode(
-                    {"sz": "128", "domain_url": domain_url}
-                )
+        for candidate in (homepage_url, careers_url, canonical_url):
+            host = self._extract_brand_host(candidate)
+            if host:
+                return f"https://icons.duckduckgo.com/ip3/{host}.ico"
         return None
 
-    def _extract_brand_domain(self, url: str) -> Optional[str]:
+    def _extract_brand_host(self, url: str) -> Optional[str]:
         if not url:
             return None
         parsed = urlparse(url)
@@ -207,7 +214,7 @@ class DiscordPublisher:
         host = parsed.netloc.lower()
         if any(host == suffix or host.endswith(f".{suffix}") for suffix in SHARED_HOST_SUFFIXES):
             return None
-        return f"{parsed.scheme.lower()}://{host}"
+        return host
 
     async def _is_probable_repeat_for_channel(self, job: CanonicalJob, channel_id: int) -> bool:
         candidates = await self.database.get_posted_candidates(

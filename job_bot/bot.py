@@ -6,7 +6,7 @@ import json
 import logging
 from collections import Counter
 from math import ceil
-from typing import Any, List, Sequence
+from typing import Any, List, Optional, Sequence
 
 import discord
 from discord.ext import commands
@@ -26,6 +26,47 @@ COMPANIES_PAGE_SIZE = 12
 COMPANIES_PREV_EMOJI = "⬅️"
 COMPANIES_NEXT_EMOJI = "➡️"
 COMPANIES_STOP_EMOJI = "⏹️"
+DEFAULT_PAGE_SIZE = 10
+RECENT_PAGE_SIZE = 8
+HELP_PAGE_SIZE = 8
+
+
+def build_paginated_embed(
+    *,
+    title: str,
+    entries: Sequence[str],
+    page_index: int,
+    page_size: int,
+    description: str = "",
+    empty_text: str = "No items to show.",
+    color: Optional[discord.Color] = None,
+) -> discord.Embed:
+    total = len(entries)
+    total_pages = max(1, ceil(total / page_size))
+    safe_page_index = min(max(page_index, 0), total_pages - 1)
+    start = safe_page_index * page_size
+    end = min(start + page_size, total)
+    page_entries = entries[start:end]
+
+    body = "\n\n".join(page_entries) if page_entries else empty_text
+    if description:
+        body = f"{description}\n\n{body}" if body else description
+
+    embed = discord.Embed(
+        title=title,
+        description=body,
+        color=color or discord.Color.blurple(),
+    )
+    if total:
+        footer_text = (
+            f"Page {safe_page_index + 1}/{total_pages} • "
+            f"Showing {start + 1}-{end} of {total} • "
+            f"Use reactions to browse"
+        )
+    else:
+        footer_text = "Page 1/1"
+    embed.set_footer(text=footer_text)
+    return embed
 
 
 def _company_categories(row: Any) -> str:
@@ -34,37 +75,25 @@ def _company_categories(row: Any) -> str:
 
 
 def build_companies_embed(rows: Sequence[Any], *, page_index: int, query: str = "") -> discord.Embed:
-    total = len(rows)
-    total_pages = max(1, ceil(total / COMPANIES_PAGE_SIZE))
-    safe_page_index = min(max(page_index, 0), total_pages - 1)
-    start = safe_page_index * COMPANIES_PAGE_SIZE
-    end = min(start + COMPANIES_PAGE_SIZE, total)
-    page_rows = rows[start:end]
-
     title = "Watchlist Companies"
     if query:
         title += f" for '{query}'"
 
-    description_lines = []
-    for row in page_rows:
-        description_lines.append(
+    entries = []
+    for row in rows:
+        entries.append(
             f"`#{row['id']}` **{row['company']}**\n"
             f"`{row['tier']}` • {_company_categories(row)}"
         )
 
-    embed = discord.Embed(
+    return build_paginated_embed(
         title=title,
-        description="\n\n".join(description_lines) if description_lines else "No companies matched that query.",
+        entries=entries,
+        page_index=page_index,
+        page_size=COMPANIES_PAGE_SIZE,
+        empty_text="No companies matched that query.",
         color=discord.Color.blurple(),
     )
-    embed.set_footer(
-        text=(
-            f"Page {safe_page_index + 1}/{total_pages} • "
-            f"Showing {start + 1}-{end} of {total} • "
-            f"Use reactions to browse"
-        )
-    )
-    return embed
 
 
 async def run_bot() -> None:
@@ -101,6 +130,79 @@ async def run_bot() -> None:
     async def on_ready() -> None:
         logger.info("Bot ready as %s", bot.user)
         scheduler.start()
+
+    async def _send_paginated_entries(
+        ctx: commands.Context,
+        *,
+        title: str,
+        entries: Sequence[str],
+        page_size: int = DEFAULT_PAGE_SIZE,
+        description: str = "",
+        empty_text: str = "No items to show.",
+        color: Optional[discord.Color] = None,
+    ) -> None:
+        message = await ctx.send(
+            embed=build_paginated_embed(
+                title=title,
+                entries=entries,
+                page_index=0,
+                page_size=page_size,
+                description=description,
+                empty_text=empty_text,
+                color=color,
+            )
+        )
+        if len(entries) <= page_size:
+            return
+
+        controls = [COMPANIES_PREV_EMOJI, COMPANIES_NEXT_EMOJI, COMPANIES_STOP_EMOJI]
+        try:
+            for emoji in controls:
+                await message.add_reaction(emoji)
+        except discord.HTTPException:
+            return
+
+        current_page = 0
+        total_pages = ceil(len(entries) / page_size)
+
+        def _check(reaction: discord.Reaction, user: discord.abc.User) -> bool:
+            return (
+                reaction.message.id == message.id
+                and not user.bot
+                and str(reaction.emoji) in controls
+            )
+
+        while True:
+            try:
+                reaction, user = await bot.wait_for("reaction_add", timeout=120.0, check=_check)
+            except asyncio.TimeoutError:
+                with contextlib.suppress(discord.HTTPException):
+                    await message.clear_reactions()
+                break
+
+            emoji = str(reaction.emoji)
+            if emoji == COMPANIES_STOP_EMOJI:
+                with contextlib.suppress(discord.HTTPException):
+                    await message.clear_reactions()
+                break
+            if emoji == COMPANIES_PREV_EMOJI:
+                current_page = (current_page - 1) % total_pages
+            elif emoji == COMPANIES_NEXT_EMOJI:
+                current_page = (current_page + 1) % total_pages
+
+            await message.edit(
+                embed=build_paginated_embed(
+                    title=title,
+                    entries=entries,
+                    page_index=current_page,
+                    page_size=page_size,
+                    description=description,
+                    empty_text=empty_text,
+                    color=color,
+                )
+            )
+            with contextlib.suppress(discord.HTTPException):
+                await message.remove_reaction(reaction.emoji, user)
 
     def _is_admin(ctx: commands.Context) -> bool:
         if getattr(ctx.author, "guild_permissions", None) and ctx.author.guild_permissions.manage_guild:
@@ -144,37 +246,51 @@ async def run_bot() -> None:
     @bot.command(name="stats")
     async def stats_command(ctx: commands.Context) -> None:
         stats = await database.get_stats()
-        await ctx.send(
-            "\n".join(
-                [
-                    f"Canonical jobs: {stats['total_canonical_jobs']}",
-                    f"Variants seen: {stats['total_jobs_found']}",
-                    f"Posted: {stats['total_posted']}",
-                    f"Deduplicated: {stats['total_deduplicated']}",
-                ]
-            )
-        )
+        embed = discord.Embed(title="Job Stats", color=discord.Color.blue())
+        embed.add_field(name="Canonical jobs", value=str(stats["total_canonical_jobs"]), inline=True)
+        embed.add_field(name="Variants seen", value=str(stats["total_jobs_found"]), inline=True)
+        embed.add_field(name="Posted", value=str(stats["total_posted"]), inline=True)
+        embed.add_field(name="Deduplicated", value=str(stats["total_deduplicated"]), inline=True)
+        await ctx.send(embed=embed)
 
     @bot.command(name="sources")
     async def sources_command(ctx: commands.Context) -> None:
-        lines = []
+        entries = []
         for source in build_sources(config):
             status = "enabled" if source.settings.enabled else "disabled"
             experimental = " experimental" if source.experimental else ""
-            lines.append(f"{source.name}: {status}, phase={source.phase}{experimental}")
-        await ctx.send("\n".join(lines) if lines else "No sources configured.")
+            entries.append(
+                f"**{source.name}**\n"
+                f"`{status}` • phase `{source.phase}` • priority `{source.priority}`{experimental}"
+            )
+        await _send_paginated_entries(
+            ctx,
+            title="Configured Sources",
+            entries=entries,
+            page_size=DEFAULT_PAGE_SIZE,
+            empty_text="No sources configured.",
+            color=discord.Color.dark_teal(),
+        )
 
     @bot.command(name="recent")
     async def recent_command(ctx: commands.Context) -> None:
-        jobs = await database.get_recent_jobs(limit=10)
+        jobs = await database.get_recent_jobs(limit=100)
         if not jobs:
             await ctx.send("No jobs stored yet.")
             return
-        lines = [
-            f"[{job.track}] {job.company} - {job.title} ({job.location})"
+        entries = [
+            f"**{job.company}**\n"
+            f"`{job.track}` • {job.title}\n"
+            f"{job.location}"
             for job in jobs
         ]
-        await ctx.send("\n".join(lines))
+        await _send_paginated_entries(
+            ctx,
+            title="Recent Jobs",
+            entries=entries,
+            page_size=RECENT_PAGE_SIZE,
+            color=discord.Color.green(),
+        )
 
     @bot.command(name="dedupecheck")
     async def dedupecheck_command(ctx: commands.Context, *, query: str) -> None:
@@ -231,37 +347,45 @@ async def run_bot() -> None:
             return
         tracks = Counter(job.track for job in jobs)
         companies = Counter(job.company for job in jobs).most_common(5)
-        lines = [
-            f"Window: last {hours}h",
-            f"Total jobs: {len(jobs)}",
-            f"Internships: {tracks.get('internship', 0)}",
-            f"New grad: {tracks.get('new_grad', 0)}",
-            "Top companies: " + ", ".join(f"{name} ({count})" for name, count in companies),
-        ]
-        await ctx.send("\n".join(lines))
+        embed = discord.Embed(
+            title=f"Summary: last {hours}h",
+            color=discord.Color.gold(),
+        )
+        embed.add_field(name="Total jobs", value=str(len(jobs)), inline=True)
+        embed.add_field(name="Internships", value=str(tracks.get("internship", 0)), inline=True)
+        embed.add_field(name="New grad", value=str(tracks.get("new_grad", 0)), inline=True)
+        embed.add_field(
+            name="Top companies",
+            value=", ".join(f"{name} ({count})" for name, count in companies) or "none",
+            inline=False,
+        )
+        await ctx.send(embed=embed)
 
     async def _send_helpjobs(ctx: commands.Context) -> None:
-        await ctx.send(
-            "\n".join(
-                [
-                    "!ping - health check",
-                    "!help - show this help message",
-                    "!runjobs - trigger a manual discovery run",
-                    "!stats - show stored job stats",
-                    "!sources - list configured sources",
-                    "!recent - show the most recent jobs",
-                    "!requestcompany <company> | <careers_url> - request a company",
-                    "!companyrequests [pending|approved|denied|all] - admin request queue",
-                    "!approvecompany <request_id> - approve a company request",
-                    "!denycompany <request_id> [reason] - deny a company request",
-                    "!companies [query] - list watchlist companies",
-                    "!companyinfo <company|id> - show watchlist details",
-                    "!synccompanies - reimport the company watchlist seed",
-                    "!dedupecheck <url or text> - test duplicate detection",
-                    "!season [value] - show season filter configuration",
-                    "!summary [daily|weekly] - show recent summary stats",
-                ]
-            )
+        entries = [
+            "`!ping` - health check",
+            "`!help` - show this help message",
+            "`!runjobs` - trigger a manual discovery run",
+            "`!stats` - show stored job stats",
+            "`!sources` - list configured sources",
+            "`!recent` - show the most recent jobs",
+            "`!requestcompany <company> | <careers_url>` - request a company",
+            "`!companyrequests [pending|approved|denied|all]` - admin request queue",
+            "`!approvecompany <request_id>` - approve a company request",
+            "`!denycompany <request_id> [reason]` - deny a company request",
+            "`!companies [query]` - list watchlist companies",
+            "`!companyinfo <company|id>` - show watchlist details",
+            "`!synccompanies` - reimport the company watchlist seed",
+            "`!dedupecheck <url or text>` - test duplicate detection",
+            "`!season [value]` - show season filter configuration",
+            "`!summary [daily|weekly]` - show recent summary stats",
+        ]
+        await _send_paginated_entries(
+            ctx,
+            title="Command Help",
+            entries=entries,
+            page_size=HELP_PAGE_SIZE,
+            color=discord.Color.purple(),
         )
 
     @bot.command(name="help")
@@ -297,11 +421,18 @@ async def run_bot() -> None:
         if not requests:
             await ctx.send("No company requests found.")
             return
-        lines = [
-            f"#{row['id']} [{row['status']}] {row['company']} | {row['careers_url']}"
+        entries = [
+            f"`#{row['id']}` **{row['company']}**\n"
+            f"`{row['status']}` • {row['careers_url']}"
             for row in requests
         ]
-        await ctx.send("\n".join(lines[:20]))
+        await _send_paginated_entries(
+            ctx,
+            title="Company Requests",
+            entries=entries,
+            page_size=DEFAULT_PAGE_SIZE,
+            color=discord.Color.orange(),
+        )
 
     @bot.command(name="approvecompany")
     async def approvecompany(ctx: commands.Context, request_id: int) -> None:
@@ -337,47 +468,22 @@ async def run_bot() -> None:
             await ctx.send("No companies matched that query.")
             return
 
-        current_page = 0
-        message = await ctx.send(embed=build_companies_embed(rows, page_index=current_page, query=query))
-        if len(rows) <= COMPANIES_PAGE_SIZE:
-            return
-
-        controls = [COMPANIES_PREV_EMOJI, COMPANIES_NEXT_EMOJI, COMPANIES_STOP_EMOJI]
-        try:
-            for emoji in controls:
-                await message.add_reaction(emoji)
-        except discord.HTTPException:
-            return
-
-        def _check(reaction: discord.Reaction, user: discord.abc.User) -> bool:
-            return (
-                reaction.message.id == message.id
-                and not user.bot
-                and str(reaction.emoji) in controls
-            )
-
-        total_pages = ceil(len(rows) / COMPANIES_PAGE_SIZE)
-        while True:
-            try:
-                reaction, user = await bot.wait_for("reaction_add", timeout=120.0, check=_check)
-            except asyncio.TimeoutError:
-                with contextlib.suppress(discord.HTTPException):
-                    await message.clear_reactions()
-                break
-
-            emoji = str(reaction.emoji)
-            if emoji == COMPANIES_STOP_EMOJI:
-                with contextlib.suppress(discord.HTTPException):
-                    await message.clear_reactions()
-                break
-            if emoji == COMPANIES_PREV_EMOJI:
-                current_page = (current_page - 1) % total_pages
-            elif emoji == COMPANIES_NEXT_EMOJI:
-                current_page = (current_page + 1) % total_pages
-
-            await message.edit(embed=build_companies_embed(rows, page_index=current_page, query=query))
-            with contextlib.suppress(discord.HTTPException):
-                await message.remove_reaction(reaction.emoji, user)
+        entries = [
+            f"`#{row['id']}` **{row['company']}**\n"
+            f"`{row['tier']}` • {_company_categories(row)}"
+            for row in rows
+        ]
+        title = "Watchlist Companies"
+        if query:
+            title += f" for '{query}'"
+        await _send_paginated_entries(
+            ctx,
+            title=title,
+            entries=entries,
+            page_size=COMPANIES_PAGE_SIZE,
+            empty_text="No companies matched that query.",
+            color=discord.Color.blurple(),
+        )
 
     @bot.command(name="companyinfo")
     async def companyinfo(ctx: commands.Context, *, query: str) -> None:
@@ -392,20 +498,26 @@ async def run_bot() -> None:
             locator = json.loads(target["locator"])
             display = locator.get("url") or locator.get("token") or locator
             target_lines.append(f"{target['target_type']}: {display}")
-        await ctx.send(
-            "\n".join(
-                [
-                    f"#{company['id']} {company['company']}",
-                    f"Tier: {company['tier']}",
-                    f"Categories: {', '.join(json.loads(company['categories'] or '[]'))}",
-                    f"Tracks: {', '.join(json.loads(company['tracks'] or '[]'))}",
-                    f"Careers: {company['careers_url']}",
-                    f"Last scan: {company['last_scan_at'] or 'never'}",
-                    f"Next scan: {company['next_scan_at'] or 'now'}",
-                    "Targets: " + (" | ".join(target_lines) if target_lines else "none"),
-                ]
-            )
+        embed = discord.Embed(
+            title=f"#{company['id']} {company['company']}",
+            color=discord.Color.teal(),
         )
+        embed.add_field(name="Tier", value=company["tier"], inline=True)
+        embed.add_field(
+            name="Categories",
+            value=", ".join(json.loads(company["categories"] or "[]")) or "none",
+            inline=True,
+        )
+        embed.add_field(
+            name="Tracks",
+            value=", ".join(json.loads(company["tracks"] or "[]")) or "none",
+            inline=True,
+        )
+        embed.add_field(name="Careers", value=company["careers_url"], inline=False)
+        embed.add_field(name="Last scan", value=company["last_scan_at"] or "never", inline=True)
+        embed.add_field(name="Next scan", value=company["next_scan_at"] or "now", inline=True)
+        embed.add_field(name="Targets", value=" | ".join(target_lines) if target_lines else "none", inline=False)
+        await ctx.send(embed=embed)
 
     @bot.command(name="synccompanies")
     async def synccompanies(ctx: commands.Context) -> None:

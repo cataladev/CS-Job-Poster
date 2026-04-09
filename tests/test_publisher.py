@@ -1,5 +1,7 @@
 from datetime import datetime, timezone
 
+import pytest
+
 from job_bot.models import CanonicalJob
 from job_bot.publisher import DiscordPublisher
 
@@ -100,9 +102,10 @@ def test_build_logo_thumbnail_url_uses_company_homepage(config_factory) -> None:
     url = publisher._build_logo_thumbnail_url(
         homepage_url="https://openai.com/company",
         careers_url="https://jobs.ashbyhq.com/openai",
+        canonical_url="https://jobs.ashbyhq.com/openai/123",
     )
 
-    assert url == "https://www.google.com/s2/favicons?sz=128&domain_url=https%3A%2F%2Fopenai.com"
+    assert url == "https://icons.duckduckgo.com/ip3/openai.com.ico"
 
 
 def test_build_logo_thumbnail_url_skips_shared_ats_hosts(config_factory) -> None:
@@ -111,6 +114,7 @@ def test_build_logo_thumbnail_url_skips_shared_ats_hosts(config_factory) -> None
     url = publisher._build_logo_thumbnail_url(
         homepage_url="https://jobs.lever.co",
         careers_url="https://jobs.lever.co/example",
+        canonical_url="https://jobs.lever.co/example/123",
     )
 
     assert url is None
@@ -127,10 +131,10 @@ def test_build_embed_sets_thumbnail_when_logo_url_present(config_factory) -> Non
 
     embed = publisher._build_embed(
         job,
-        logo_url="https://www.google.com/s2/favicons?sz=128&domain_url=https%3A%2F%2Fopenai.com",
+        logo_url="https://icons.duckduckgo.com/ip3/openai.com.ico",
     )
 
-    assert embed.thumbnail.url == "https://www.google.com/s2/favicons?sz=128&domain_url=https%3A%2F%2Fopenai.com"
+    assert embed.thumbnail.url == "https://icons.duckduckgo.com/ip3/openai.com.ico"
 
 
 def test_build_embed_uses_troll_emoji_when_logo_url_missing(config_factory) -> None:
@@ -146,3 +150,23 @@ def test_build_embed_uses_troll_emoji_when_logo_url_missing(config_factory) -> N
 
     company_field = next(field for field in embed.fields if field.name == "Company")
     assert company_field.value == "🧌 Stripe"
+    assert embed.thumbnail.url is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_logo_url_falls_back_to_troll_thumbnail(config_factory) -> None:
+    class DummyDatabase:
+        async def get_company_branding(self, normalized_company):
+            return None
+
+    publisher = DiscordPublisher(config_factory(), database=DummyDatabase())  # type: ignore[arg-type]
+    job = _canonical_job(
+        job_id=5,
+        title="Software Engineer Intern",
+        normalized_title="software engineer intern",
+        canonical_url="https://jobs.lever.co/example/5",
+    )
+
+    logo_url = await publisher._resolve_logo_url(job)
+
+    assert logo_url == "https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/72x72/1f9cc.png"
