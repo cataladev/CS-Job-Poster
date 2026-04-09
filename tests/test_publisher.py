@@ -153,6 +153,22 @@ def test_build_embed_uses_troll_emoji_when_logo_url_missing(config_factory) -> N
     assert embed.thumbnail.url is None
 
 
+def test_build_embed_uses_human_readable_source_labels(config_factory) -> None:
+    publisher = DiscordPublisher(config_factory(), database=None)  # type: ignore[arg-type]
+    job = _canonical_job(
+        job_id=6,
+        title="Software Engineer Intern",
+        normalized_title="software engineer intern",
+        canonical_url="https://example.com/jobs/6",
+    )
+    job.source_names = ["greenhouse", "github_simplify_internships", "company_watchlist_internship"]
+
+    embed = publisher._build_embed(job, logo_url=None)
+
+    source_field = next(field for field in embed.fields if field.name == "Source(s)")
+    assert source_field.value == "GitHub, Company Page, Greenhouse"
+
+
 @pytest.mark.asyncio
 async def test_resolve_logo_url_falls_back_to_troll_thumbnail(config_factory) -> None:
     class DummyDatabase:

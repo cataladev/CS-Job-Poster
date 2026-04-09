@@ -799,7 +799,7 @@ class Database:
         self,
         job: JobPosting,
         canonical_id: Optional[int] = None,
-    ) -> tuple[int, bool]:
+    ) -> tuple[int, bool, bool]:
         async with self._lock:
             if canonical_id is None:
                 now = _utc_now()
@@ -835,15 +835,23 @@ class Database:
                 )
                 canonical_id = int(cursor.lastrowid)
                 created = True
+                refresh_required = False
             else:
                 row = self._connection.execute(
-                    "SELECT source_names, provenance_tags FROM canonical_jobs WHERE id = ?",
+                    "SELECT source_names, provenance_tags, summary FROM canonical_jobs WHERE id = ?",
                     (canonical_id,),
                 ).fetchone()
                 existing_sources = json.loads(row["source_names"]) if row else []
                 existing_provenance = json.loads(row["provenance_tags"]) if row else []
+                existing_summary = row["summary"] if row else ""
                 merged_sources = sorted(set(existing_sources + [job.source_name]))
                 merged_provenance = sorted(set(existing_provenance + list(job.provenance_tags)))
+                resolved_summary = existing_summary or job.summary
+                refresh_required = (
+                    merged_sources != existing_sources
+                    or merged_provenance != existing_provenance
+                    or resolved_summary != existing_summary
+                )
                 self._connection.execute(
                     """
                     UPDATE canonical_jobs
@@ -907,7 +915,7 @@ class Database:
 
             self._store_fingerprints(canonical_id, job)
             self._connection.commit()
-            return canonical_id, created
+            return canonical_id, created, refresh_required
 
     def _store_fingerprints(self, canonical_id: int, job: JobPosting) -> None:
         keys = {f"strong:{job.dedupe_fingerprint}"}
@@ -1013,6 +1021,19 @@ class Database:
                 (canonical_id, track, str(channel_id), str(message_id), _utc_now()),
             )
             self._connection.commit()
+
+    async def get_post_records_for_canonical(self, canonical_id: int) -> List[sqlite3.Row]:
+        async with self._lock:
+            cursor = self._connection.execute(
+                """
+                SELECT channel_id, message_id, track, posted_at
+                FROM discord_posts
+                WHERE canonical_id = ?
+                ORDER BY posted_at ASC
+                """,
+                (canonical_id,),
+            )
+            return cursor.fetchall()
 
     async def get_canonical_jobs(self, canonical_ids: Iterable[int]) -> List[CanonicalJob]:
         values = [value for value in canonical_ids if value is not None]
