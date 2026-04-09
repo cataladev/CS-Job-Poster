@@ -15,14 +15,27 @@ if config.config_file_name is not None:
 
 load_dotenv()
 database_url = os.getenv("DATABASE_URL") or config.get_main_option("sqlalchemy.url")
-config.set_main_option("sqlalchemy.url", database_url)
+
+
+def _sqlalchemy_database_url(url: str) -> str:
+    # The runtime stack uses psycopg v3 directly, while Alembic/SQLAlchemy need
+    # an explicit driver name to avoid falling back to psycopg2.
+    if url.startswith("postgresql://"):
+        return url.replace("postgresql://", "postgresql+psycopg://", 1)
+    if url.startswith("postgres://"):
+        return url.replace("postgres://", "postgresql+psycopg://", 1)
+    return url
+
+
+sqlalchemy_database_url = _sqlalchemy_database_url(database_url)
+config.set_main_option("sqlalchemy.url", sqlalchemy_database_url)
 
 target_metadata = None
 
 
 def run_migrations_offline() -> None:
     context.configure(
-        url=database_url,
+        url=sqlalchemy_database_url,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
@@ -33,7 +46,7 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    connectable = create_engine(database_url, poolclass=pool.NullPool)
+    connectable = create_engine(sqlalchemy_database_url, poolclass=pool.NullPool)
 
     with connectable.connect() as connection:
         context.configure(connection=connection, target_metadata=target_metadata)
