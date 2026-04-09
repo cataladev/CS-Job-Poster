@@ -110,27 +110,3 @@ sources:
     track: internship
     listing_urls:
       - https://wellfound.com/jobs?query=software%20engineer%20intern
-
-  linkedin:
-    type: linkedin
-    enabled: false
-    priority: 40
-    track: internship
-    experimental: true
-    listing_urls: []
-
-  indeed:
-    type: indeed
-    enabled: false
-    priority: 40
-    track: internship
-    experimental: true
-    listing_urls: []
-
-  handshake:
-    type: handshake
-    enabled: false
-    priority: 40
-    track: internship
-    experimental: true
-    listing_urls: []

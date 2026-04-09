@@ -9,7 +9,6 @@ def test_load_config_defaults_to_fixed_daily_schedule(monkeypatch, tmp_path) -> 
     for key in [
         "SCHEDULED_RUN_HOURS",
         "SCHEDULE_TIMEZONE",
-        "CRON_INTERVAL_MINUTES",
         "DISCORD_TOKEN",
         "DISCORD_CHANNEL_ID",
         "DISCORD_NEW_GRAD_CHANNEL_ID",
