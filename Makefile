@@ -1,6 +1,7 @@
 -include .env
 
-export DATABASE_URL ?= postgresql://jobbot:jobbot@localhost:5432/jobbot
+export POSTGRES_HOST_PORT ?= 5432
+export DATABASE_URL ?= postgresql://jobbot:jobbot@localhost:$(POSTGRES_HOST_PORT)/jobbot
 export SQLITE_DB_PATH ?= job_bot.db
 
 PYTHON := .venv/bin/python
@@ -9,6 +10,8 @@ ALEMBIC := .venv/bin/alembic
 
 .PHONY: postgres-up postgres-down db-migrate db-import-sqlite dev-postgres test-postgres run-postgres
 
+# The local dev database runs in Docker and defaults to host port 5432. Override
+# POSTGRES_HOST_PORT in .env when another local Postgres instance already owns it.
 postgres-up:
 	docker compose up -d postgres
 	$(PYTHON) scripts/wait_for_postgres.py
