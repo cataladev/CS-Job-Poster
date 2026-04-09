@@ -244,6 +244,8 @@ async def run_bot() -> None:
                 await message.remove_reaction(reaction.emoji, user)
 
     allowed_role_ids = set(config.discord_admin_role_ids or DEFAULT_RESTRICTED_ROLE_IDS)
+    # Restricted commands use a real command check instead of an in-command guard so
+    # unauthorized users never trigger any side effects or interim "working..." messages.
     restricted_command = build_restricted_role_check(allowed_role_ids)
 
     @bot.event

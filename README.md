@@ -12,6 +12,8 @@ The bot is GitHub-first:
 
 This README is written for someone actively working on the codebase.
 
+Contribution docs live in [CONTRIBUTING.md](/Users/carlos/Development/Job%20Bot/CONTRIBUTING.md).
+
 ## Current Behavior
 
 - Posts internships to `DISCORD_CHANNEL_ID`
@@ -160,6 +162,13 @@ Syntax check:
 ```bash
 PYTHONPYCACHEPREFIX=.pycache python3 -m py_compile $(find job_bot tests -name '*.py' -print) bot.py
 ```
+
+## Contributing And Issues
+
+- Read [CONTRIBUTING.md](/Users/carlos/Development/Job%20Bot/CONTRIBUTING.md) before making structural changes.
+- Use GitHub Issues for bugs, source regressions, and feature requests.
+- Issue templates live under [`.github/ISSUE_TEMPLATE/`](/Users/carlos/Development/Job%20Bot/.github/ISSUE_TEMPLATE) and are meant to capture the minimum context needed to debug source, dedupe, and Discord behavior.
+- Keep changes small, tested, and documented when commands, schema, or env behavior changes.
 
 ## Manual Discord Commands
 
