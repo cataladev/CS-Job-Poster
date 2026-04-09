@@ -158,6 +158,16 @@ make db-import-sqlite      # optional; imports existing job_bot.db into Postgres
 make dev-postgres
 ```
 
+Full local startup sequence:
+
+```bash
+cd "/Users/carlos/Development/Job Bot"
+source .venv/bin/activate
+make postgres-up
+make db-migrate
+make dev-postgres
+```
+
 What each command does:
 
 - `make postgres-up` starts the local Postgres container and waits until it is ready
@@ -181,6 +191,17 @@ make postgres-up
 make db-migrate
 make dev-postgres
 ```
+
+If `make postgres-up` fails with `password authentication failed for user "jobbot"`, your local Docker volume was initialized with different credentials. Reset the local Postgres volume once and retry:
+
+```bash
+docker compose down -v
+make postgres-up
+make db-migrate
+make dev-postgres
+```
+
+You should not need to install `psycopg2-binary` separately. Alembic is configured to use the existing `psycopg` dependency from `requirements.txt`.
 
 The direct entrypoint is still:
 
