@@ -175,6 +175,7 @@ class AppConfig:
     discord_new_grad_channel_id: Optional[int]
     scheduled_run_hours: List[int]
     schedule_timezone: str
+    database_url: str
     sqlite_db_path: str
     remote_only: bool
     us_only: bool
@@ -201,3 +202,7 @@ class AppConfig:
         if track == "new_grad":
             return self.discord_new_grad_channel_id
         return self.discord_channel_id
+
+    @property
+    def database_dsn(self) -> str:
+        return self.database_url or self.sqlite_db_path

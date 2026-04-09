@@ -10,6 +10,7 @@ If you want to contribute, use this file as the working agreement for local setu
 - Use Python `3.11`.
 - Create a local `.env` from [.env.example](/Users/carlos/Development/Job%20Bot/.env.example).
 - Do not commit secrets, tokens, or local database files.
+- Use `DATABASE_URL` for real app runs; keep `SQLITE_DB_PATH` for isolated local test DBs only.
 
 ## Local Setup
 

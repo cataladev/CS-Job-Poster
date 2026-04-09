@@ -624,7 +624,7 @@ async def run_bot() -> None:
     if not config.discord_channel_id:
         raise RuntimeError("DISCORD_CHANNEL_ID is required")
 
-    database = Database(config.sqlite_db_path)
+    database = Database(config.database_dsn)
     await database.initialize()
     watchlist_service = WatchlistService(config, database)
     seed_stats = await watchlist_service.sync_seed(force_brand_refresh=False)

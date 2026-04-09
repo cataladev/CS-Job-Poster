@@ -2,13 +2,24 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from job_bot.models import CanonicalJob, JobPosting
 from job_bot.utils.normalization import normalize_company_name
+
+try:
+    import psycopg
+    from psycopg.rows import dict_row
+except ImportError:  # pragma: no cover - SQLite tests do not install postgres deps by default.
+    psycopg = None
+    dict_row = None
+
+
+DbRow = Mapping[str, Any]
 
 
 def _utc_now() -> str:
@@ -19,240 +30,336 @@ def _json_dump(value: Any) -> str:
     return json.dumps(value if value is not None else {}, sort_keys=True)
 
 
-class Database:
-    def __init__(self, path: str) -> None:
-        self.path = Path(path)
-        self._lock = asyncio.Lock()
-        self._connection = sqlite3.connect(self.path, check_same_thread=False)
+SQLITE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS canonical_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    track TEXT NOT NULL,
+    title TEXT NOT NULL,
+    company TEXT NOT NULL,
+    location TEXT NOT NULL,
+    summary TEXT,
+    canonical_url TEXT NOT NULL,
+    season_term TEXT,
+    employment_type TEXT,
+    remote_status TEXT,
+    status TEXT NOT NULL,
+    normalized_company TEXT NOT NULL,
+    normalized_title TEXT NOT NULL,
+    normalized_locations TEXT NOT NULL,
+    dedupe_fingerprint TEXT NOT NULL UNIQUE,
+    source_names TEXT NOT NULL,
+    provenance_tags TEXT NOT NULL DEFAULT '[]',
+    first_seen TEXT NOT NULL,
+    last_seen TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS job_variants (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    canonical_id INTEGER NOT NULL REFERENCES canonical_jobs(id) ON DELETE CASCADE,
+    track TEXT NOT NULL,
+    source_name TEXT NOT NULL,
+    source_job_id TEXT,
+    url TEXT NOT NULL,
+    canonical_url TEXT NOT NULL,
+    title TEXT NOT NULL,
+    company TEXT NOT NULL,
+    location TEXT NOT NULL,
+    summary TEXT,
+    posted_date TEXT,
+    date_found TEXT NOT NULL,
+    season_term TEXT,
+    employment_type TEXT,
+    remote_status TEXT,
+    status TEXT NOT NULL,
+    normalized_company TEXT NOT NULL,
+    normalized_title TEXT NOT NULL,
+    normalized_locations TEXT NOT NULL,
+    external_ids TEXT NOT NULL,
+    alternate_urls TEXT NOT NULL,
+    provenance_tags TEXT NOT NULL DEFAULT '[]',
+    raw_data TEXT NOT NULL,
+    row_hash TEXT,
+    variant_key TEXT NOT NULL UNIQUE
+);
+
+CREATE TABLE IF NOT EXISTS fingerprints (
+    fingerprint_key TEXT PRIMARY KEY,
+    canonical_id INTEGER NOT NULL REFERENCES canonical_jobs(id) ON DELETE CASCADE,
+    fingerprint_type TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS discord_posts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    canonical_id INTEGER NOT NULL REFERENCES canonical_jobs(id) ON DELETE CASCADE,
+    track TEXT NOT NULL,
+    channel_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    posted_at TEXT NOT NULL,
+    UNIQUE(canonical_id, channel_id)
+);
+
+CREATE TABLE IF NOT EXISTS source_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_name TEXT NOT NULL,
+    track TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    finished_at TEXT NOT NULL,
+    status TEXT NOT NULL,
+    jobs_fetched INTEGER NOT NULL,
+    jobs_filtered INTEGER NOT NULL,
+    jobs_new INTEGER NOT NULL,
+    jobs_duplicates INTEGER NOT NULL,
+    metadata TEXT NOT NULL,
+    error TEXT
+);
+
+CREATE TABLE IF NOT EXISTS source_errors (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_name TEXT NOT NULL,
+    occurred_at TEXT NOT NULL,
+    error TEXT NOT NULL,
+    context TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS github_repo_state (
+    repository TEXT NOT NULL,
+    path TEXT NOT NULL,
+    etag TEXT,
+    content_sha TEXT,
+    last_modified TEXT,
+    last_checked_at TEXT NOT NULL,
+    PRIMARY KEY(repository, path)
+);
+
+CREATE TABLE IF NOT EXISTS board_seeds (
+    source_name TEXT NOT NULL,
+    token TEXT NOT NULL,
+    track TEXT NOT NULL,
+    metadata TEXT NOT NULL,
+    discovered_from TEXT NOT NULL,
+    first_seen TEXT NOT NULL,
+    last_seen TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY(source_name, token, track)
+);
+
+CREATE TABLE IF NOT EXISTS dedupe_matches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    canonical_id INTEGER NOT NULL REFERENCES canonical_jobs(id) ON DELETE CASCADE,
+    variant_key TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    score REAL,
+    matched_on TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS company_watchlist (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company TEXT NOT NULL,
+    normalized_company TEXT NOT NULL,
+    careers_url TEXT NOT NULL,
+    homepage_url TEXT NOT NULL,
+    logo_url TEXT NOT NULL DEFAULT '',
+    logo_source TEXT NOT NULL DEFAULT '',
+    logo_verified_at TEXT,
+    country TEXT NOT NULL,
+    categories TEXT NOT NULL,
+    tier TEXT NOT NULL,
+    scan_cadence TEXT NOT NULL,
+    tracks TEXT NOT NULL,
+    seed_source TEXT NOT NULL,
+    notes TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1,
+    last_scan_at TEXT,
+    next_scan_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(normalized_company, careers_url)
+);
+
+CREATE TABLE IF NOT EXISTS company_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company TEXT NOT NULL,
+    normalized_company TEXT NOT NULL,
+    careers_url TEXT NOT NULL,
+    homepage_url TEXT NOT NULL DEFAULT '',
+    requester_user_id TEXT NOT NULL,
+    requester_channel_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    admin_notes TEXT NOT NULL,
+    approver_user_id TEXT,
+    watchlist_company_id INTEGER REFERENCES company_watchlist(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS company_scan_targets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id INTEGER NOT NULL REFERENCES company_watchlist(id) ON DELETE CASCADE,
+    target_type TEXT NOT NULL,
+    locator TEXT NOT NULL,
+    confidence REAL NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1,
+    verified_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(company_id, target_type, locator)
+);
+
+CREATE TABLE IF NOT EXISTS company_scan_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id INTEGER NOT NULL REFERENCES company_watchlist(id) ON DELETE CASCADE,
+    target_type TEXT NOT NULL,
+    track TEXT NOT NULL,
+    scanned_at TEXT NOT NULL,
+    success INTEGER NOT NULL,
+    jobs_found INTEGER NOT NULL,
+    error TEXT
+);
+
+CREATE TABLE IF NOT EXISTS job_user_profiles (
+    user_id TEXT PRIMARY KEY,
+    visibility TEXT NOT NULL DEFAULT 'matched',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS job_application_statuses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL REFERENCES job_user_profiles(user_id) ON DELETE CASCADE,
+    company_id INTEGER NOT NULL REFERENCES company_watchlist(id) ON DELETE CASCADE,
+    status TEXT NOT NULL,
+    notes TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(user_id, company_id)
+);
+
+CREATE TABLE IF NOT EXISTS process_notes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL REFERENCES job_user_profiles(user_id) ON DELETE CASCADE,
+    company_id INTEGER NOT NULL REFERENCES company_watchlist(id) ON DELETE CASCADE,
+    body TEXT NOT NULL,
+    legacy_status_id INTEGER UNIQUE REFERENCES job_application_statuses(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_process_notes_company_created_at
+    ON process_notes(company_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_process_notes_user_company
+    ON process_notes(user_id, company_id);
+"""
+
+POSTGRES_SCHEMA = SQLITE_SCHEMA.replace(
+    "INTEGER PRIMARY KEY AUTOINCREMENT",
+    "BIGSERIAL PRIMARY KEY",
+)
+POSTGRES_SCHEMA = POSTGRES_SCHEMA.replace(
+    "INTEGER NOT NULL REFERENCES",
+    "BIGINT NOT NULL REFERENCES",
+).replace(
+    "INTEGER UNIQUE REFERENCES",
+    "BIGINT UNIQUE REFERENCES",
+).replace(
+    "INTEGER REFERENCES",
+    "BIGINT REFERENCES",
+)
+
+
+class _SQLiteConnectionAdapter:
+    backend = "sqlite"
+
+    def __init__(self, path: Path) -> None:
+        self._connection = sqlite3.connect(path, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
         self._connection.execute("PRAGMA foreign_keys = ON")
 
+    def execute(self, sql: str, params: Iterable[Any] = ()) -> Any:
+        return self._connection.execute(sql, tuple(params))
+
+    def executescript(self, script: str) -> None:
+        self._connection.executescript(script)
+
+    def commit(self) -> None:
+        self._connection.commit()
+
+    def close(self) -> None:
+        self._connection.close()
+
+    def column_names(self, table_name: str) -> set[str]:
+        return {
+            row["name"]
+            for row in self._connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+        }
+
+
+class _PostgresConnectionAdapter:
+    backend = "postgres"
+    _question_mark_re = re.compile(r"\?")
+
+    def __init__(self, dsn: str) -> None:
+        if psycopg is None or dict_row is None:
+            raise RuntimeError(
+                "psycopg is required for PostgreSQL connections. Install the dependencies from requirements.txt."
+            )
+        self._connection = psycopg.connect(dsn, row_factory=dict_row)
+
+    def execute(self, sql: str, params: Iterable[Any] = ()) -> Any:
+        return self._connection.execute(self._translate_sql(sql), tuple(params))
+
+    def executescript(self, script: str) -> None:
+        for statement in script.split(";"):
+            sql = statement.strip()
+            if not sql:
+                continue
+            self._connection.execute(sql)
+
+    def commit(self) -> None:
+        self._connection.commit()
+
+    def close(self) -> None:
+        self._connection.close()
+
+    def column_names(self, table_name: str) -> set[str]:
+        rows = self.execute(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = ?
+            """,
+            (table_name,),
+        ).fetchall()
+        return {row["column_name"] for row in rows}
+
+    def _translate_sql(self, sql: str) -> str:
+        translated = sql.replace(" COLLATE NOCASE", "")
+        if re.match(r"^\s*INSERT\s+OR\s+IGNORE\s+INTO\b", translated, flags=re.IGNORECASE):
+            translated = re.sub(
+                r"INSERT\s+OR\s+IGNORE\s+INTO",
+                "INSERT INTO",
+                translated,
+                count=1,
+                flags=re.IGNORECASE,
+            ).rstrip()
+            translated = f"{translated} ON CONFLICT DO NOTHING"
+        return self._question_mark_re.sub("%s", translated)
+
+
+class Database:
+    def __init__(self, dsn_or_path: str) -> None:
+        self.dsn_or_path = dsn_or_path
+        self.path = self._sqlite_path(dsn_or_path) if not self._is_postgres_dsn(dsn_or_path) else None
+        self._lock = asyncio.Lock()
+        self._connection = self._build_connection(dsn_or_path)
+        self.backend = self._connection.backend
+
     async def initialize(self) -> None:
         async with self._lock:
-            self._connection.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS canonical_jobs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    track TEXT NOT NULL,
-                    title TEXT NOT NULL,
-                    company TEXT NOT NULL,
-                    location TEXT NOT NULL,
-                    summary TEXT,
-                    canonical_url TEXT NOT NULL,
-                    season_term TEXT,
-                    employment_type TEXT,
-                    remote_status TEXT,
-                    status TEXT NOT NULL,
-                    normalized_company TEXT NOT NULL,
-                    normalized_title TEXT NOT NULL,
-                    normalized_locations TEXT NOT NULL,
-                    dedupe_fingerprint TEXT NOT NULL UNIQUE,
-                    source_names TEXT NOT NULL,
-                    provenance_tags TEXT NOT NULL DEFAULT '[]',
-                    first_seen TEXT NOT NULL,
-                    last_seen TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS job_variants (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    canonical_id INTEGER NOT NULL REFERENCES canonical_jobs(id) ON DELETE CASCADE,
-                    track TEXT NOT NULL,
-                    source_name TEXT NOT NULL,
-                    source_job_id TEXT,
-                    url TEXT NOT NULL,
-                    canonical_url TEXT NOT NULL,
-                    title TEXT NOT NULL,
-                    company TEXT NOT NULL,
-                    location TEXT NOT NULL,
-                    summary TEXT,
-                    posted_date TEXT,
-                    date_found TEXT NOT NULL,
-                    season_term TEXT,
-                    employment_type TEXT,
-                    remote_status TEXT,
-                    status TEXT NOT NULL,
-                    normalized_company TEXT NOT NULL,
-                    normalized_title TEXT NOT NULL,
-                    normalized_locations TEXT NOT NULL,
-                    external_ids TEXT NOT NULL,
-                    alternate_urls TEXT NOT NULL,
-                    provenance_tags TEXT NOT NULL DEFAULT '[]',
-                    raw_data TEXT NOT NULL,
-                    row_hash TEXT,
-                    variant_key TEXT NOT NULL UNIQUE
-                );
-
-                CREATE TABLE IF NOT EXISTS fingerprints (
-                    fingerprint_key TEXT PRIMARY KEY,
-                    canonical_id INTEGER NOT NULL REFERENCES canonical_jobs(id) ON DELETE CASCADE,
-                    fingerprint_type TEXT NOT NULL,
-                    created_at TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS discord_posts (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    canonical_id INTEGER NOT NULL REFERENCES canonical_jobs(id) ON DELETE CASCADE,
-                    track TEXT NOT NULL,
-                    channel_id TEXT NOT NULL,
-                    message_id TEXT NOT NULL,
-                    posted_at TEXT NOT NULL,
-                    UNIQUE(canonical_id, channel_id)
-                );
-
-                CREATE TABLE IF NOT EXISTS source_runs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    source_name TEXT NOT NULL,
-                    track TEXT NOT NULL,
-                    started_at TEXT NOT NULL,
-                    finished_at TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    jobs_fetched INTEGER NOT NULL,
-                    jobs_filtered INTEGER NOT NULL,
-                    jobs_new INTEGER NOT NULL,
-                    jobs_duplicates INTEGER NOT NULL,
-                    metadata TEXT NOT NULL,
-                    error TEXT
-                );
-
-                CREATE TABLE IF NOT EXISTS source_errors (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    source_name TEXT NOT NULL,
-                    occurred_at TEXT NOT NULL,
-                    error TEXT NOT NULL,
-                    context TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS github_repo_state (
-                    repository TEXT NOT NULL,
-                    path TEXT NOT NULL,
-                    etag TEXT,
-                    content_sha TEXT,
-                    last_modified TEXT,
-                    last_checked_at TEXT NOT NULL,
-                    PRIMARY KEY(repository, path)
-                );
-
-                CREATE TABLE IF NOT EXISTS board_seeds (
-                    source_name TEXT NOT NULL,
-                    token TEXT NOT NULL,
-                    track TEXT NOT NULL,
-                    metadata TEXT NOT NULL,
-                    discovered_from TEXT NOT NULL,
-                    first_seen TEXT NOT NULL,
-                    last_seen TEXT NOT NULL,
-                    active INTEGER NOT NULL DEFAULT 1,
-                    PRIMARY KEY(source_name, token, track)
-                );
-
-                CREATE TABLE IF NOT EXISTS dedupe_matches (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    canonical_id INTEGER NOT NULL REFERENCES canonical_jobs(id) ON DELETE CASCADE,
-                    variant_key TEXT NOT NULL,
-                    reason TEXT NOT NULL,
-                    score REAL,
-                    matched_on TEXT NOT NULL,
-                    created_at TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS company_watchlist (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    company TEXT NOT NULL,
-                    normalized_company TEXT NOT NULL,
-                    careers_url TEXT NOT NULL,
-                    homepage_url TEXT NOT NULL,
-                    logo_url TEXT NOT NULL DEFAULT '',
-                    logo_source TEXT NOT NULL DEFAULT '',
-                    logo_verified_at TEXT,
-                    country TEXT NOT NULL,
-                    categories TEXT NOT NULL,
-                    tier TEXT NOT NULL,
-                    scan_cadence TEXT NOT NULL,
-                    tracks TEXT NOT NULL,
-                    seed_source TEXT NOT NULL,
-                    notes TEXT NOT NULL,
-                    active INTEGER NOT NULL DEFAULT 1,
-                    last_scan_at TEXT,
-                    next_scan_at TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    UNIQUE(normalized_company, careers_url)
-                );
-
-                CREATE TABLE IF NOT EXISTS company_requests (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    company TEXT NOT NULL,
-                    normalized_company TEXT NOT NULL,
-                    careers_url TEXT NOT NULL,
-                    homepage_url TEXT NOT NULL DEFAULT '',
-                    requester_user_id TEXT NOT NULL,
-                    requester_channel_id TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    admin_notes TEXT NOT NULL,
-                    approver_user_id TEXT,
-                    watchlist_company_id INTEGER REFERENCES company_watchlist(id) ON DELETE SET NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS company_scan_targets (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    company_id INTEGER NOT NULL REFERENCES company_watchlist(id) ON DELETE CASCADE,
-                    target_type TEXT NOT NULL,
-                    locator TEXT NOT NULL,
-                    confidence REAL NOT NULL,
-                    active INTEGER NOT NULL DEFAULT 1,
-                    verified_at TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    UNIQUE(company_id, target_type, locator)
-                );
-
-                CREATE TABLE IF NOT EXISTS company_scan_history (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    company_id INTEGER NOT NULL REFERENCES company_watchlist(id) ON DELETE CASCADE,
-                    target_type TEXT NOT NULL,
-                    track TEXT NOT NULL,
-                    scanned_at TEXT NOT NULL,
-                    success INTEGER NOT NULL,
-                    jobs_found INTEGER NOT NULL,
-                    error TEXT
-                );
-
-                CREATE TABLE IF NOT EXISTS job_user_profiles (
-                    user_id TEXT PRIMARY KEY,
-                    visibility TEXT NOT NULL DEFAULT 'matched',
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS job_application_statuses (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id TEXT NOT NULL REFERENCES job_user_profiles(user_id) ON DELETE CASCADE,
-                    company_id INTEGER NOT NULL REFERENCES company_watchlist(id) ON DELETE CASCADE,
-                    status TEXT NOT NULL,
-                    notes TEXT NOT NULL DEFAULT '',
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    UNIQUE(user_id, company_id)
-                );
-
-                CREATE TABLE IF NOT EXISTS process_notes (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id TEXT NOT NULL REFERENCES job_user_profiles(user_id) ON DELETE CASCADE,
-                    company_id INTEGER NOT NULL REFERENCES company_watchlist(id) ON DELETE CASCADE,
-                    body TEXT NOT NULL,
-                    legacy_status_id INTEGER UNIQUE REFERENCES job_application_statuses(id) ON DELETE SET NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_process_notes_company_created_at
-                    ON process_notes(company_id, created_at DESC);
-
-                CREATE INDEX IF NOT EXISTS idx_process_notes_user_company
-                    ON process_notes(user_id, company_id);
-                """
-            )
+            schema = POSTGRES_SCHEMA if self.backend == "postgres" else SQLITE_SCHEMA
+            self._connection.executescript(schema)
             self._ensure_column("canonical_jobs", "provenance_tags", "TEXT NOT NULL DEFAULT '[]'")
             self._ensure_column("job_variants", "provenance_tags", "TEXT NOT NULL DEFAULT '[]'")
             self._ensure_column("company_watchlist", "logo_url", "TEXT NOT NULL DEFAULT ''")
@@ -268,15 +375,41 @@ class Database:
             self._connection.close()
 
     def _ensure_column(self, table_name: str, column_name: str, column_sql: str) -> None:
-        columns = {
-            row["name"]
-            for row in self._connection.execute(f"PRAGMA table_info({table_name})").fetchall()
-        }
+        columns = self._connection.column_names(table_name)
         if column_name in columns:
             return
-        self._connection.execute(
-            f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}"
-        )
+        if self.backend == "postgres":
+            self._connection.execute(
+                f"ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS {column_name} {column_sql}"
+            )
+            return
+        self._connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}")
+
+    def _build_connection(self, dsn_or_path: str) -> _SQLiteConnectionAdapter | _PostgresConnectionAdapter:
+        if self._is_postgres_dsn(dsn_or_path):
+            return _PostgresConnectionAdapter(dsn_or_path)
+        return _SQLiteConnectionAdapter(self._sqlite_path(dsn_or_path))
+
+    def _insert_and_get_id(self, sql: str, params: Iterable[Any]) -> int:
+        if self.backend == "postgres":
+            cursor = self._connection.execute(f"{sql.rstrip().rstrip(';')} RETURNING id", params)
+            row = cursor.fetchone()
+            if not row:
+                raise RuntimeError("Insert did not return an id.")
+            return int(row["id"])
+        cursor = self._connection.execute(sql, params)
+        return int(cursor.lastrowid)
+
+    @staticmethod
+    def _is_postgres_dsn(dsn_or_path: str) -> bool:
+        lowered = dsn_or_path.lower()
+        return lowered.startswith("postgres://") or lowered.startswith("postgresql://")
+
+    @staticmethod
+    def _sqlite_path(dsn_or_path: str) -> Path:
+        if dsn_or_path.lower().startswith("sqlite:///"):
+            return Path(dsn_or_path[10:])
+        return Path(dsn_or_path)
 
     def _migrate_legacy_process_notes(self) -> None:
         self._connection.execute(
@@ -330,9 +463,9 @@ class Database:
         company_id: int,
         body: str,
         legacy_status_id: Optional[int] = None,
-    ) -> sqlite3.Row:
+    ) -> DbRow:
         now = _utc_now()
-        cursor = self._connection.execute(
+        note_id = self._insert_and_get_id(
             """
             INSERT INTO process_notes (
                 user_id,
@@ -347,10 +480,10 @@ class Database:
         )
         return self._connection.execute(
             "SELECT * FROM process_notes WHERE id = ?",
-            (cursor.lastrowid,),
+            (note_id,),
         ).fetchone()
 
-    async def get_github_state(self, repository: str, path: str) -> Optional[sqlite3.Row]:
+    async def get_github_state(self, repository: str, path: str) -> Optional[DbRow]:
         async with self._lock:
             cursor = self._connection.execute(
                 "SELECT * FROM github_repo_state WHERE repository = ? AND path = ?",
@@ -415,7 +548,7 @@ class Database:
             )
             self._connection.commit()
 
-    async def get_board_seeds(self, source_name: str, track: Optional[str] = None) -> List[sqlite3.Row]:
+    async def get_board_seeds(self, source_name: str, track: Optional[str] = None) -> List[DbRow]:
         query = "SELECT * FROM board_seeds WHERE source_name = ? AND active = 1"
         params: List[Any] = [source_name]
         if track:
@@ -509,7 +642,7 @@ class Database:
                 self._connection.commit()
                 return int(existing["id"])
 
-            cursor = self._connection.execute(
+            company_id = self._insert_and_get_id(
                 """
                 INSERT INTO company_watchlist (
                     company, normalized_company, careers_url, homepage_url,
@@ -540,7 +673,7 @@ class Database:
                 ),
             )
             self._connection.commit()
-            return int(cursor.lastrowid)
+            return company_id
 
     async def list_watchlist_companies(
         self,
@@ -548,7 +681,7 @@ class Database:
         query: str = "",
         active_only: bool = True,
         limit: int = 50,
-    ) -> List[sqlite3.Row]:
+    ) -> List[DbRow]:
         sql = "SELECT * FROM company_watchlist WHERE 1 = 1"
         params: List[Any] = []
         if active_only:
@@ -557,19 +690,19 @@ class Database:
             like = f"%{query.lower()}%"
             sql += " AND (lower(company) LIKE ? OR lower(tier) LIKE ? OR lower(categories) LIKE ?)"
             params.extend([like, like, like])
-        sql += " ORDER BY company COLLATE NOCASE ASC, tier ASC LIMIT ?"
+        sql += " ORDER BY lower(company) ASC, tier ASC LIMIT ?"
         params.append(limit)
         async with self._lock:
             return self._connection.execute(sql, params).fetchall()
 
-    async def get_watchlist_company_by_id(self, company_id: int) -> Optional[sqlite3.Row]:
+    async def get_watchlist_company_by_id(self, company_id: int) -> Optional[DbRow]:
         async with self._lock:
             return self._connection.execute(
                 "SELECT * FROM company_watchlist WHERE id = ?",
                 (company_id,),
             ).fetchone()
 
-    async def find_watchlist_company(self, query: str) -> Optional[sqlite3.Row]:
+    async def find_watchlist_company(self, query: str) -> Optional[DbRow]:
         async with self._lock:
             if query.isdigit():
                 row = self._connection.execute(
@@ -627,7 +760,7 @@ class Database:
     async def get_watchlist_company_by_normalized_company(
         self,
         normalized_company: str,
-    ) -> Optional[sqlite3.Row]:
+    ) -> Optional[DbRow]:
         async with self._lock:
             return self._connection.execute(
                 """
@@ -640,7 +773,7 @@ class Database:
                 (normalized_company,),
             ).fetchone()
 
-    async def get_company_branding(self, normalized_company: str) -> Optional[sqlite3.Row]:
+    async def get_company_branding(self, normalized_company: str) -> Optional[DbRow]:
         async with self._lock:
             return self._connection.execute(
                 """
@@ -736,7 +869,7 @@ class Database:
         track: str,
         target_type: Optional[str] = None,
         limit: int = 300,
-    ) -> List[sqlite3.Row]:
+    ) -> List[DbRow]:
         sql = """
             SELECT DISTINCT c.*
             FROM company_watchlist c
@@ -824,7 +957,7 @@ class Database:
                 self._connection.commit()
                 return int(existing["id"])
 
-            cursor = self._connection.execute(
+            target_id = self._insert_and_get_id(
                 """
                 INSERT INTO company_scan_targets (
                     company_id, target_type, locator, confidence, active, verified_at, created_at, updated_at
@@ -842,14 +975,14 @@ class Database:
                 ),
             )
             self._connection.commit()
-            return int(cursor.lastrowid)
+            return target_id
 
     async def get_company_scan_targets(
         self,
         company_id: int,
         *,
         target_type: Optional[str] = None,
-    ) -> List[sqlite3.Row]:
+    ) -> List[DbRow]:
         sql = "SELECT * FROM company_scan_targets WHERE company_id = ? AND active = 1"
         params: List[Any] = [company_id]
         if target_type:
@@ -865,7 +998,7 @@ class Database:
         target_type: str,
         track: str,
         limit: int = 500,
-    ) -> List[sqlite3.Row]:
+    ) -> List[DbRow]:
         async with self._lock:
             return self._connection.execute(
                 """
@@ -897,7 +1030,7 @@ class Database:
     ) -> int:
         async with self._lock:
             now = _utc_now()
-            cursor = self._connection.execute(
+            request_id = self._insert_and_get_id(
                 """
                 INSERT INTO company_requests (
                     company, normalized_company, careers_url, homepage_url,
@@ -917,14 +1050,14 @@ class Database:
                 ),
             )
             self._connection.commit()
-            return int(cursor.lastrowid)
+            return request_id
 
     async def find_pending_company_request(
         self,
         *,
         normalized_company: str,
         careers_url: str,
-    ) -> Optional[sqlite3.Row]:
+    ) -> Optional[DbRow]:
         async with self._lock:
             return self._connection.execute(
                 """
@@ -942,7 +1075,7 @@ class Database:
         *,
         status: Optional[str] = None,
         limit: int = 25,
-    ) -> List[sqlite3.Row]:
+    ) -> List[DbRow]:
         sql = "SELECT * FROM company_requests"
         params: List[Any] = []
         if status:
@@ -953,7 +1086,7 @@ class Database:
         async with self._lock:
             return self._connection.execute(sql, params).fetchall()
 
-    async def get_company_request(self, request_id: int) -> Optional[sqlite3.Row]:
+    async def get_company_request(self, request_id: int) -> Optional[DbRow]:
         async with self._lock:
             return self._connection.execute(
                 "SELECT * FROM company_requests WHERE id = ?",
@@ -984,7 +1117,7 @@ class Database:
             )
             self._connection.commit()
 
-    async def get_job_community_profile(self, user_id: str) -> Optional[sqlite3.Row]:
+    async def get_job_community_profile(self, user_id: str) -> Optional[DbRow]:
         async with self._lock:
             return self._connection.execute(
                 "SELECT * FROM job_user_profiles WHERE user_id = ?",
@@ -996,7 +1129,7 @@ class Database:
         user_id: str,
         *,
         default_visibility: str = "matched",
-    ) -> sqlite3.Row:
+    ) -> DbRow:
         async with self._lock:
             now = _utc_now()
             existing = self._connection.execute(
@@ -1030,7 +1163,7 @@ class Database:
         self,
         user_id: str,
         visibility: str,
-    ) -> Optional[sqlite3.Row]:
+    ) -> Optional[DbRow]:
         async with self._lock:
             existing = self._connection.execute(
                 "SELECT * FROM job_user_profiles WHERE user_id = ?",
@@ -1057,7 +1190,7 @@ class Database:
         *,
         user_id: str,
         company_id: int,
-    ) -> Optional[sqlite3.Row]:
+    ) -> Optional[DbRow]:
         async with self._lock:
             return self._connection.execute(
                 f"""
@@ -1089,7 +1222,7 @@ class Database:
         company_id: int,
         status: str,
         notes: Optional[str] = None,
-    ) -> sqlite3.Row:
+    ) -> DbRow:
         async with self._lock:
             now = _utc_now()
             existing = self._connection.execute(
@@ -1162,7 +1295,7 @@ class Database:
         user_id: str,
         company_id: int,
         body: str,
-    ) -> sqlite3.Row:
+    ) -> DbRow:
         async with self._lock:
             row = self._insert_process_note_locked(
                 user_id=user_id,
@@ -1177,7 +1310,7 @@ class Database:
         user_id: str,
         *,
         limit: int = 25,
-    ) -> List[sqlite3.Row]:
+    ) -> List[DbRow]:
         async with self._lock:
             return self._connection.execute(
                 f"""
@@ -1197,7 +1330,7 @@ class Database:
                 JOIN company_watchlist c ON c.id = s.company_id
                 {self._latest_process_note_join_sql()}
                 WHERE s.user_id = ?
-                ORDER BY s.updated_at DESC, c.company COLLATE NOCASE ASC
+                ORDER BY s.updated_at DESC, lower(c.company) ASC
                 LIMIT ?
                 """,
                 (user_id, limit),
@@ -1210,7 +1343,7 @@ class Database:
         requester_user_id: str,
         include_matched: bool,
         limit: int = 25,
-    ) -> List[sqlite3.Row]:
+    ) -> List[DbRow]:
         visibility_values = ["open"]
         if include_matched:
             visibility_values.append("matched")
@@ -1259,7 +1392,7 @@ class Database:
         requester_user_id: str,
         include_matched: bool,
         limit: int = 50,
-    ) -> List[sqlite3.Row]:
+    ) -> List[DbRow]:
         visibility_values = ["open"]
         if include_matched:
             visibility_values.append("matched")
@@ -1384,7 +1517,7 @@ class Database:
         async with self._lock:
             if canonical_id is None:
                 now = _utc_now()
-                cursor = self._connection.execute(
+                canonical_id = self._insert_and_get_id(
                     """
                     INSERT INTO canonical_jobs (
                         track, title, company, location, summary, canonical_url,
@@ -1414,7 +1547,6 @@ class Database:
                         now,
                     ),
                 )
-                canonical_id = int(cursor.lastrowid)
                 created = True
                 refresh_required = False
             else:
@@ -1603,7 +1735,7 @@ class Database:
             )
             self._connection.commit()
 
-    async def get_post_records_for_canonical(self, canonical_id: int) -> List[sqlite3.Row]:
+    async def get_post_records_for_canonical(self, canonical_id: int) -> List[DbRow]:
         async with self._lock:
             cursor = self._connection.execute(
                 """
@@ -1631,12 +1763,18 @@ class Database:
 
     async def get_stats(self) -> Dict[str, int]:
         async with self._lock:
-            canonical_count = self._connection.execute("SELECT COUNT(*) FROM canonical_jobs").fetchone()[0]
-            variant_count = self._connection.execute("SELECT COUNT(*) FROM job_variants").fetchone()[0]
+            canonical_count = self._connection.execute(
+                "SELECT COUNT(*) AS count FROM canonical_jobs"
+            ).fetchone()["count"]
+            variant_count = self._connection.execute(
+                "SELECT COUNT(*) AS count FROM job_variants"
+            ).fetchone()["count"]
             posted_count = self._connection.execute(
-                "SELECT COUNT(DISTINCT canonical_id) FROM discord_posts"
-            ).fetchone()[0]
-            dedupe_count = self._connection.execute("SELECT COUNT(*) FROM dedupe_matches").fetchone()[0]
+                "SELECT COUNT(DISTINCT canonical_id) AS count FROM discord_posts"
+            ).fetchone()["count"]
+            dedupe_count = self._connection.execute(
+                "SELECT COUNT(*) AS count FROM dedupe_matches"
+            ).fetchone()["count"]
         return {
             "total_canonical_jobs": canonical_count,
             "total_jobs_found": variant_count,
@@ -1715,7 +1853,7 @@ class Database:
             ]
         )
 
-    def _row_to_canonical(self, row: Optional[sqlite3.Row]) -> CanonicalJob:
+    def _row_to_canonical(self, row: Optional[DbRow]) -> CanonicalJob:
         if row is None:
             raise ValueError("row cannot be None")
         return CanonicalJob(

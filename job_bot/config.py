@@ -86,6 +86,7 @@ def load_config() -> AppConfig:
         discord_new_grad_channel_id=int(new_grad_channel_id) if new_grad_channel_id else None,
         scheduled_run_hours=_parse_int_csv(os.getenv("SCHEDULED_RUN_HOURS"), [12, 20]),
         schedule_timezone=os.getenv("SCHEDULE_TIMEZONE", "America/New_York"),
+        database_url=os.getenv("DATABASE_URL", ""),
         sqlite_db_path=os.getenv("SQLITE_DB_PATH", "job_bot.db"),
         remote_only=_parse_bool(os.getenv("REMOTE_ONLY")),
         us_only=_parse_bool(os.getenv("US_ONLY")),

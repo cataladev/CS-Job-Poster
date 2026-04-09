@@ -4,7 +4,6 @@ import csv
 import hashlib
 import asyncio
 import re
-import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import json
@@ -13,7 +12,7 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 from job_bot.branding import BrandingResolver, sanitize_brand_homepage_url
-from job_bot.database import Database
+from job_bot.database import Database, DbRow
 from job_bot.models import AppConfig, JobPosting
 from job_bot.utils.http import AsyncHttpClient
 from job_bot.utils.ats import extract_board_seed
@@ -282,7 +281,7 @@ class WatchlistSeedImporter:
             retries=self.config.request_retries,
             user_agent=self.config.user_agent,
         ) as http_client:
-            async def worker(company_row: sqlite3.Row) -> None:
+            async def worker(company_row: DbRow) -> None:
                 nonlocal logos_verified
                 async with semaphore:
                     try:
@@ -357,7 +356,7 @@ class WatchlistService:
         *,
         request_id: int,
         approver_user_id: str,
-    ) -> sqlite3.Row:
+    ) -> DbRow:
         request = await self.database.get_company_request(request_id)
         if not request:
             raise ValueError("Request not found.")
@@ -426,10 +425,10 @@ class WatchlistService:
             watchlist_company_id=None,
         )
 
-    async def list_requests(self, status: Optional[str] = None) -> List[sqlite3.Row]:
+    async def list_requests(self, status: Optional[str] = None) -> List[DbRow]:
         return await self.database.list_company_requests(status=status, limit=25)
 
-    async def list_companies(self, query: str = "", limit: int = 25) -> List[sqlite3.Row]:
+    async def list_companies(self, query: str = "", limit: int = 25) -> List[DbRow]:
         return await self.database.list_watchlist_companies(query=query, active_only=True, limit=limit)
 
     async def get_company_info(self, query: str) -> Optional[Dict[str, Any]]:
@@ -439,7 +438,7 @@ class WatchlistService:
         targets = await self.database.get_company_scan_targets(int(company["id"]))
         return {"company": company, "targets": targets}
 
-    async def mark_company_hot(self, query: str) -> sqlite3.Row:
+    async def mark_company_hot(self, query: str) -> DbRow:
         company = await self.database.find_watchlist_company(query)
         if not company:
             raise ValueError("Company not found in watchlist.")

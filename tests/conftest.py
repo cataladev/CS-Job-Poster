@@ -16,6 +16,7 @@ def config_factory(tmp_path):
             discord_new_grad_channel_id=222,
             scheduled_run_hours=[12, 20],
             schedule_timezone="America/New_York",
+            database_url="",
             sqlite_db_path=str(tmp_path / "job_bot.db"),
             remote_only=False,
             us_only=False,
