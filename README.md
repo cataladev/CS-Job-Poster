@@ -15,12 +15,15 @@ This README is written for someone actively working on the codebase.
 ## Current Behavior
 
 - Posts internships to `DISCORD_CHANNEL_ID`
-- Posts new-grad roles to `DISCORD_NEW_GRAD_CHANNEL_ID`
+- Posts new-grad roles to `DISCORD_NEW_GRAD_CHANNEL_ID` when that channel is configured and `ENABLE_NEW_GRAD_SOURCE=true`
 - Runs on a fixed schedule at `12:00 PM` and `8:00 PM` in `America/New_York`
 - Defaults to `US_ONLY=true`
 - Defaults to `MAX_JOB_AGE_HOURS=0`, which means only same-day roles are eligible to post
 - Uses SQLite so jobs are not reposted after restart
 - Uses a watchlist system so companies can be requested and approved over time
+- Uses embeds for job posts and command output
+- Uses reaction-based pagination for list-style commands such as `!help`, `!sources`, `!recent`, `!companies`, and `!companyrequests`
+- Tries to show a company icon in job embeds and falls back to a troll thumbnail plus `🧌` in the company field when no safe company icon can be derived
 
 ## Source Order
 
@@ -95,6 +98,7 @@ Important env values:
 - `DISCORD_CHANNEL_ID`
 - `DISCORD_NEW_GRAD_CHANNEL_ID`
 - `DISCORD_ADMIN_ROLE_IDS`
+- `ENABLE_NEW_GRAD_SOURCE`
 - `SQLITE_DB_PATH`
 - `SCHEDULED_RUN_HOURS`
 - `SCHEDULE_TIMEZONE`
@@ -109,6 +113,7 @@ Current default behavior in [`.env.example`](.env.example):
 - `SCHEDULE_TIMEZONE=America/New_York`
 - `US_ONLY=true`
 - `MAX_JOB_AGE_HOURS=0`
+- `ENABLE_NEW_GRAD_SOURCE=false`
 
 ### 3. Discord bot setup
 
@@ -162,6 +167,7 @@ User commands:
 
 - `!ping`
 - `!help`
+- `!helpjobs`
 - `!runjobs`
 - `!stats`
 - `!sources`
@@ -169,6 +175,12 @@ User commands:
 - `!dedupecheck <url or text>`
 - `!season`
 - `!summary [daily|weekly]`
+
+List-style commands use embed pagination with reactions:
+
+- `⬅️` previous page
+- `➡️` next page
+- `⏹️` clear reactions / stop browsing
 
 Watchlist commands:
 
@@ -207,6 +219,7 @@ Per run:
 Important implementation detail:
 
 - the bot publishes incrementally during a run, not only at the very end
+- list-style Discord commands are rendered as paginated embeds instead of raw text dumps
 
 ## Filtering Rules
 
@@ -226,6 +239,7 @@ Current practical default:
 
 - U.S.-only
 - same-day jobs only
+- unknown-age jobs are rejected
 
 ## Deduplication
 
@@ -323,6 +337,7 @@ Scheduler code is in [`job_bot/scheduler.py`](job_bot/scheduler.py).
 - Some secondary sources are noisy or brittle. A source returning errors does not crash the whole run.
 - `wellfound` and some `workday` boards can fail frequently; that is expected unless those adapters are improved.
 - If `!runjobs` appears to do nothing, check whether the run found `0` new canonical jobs after filtering and dedupe.
+- If company logos do not appear, check the watchlist branding URLs first. Shared ATS hosts are intentionally skipped for logo derivation.
 
 ## Deployment
 
