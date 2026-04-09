@@ -335,6 +335,17 @@ def _clean_job_process_note(note: str) -> str:
     return " ".join(note.strip().split())[:400]
 
 
+def _latest_process_note_text(row: Any) -> str:
+    latest_note = row["latest_note"] if "latest_note" in row.keys() else None
+    if not latest_note:
+        return ""
+    note_count = int(row["note_count"] or 0) if "note_count" in row.keys() else 0
+    prefix = "Latest note"
+    if note_count > 1:
+        prefix += f" ({note_count})"
+    return f"\n{prefix}: {latest_note}"
+
+
 def _job_process_counts_text(rows: Sequence[Any]) -> str:
     counts = Counter(row["status"] for row in rows if row["status"] != "hide")
     ordered_statuses = [status for status, _ in sorted(JOB_STATUS_ORDER.items(), key=lambda item: item[1])]
@@ -915,7 +926,7 @@ async def run_bot() -> None:
             (
                 f"**{row['company']}**\n"
                 f"`{format_job_tracking_status(row['status'])}` • updated {_format_relative_timestamp(row['updated_at'])}"
-                + (f"\nNote: {row['notes']}" if row["notes"] else "")
+                + _latest_process_note_text(row)
             )
             for row in rows
         ]
@@ -983,7 +994,7 @@ async def run_bot() -> None:
                 f"`{format_job_tracking_status(row['status'])}` • "
                 f"`{format_job_visibility(row['visibility'])}` • "
                 f"updated {_format_relative_timestamp(row['updated_at'])}"
-                + (f"\nNote: {row['notes']}" if row["notes"] else "")
+                + _latest_process_note_text(row)
             )
             for row in peers
         ]
@@ -1054,7 +1065,11 @@ async def run_bot() -> None:
                 user_id=str(ctx.author.id),
                 company_id=int(company["id"]),
                 status=current_status,
-                notes=cleaned_note,
+            )
+            await database.add_process_note(
+                user_id=str(ctx.author.id),
+                company_id=int(company["id"]),
+                body=cleaned_note,
             )
             await _send_process_message(
                 ctx,
@@ -1102,7 +1117,12 @@ async def run_bot() -> None:
 
         entry_rows = visible_rows
         if notes_only:
-            entry_rows = [row for row in visible_rows if row["notes"]]
+            entry_rows = await database.list_process_notes(
+                company_id=int(company["id"]),
+                requester_user_id=str(ctx.author.id),
+                include_matched=include_matched,
+                limit=100,
+            )
             if not entry_rows:
                 await _send_process_message(
                     ctx,
@@ -1120,8 +1140,13 @@ async def run_bot() -> None:
         entries = [
             (
                 f"**{'You' if row['user_id'] == str(ctx.author.id) else labels[row['user_id']]}**\n"
-                f"`{format_job_tracking_status(row['status'])}` • updated {_format_relative_timestamp(row['updated_at'])}"
-                + (f"\nNote: {row['notes']}" if row["notes"] else "")
+                + (
+                    f"`{format_job_tracking_status(row['status'])}` • noted {_format_relative_timestamp(row['created_at'])}\n"
+                    f"Note: {row['body']}"
+                    if notes_only
+                    else f"`{format_job_tracking_status(row['status'])}` • updated {_format_relative_timestamp(row['updated_at'])}"
+                    + _latest_process_note_text(row)
+                )
             )
             for row in entry_rows
         ]

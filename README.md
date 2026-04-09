@@ -26,6 +26,7 @@ Contribution docs live in [CONTRIBUTING.md](/Users/carlos/Development/Job%20Bot/
 - Uses embeds for job posts and command output
 - Uses reaction-based pagination for list-style commands such as `!help`, `!sources`, `!recent`, `!companies`, and `!companyrequests`
 - Tries to show a company icon in job embeds and falls back to a troll thumbnail plus `🧌` in the company field when no safe company icon can be derived
+- Includes an opt-in process tracker with visibility-scoped statuses, peer discovery, and per-company note history
 
 ## Source Order
 
@@ -183,6 +184,12 @@ User commands:
 - `!dedupecheck <url or text>`
 - `!season`
 - `!summary [daily|weekly]`
+- `!process`
+- `!visibility [open|matched|private]`
+- `!jobstatus <company> <status>`
+- `!myjobs`
+- `!jobpeers <company>`
+- `!jobprocess <company|id>`
 
 List-style commands use embed pagination with reactions:
 
@@ -195,6 +202,15 @@ Watchlist commands:
 - `!requestcompany <company> | <careers_url> | [homepage_url]`
 - `!companies [query]`
 - `!companyinfo <company|id>`
+
+Process tracker commands:
+
+- `!process` join the process tracker and show usage
+- `!process <company> <save|hide|applied|oa|interview|rejected|offer>` set your current status
+- `!process <company|id>` view visible company process stats
+- `!process <company|id> notes` view visible note history
+- `!process <company|id> | <note>` append a new process note without overwriting older notes
+- `!process peers <company>` find visible peers for that company
 
 Admin-only commands:
 

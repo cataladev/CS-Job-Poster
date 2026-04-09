@@ -94,11 +94,12 @@ async def test_list_job_application_statuses_for_user_returns_company_rows(confi
     assert len(rows) == 1
     assert rows[0]["company"] == "OpenAI"
     assert rows[0]["status"] == "applied"
-    assert rows[0]["notes"] == "good recruiter"
+    assert rows[0]["latest_note"] == "good recruiter"
+    assert rows[0]["note_count"] == 1
 
 
 @pytest.mark.asyncio
-async def test_job_application_notes_are_preserved_when_status_changes(config_factory) -> None:
+async def test_job_application_notes_are_preserved_as_history_when_status_changes(config_factory) -> None:
     config = config_factory()
     database = Database(config.sqlite_db_path)
     await database.initialize()
@@ -125,14 +126,30 @@ async def test_job_application_notes_are_preserved_when_status_changes(config_fa
         status="applied",
         notes="oa was mostly lc medium",
     )
+    await database.add_process_note(
+        user_id="123",
+        company_id=company_id,
+        body="final round had two interviews",
+    )
     row = await database.upsert_job_application_status(
         user_id="123",
         company_id=company_id,
         status="interview",
     )
+    notes = await database.list_process_notes(
+        company_id=company_id,
+        requester_user_id="123",
+        include_matched=True,
+        limit=25,
+    )
 
     assert row["status"] == "interview"
-    assert row["notes"] == "oa was mostly lc medium"
+    assert row["latest_note"] == "final round had two interviews"
+    assert row["note_count"] == 2
+    assert [note["body"] for note in notes] == [
+        "final round had two interviews",
+        "oa was mostly lc medium",
+    ]
 
 
 @pytest.mark.asyncio
@@ -207,3 +224,86 @@ async def test_job_peers_only_include_allowed_visibility_and_non_hidden_statuses
 
     assert [row["user_id"] for row in open_only_rows] == ["open-user"]
     assert [row["user_id"] for row in matched_rows] == ["open-user", "matched-user"]
+
+
+@pytest.mark.asyncio
+async def test_process_notes_only_include_visible_peers_and_requester(config_factory) -> None:
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+
+    company_id = await database.upsert_watchlist_company(
+        company="Ramp",
+        normalized_company="ramp",
+        careers_url="https://jobs.ashbyhq.com/ramp",
+        homepage_url="https://ramp.com",
+        country="US",
+        categories=["startup"],
+        tier="t2",
+        scan_cadence="every_run",
+        tracks=["both"],
+        seed_source="test",
+        notes="",
+        active=True,
+        next_scan_at=None,
+    )
+
+    await database.accept_job_community_rules("requester")
+    await database.accept_job_community_rules("open-user")
+    await database.update_job_community_visibility("open-user", "open")
+    await database.accept_job_community_rules("matched-user")
+    await database.accept_job_community_rules("private-user")
+    await database.update_job_community_visibility("private-user", "private")
+    await database.accept_job_community_rules("hidden-user")
+    await database.update_job_community_visibility("hidden-user", "open")
+
+    await database.upsert_job_application_status(
+        user_id="requester",
+        company_id=company_id,
+        status="applied",
+        notes="recruiter replied same day",
+    )
+    await database.upsert_job_application_status(
+        user_id="open-user",
+        company_id=company_id,
+        status="interview",
+        notes="oa was practical",
+    )
+    await database.upsert_job_application_status(
+        user_id="matched-user",
+        company_id=company_id,
+        status="oa_received",
+        notes="got oa after two weeks",
+    )
+    await database.upsert_job_application_status(
+        user_id="private-user",
+        company_id=company_id,
+        status="offer",
+        notes="timeline moved fast",
+    )
+    await database.upsert_job_application_status(
+        user_id="hidden-user",
+        company_id=company_id,
+        status="hide",
+        notes="should stay hidden",
+    )
+
+    open_only_notes = await database.list_process_notes(
+        company_id=company_id,
+        requester_user_id="requester",
+        include_matched=False,
+        limit=25,
+    )
+    matched_notes = await database.list_process_notes(
+        company_id=company_id,
+        requester_user_id="requester",
+        include_matched=True,
+        limit=25,
+    )
+
+    assert [row["user_id"] for row in open_only_notes] == ["open-user", "requester"]
+    assert [row["user_id"] for row in matched_notes] == [
+        "matched-user",
+        "open-user",
+        "requester",
+    ]

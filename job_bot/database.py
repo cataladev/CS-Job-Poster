@@ -235,6 +235,22 @@ class Database:
                     updated_at TEXT NOT NULL,
                     UNIQUE(user_id, company_id)
                 );
+
+                CREATE TABLE IF NOT EXISTS process_notes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT NOT NULL REFERENCES job_user_profiles(user_id) ON DELETE CASCADE,
+                    company_id INTEGER NOT NULL REFERENCES company_watchlist(id) ON DELETE CASCADE,
+                    body TEXT NOT NULL,
+                    legacy_status_id INTEGER UNIQUE REFERENCES job_application_statuses(id) ON DELETE SET NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_process_notes_company_created_at
+                    ON process_notes(company_id, created_at DESC);
+
+                CREATE INDEX IF NOT EXISTS idx_process_notes_user_company
+                    ON process_notes(user_id, company_id);
                 """
             )
             self._ensure_column("canonical_jobs", "provenance_tags", "TEXT NOT NULL DEFAULT '[]'")
@@ -244,6 +260,7 @@ class Database:
             self._ensure_column("company_watchlist", "logo_verified_at", "TEXT")
             self._ensure_column("company_requests", "homepage_url", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column("job_application_statuses", "notes", "TEXT NOT NULL DEFAULT ''")
+            self._migrate_legacy_process_notes()
             self._connection.commit()
 
     async def close(self) -> None:
@@ -260,6 +277,78 @@ class Database:
         self._connection.execute(
             f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}"
         )
+
+    def _migrate_legacy_process_notes(self) -> None:
+        self._connection.execute(
+            """
+            INSERT INTO process_notes (
+                user_id,
+                company_id,
+                body,
+                legacy_status_id,
+                created_at,
+                updated_at
+            )
+            SELECT
+                s.user_id,
+                s.company_id,
+                s.notes,
+                s.id,
+                COALESCE(NULLIF(s.updated_at, ''), s.created_at),
+                COALESCE(NULLIF(s.updated_at, ''), s.created_at)
+            FROM job_application_statuses s
+            WHERE TRIM(COALESCE(s.notes, '')) <> ''
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM process_notes pn
+                  WHERE pn.legacy_status_id = s.id
+              )
+            """
+        )
+
+    def _latest_process_note_join_sql(self) -> str:
+        return """
+            LEFT JOIN (
+                SELECT
+                    user_id,
+                    company_id,
+                    MAX(id) AS latest_note_id,
+                    COUNT(*) AS note_count
+                FROM process_notes
+                GROUP BY user_id, company_id
+            ) latest_note_meta
+                ON latest_note_meta.user_id = s.user_id
+               AND latest_note_meta.company_id = s.company_id
+            LEFT JOIN process_notes latest_note
+                ON latest_note.id = latest_note_meta.latest_note_id
+        """
+
+    def _insert_process_note_locked(
+        self,
+        *,
+        user_id: str,
+        company_id: int,
+        body: str,
+        legacy_status_id: Optional[int] = None,
+    ) -> sqlite3.Row:
+        now = _utc_now()
+        cursor = self._connection.execute(
+            """
+            INSERT INTO process_notes (
+                user_id,
+                company_id,
+                body,
+                legacy_status_id,
+                created_at,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (user_id, company_id, body, legacy_status_id, now, now),
+        )
+        return self._connection.execute(
+            "SELECT * FROM process_notes WHERE id = ?",
+            (cursor.lastrowid,),
+        ).fetchone()
 
     async def get_github_state(self, repository: str, path: str) -> Optional[sqlite3.Row]:
         async with self._lock:
@@ -971,10 +1060,22 @@ class Database:
     ) -> Optional[sqlite3.Row]:
         async with self._lock:
             return self._connection.execute(
-                """
-                SELECT s.*, c.company, c.normalized_company
+                f"""
+                SELECT
+                    s.id,
+                    s.user_id,
+                    s.company_id,
+                    s.status,
+                    s.created_at,
+                    s.updated_at,
+                    c.company,
+                    c.normalized_company,
+                    COALESCE(latest_note_meta.note_count, 0) AS note_count,
+                    latest_note.body AS latest_note,
+                    latest_note.created_at AS latest_note_at
                 FROM job_application_statuses s
                 JOIN company_watchlist c ON c.id = s.company_id
+                {self._latest_process_note_join_sql()}
                 WHERE s.user_id = ? AND s.company_id = ?
                 LIMIT 1
                 """,
@@ -993,42 +1094,83 @@ class Database:
             now = _utc_now()
             existing = self._connection.execute(
                 """
-                SELECT id, notes
+                SELECT id
                 FROM job_application_statuses
                 WHERE user_id = ? AND company_id = ?
                 """,
                 (user_id, company_id),
             ).fetchone()
             if existing:
-                resolved_notes = existing["notes"] if notes is None else notes
                 self._connection.execute(
                     """
                     UPDATE job_application_statuses
-                    SET status = ?, notes = ?, updated_at = ?
+                    SET status = ?, updated_at = ?
                     WHERE id = ?
                     """,
-                    (status, resolved_notes, now, existing["id"]),
+                    (status, now, existing["id"]),
                 )
             else:
                 self._connection.execute(
                     """
                     INSERT INTO job_application_statuses (
-                        user_id, company_id, status, notes, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?)
+                        user_id, company_id, status, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?)
                     """,
-                    (user_id, company_id, status, notes or "", now, now),
+                    (user_id, company_id, status, now, now),
+                )
+                existing = self._connection.execute(
+                    """
+                    SELECT id
+                    FROM job_application_statuses
+                    WHERE user_id = ? AND company_id = ?
+                    """,
+                    (user_id, company_id),
+                ).fetchone()
+            if notes is not None and notes.strip():
+                self._insert_process_note_locked(
+                    user_id=user_id,
+                    company_id=company_id,
+                    body=notes.strip(),
                 )
             self._connection.commit()
             return self._connection.execute(
-                """
-                SELECT s.*, c.company, c.normalized_company
+                f"""
+                SELECT
+                    s.id,
+                    s.user_id,
+                    s.company_id,
+                    s.status,
+                    s.created_at,
+                    s.updated_at,
+                    c.company,
+                    c.normalized_company,
+                    COALESCE(latest_note_meta.note_count, 0) AS note_count,
+                    latest_note.body AS latest_note,
+                    latest_note.created_at AS latest_note_at
                 FROM job_application_statuses s
                 JOIN company_watchlist c ON c.id = s.company_id
+                {self._latest_process_note_join_sql()}
                 WHERE s.user_id = ? AND s.company_id = ?
                 LIMIT 1
                 """,
                 (user_id, company_id),
             ).fetchone()
+
+    async def add_process_note(
+        self,
+        *,
+        user_id: str,
+        company_id: int,
+        body: str,
+    ) -> sqlite3.Row:
+        async with self._lock:
+            row = self._insert_process_note_locked(
+                user_id=user_id,
+                company_id=company_id,
+                body=body.strip(),
+            )
+            self._connection.commit()
+            return row
 
     async def list_job_application_statuses_for_user(
         self,
@@ -1038,10 +1180,22 @@ class Database:
     ) -> List[sqlite3.Row]:
         async with self._lock:
             return self._connection.execute(
-                """
-                SELECT s.*, c.company, c.normalized_company
+                f"""
+                SELECT
+                    s.id,
+                    s.user_id,
+                    s.company_id,
+                    s.status,
+                    s.created_at,
+                    s.updated_at,
+                    c.company,
+                    c.normalized_company,
+                    COALESCE(latest_note_meta.note_count, 0) AS note_count,
+                    latest_note.body AS latest_note,
+                    latest_note.created_at AS latest_note_at
                 FROM job_application_statuses s
                 JOIN company_watchlist c ON c.id = s.company_id
+                {self._latest_process_note_join_sql()}
                 WHERE s.user_id = ?
                 ORDER BY s.updated_at DESC, c.company COLLATE NOCASE ASC
                 LIMIT ?
@@ -1065,11 +1219,23 @@ class Database:
         async with self._lock:
             return self._connection.execute(
                 f"""
-                SELECT s.*, 
-                       p.visibility, c.company, c.normalized_company
+                SELECT
+                       s.id,
+                       s.user_id,
+                       s.company_id,
+                       s.status,
+                       s.created_at,
+                       s.updated_at,
+                       p.visibility,
+                       c.company,
+                       c.normalized_company,
+                       COALESCE(latest_note_meta.note_count, 0) AS note_count,
+                       latest_note.body AS latest_note,
+                       latest_note.created_at AS latest_note_at
                 FROM job_application_statuses s
                 JOIN job_user_profiles p ON p.user_id = s.user_id
                 JOIN company_watchlist c ON c.id = s.company_id
+                {self._latest_process_note_join_sql()}
                 WHERE s.company_id = ?
                   AND s.user_id <> ?
                   AND s.status <> 'hide'
@@ -1081,6 +1247,59 @@ class Database:
                         ELSE 2
                     END,
                     s.updated_at DESC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+
+    async def list_process_notes(
+        self,
+        *,
+        company_id: int,
+        requester_user_id: str,
+        include_matched: bool,
+        limit: int = 50,
+    ) -> List[sqlite3.Row]:
+        visibility_values = ["open"]
+        if include_matched:
+            visibility_values.append("matched")
+        placeholders = ", ".join("?" for _ in visibility_values)
+        params: List[Any] = [
+            company_id,
+            requester_user_id,
+            requester_user_id,
+            *visibility_values,
+            limit,
+        ]
+        async with self._lock:
+            return self._connection.execute(
+                f"""
+                SELECT
+                    n.id,
+                    n.user_id,
+                    n.company_id,
+                    n.body,
+                    n.created_at,
+                    n.updated_at,
+                    s.status,
+                    p.visibility,
+                    c.company,
+                    c.normalized_company
+                FROM process_notes n
+                JOIN job_application_statuses s
+                    ON s.user_id = n.user_id
+                   AND s.company_id = n.company_id
+                JOIN job_user_profiles p
+                    ON p.user_id = n.user_id
+                JOIN company_watchlist c
+                    ON c.id = n.company_id
+                WHERE n.company_id = ?
+                  AND s.status <> 'hide'
+                  AND (
+                      n.user_id = ?
+                      OR (n.user_id <> ? AND p.visibility IN ({placeholders}))
+                  )
+                ORDER BY n.created_at DESC, n.id DESC
                 LIMIT ?
                 """,
                 params,
