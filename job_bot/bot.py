@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 from collections import Counter
-from typing import List
+from math import ceil
+from typing import Any, List, Sequence
 
 import discord
 from discord.ext import commands
@@ -18,6 +20,51 @@ from job_bot.scheduler import BotScheduler
 from job_bot.sources import build_sources
 from job_bot.utils.normalization import canonicalize_url
 from job_bot.watchlist import WatchlistService
+
+
+COMPANIES_PAGE_SIZE = 12
+COMPANIES_PREV_EMOJI = "⬅️"
+COMPANIES_NEXT_EMOJI = "➡️"
+COMPANIES_STOP_EMOJI = "⏹️"
+
+
+def _company_categories(row: Any) -> str:
+    categories = json.loads(row["categories"] or "[]")
+    return ", ".join(categories) if categories else "none"
+
+
+def build_companies_embed(rows: Sequence[Any], *, page_index: int, query: str = "") -> discord.Embed:
+    total = len(rows)
+    total_pages = max(1, ceil(total / COMPANIES_PAGE_SIZE))
+    safe_page_index = min(max(page_index, 0), total_pages - 1)
+    start = safe_page_index * COMPANIES_PAGE_SIZE
+    end = min(start + COMPANIES_PAGE_SIZE, total)
+    page_rows = rows[start:end]
+
+    title = "Watchlist Companies"
+    if query:
+        title += f" for '{query}'"
+
+    description_lines = []
+    for row in page_rows:
+        description_lines.append(
+            f"`#{row['id']}` **{row['company']}**\n"
+            f"`{row['tier']}` • {_company_categories(row)}"
+        )
+
+    embed = discord.Embed(
+        title=title,
+        description="\n\n".join(description_lines) if description_lines else "No companies matched that query.",
+        color=discord.Color.blurple(),
+    )
+    embed.set_footer(
+        text=(
+            f"Page {safe_page_index + 1}/{total_pages} • "
+            f"Showing {start + 1}-{end} of {total} • "
+            f"Use reactions to browse"
+        )
+    )
+    return embed
 
 
 async def run_bot() -> None:
@@ -285,17 +332,52 @@ async def run_bot() -> None:
 
     @bot.command(name="companies")
     async def companies(ctx: commands.Context, *, query: str = "") -> None:
-        rows = await watchlist_service.list_companies(query=query, limit=20)
+        rows = await watchlist_service.list_companies(query=query, limit=1000)
         if not rows:
             await ctx.send("No companies matched that query.")
             return
-        lines = []
-        for row in rows:
-            categories = ", ".join(json.loads(row["categories"] or "[]"))
-            lines.append(
-                f"#{row['id']} {row['company']} [{row['tier']}] {categories} | {row['careers_url']}"
+
+        current_page = 0
+        message = await ctx.send(embed=build_companies_embed(rows, page_index=current_page, query=query))
+        if len(rows) <= COMPANIES_PAGE_SIZE:
+            return
+
+        controls = [COMPANIES_PREV_EMOJI, COMPANIES_NEXT_EMOJI, COMPANIES_STOP_EMOJI]
+        try:
+            for emoji in controls:
+                await message.add_reaction(emoji)
+        except discord.HTTPException:
+            return
+
+        def _check(reaction: discord.Reaction, user: discord.abc.User) -> bool:
+            return (
+                reaction.message.id == message.id
+                and not user.bot
+                and str(reaction.emoji) in controls
             )
-        await ctx.send("\n".join(lines))
+
+        total_pages = ceil(len(rows) / COMPANIES_PAGE_SIZE)
+        while True:
+            try:
+                reaction, user = await bot.wait_for("reaction_add", timeout=120.0, check=_check)
+            except asyncio.TimeoutError:
+                with contextlib.suppress(discord.HTTPException):
+                    await message.clear_reactions()
+                break
+
+            emoji = str(reaction.emoji)
+            if emoji == COMPANIES_STOP_EMOJI:
+                with contextlib.suppress(discord.HTTPException):
+                    await message.clear_reactions()
+                break
+            if emoji == COMPANIES_PREV_EMOJI:
+                current_page = (current_page - 1) % total_pages
+            elif emoji == COMPANIES_NEXT_EMOJI:
+                current_page = (current_page + 1) % total_pages
+
+            await message.edit(embed=build_companies_embed(rows, page_index=current_page, query=query))
+            with contextlib.suppress(discord.HTTPException):
+                await message.remove_reaction(reaction.emoji, user)
 
     @bot.command(name="companyinfo")
     async def companyinfo(ctx: commands.Context, *, query: str) -> None:
