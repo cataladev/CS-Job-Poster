@@ -3,9 +3,16 @@ from pathlib import Path
 
 import pytest
 
-from job_bot.bot import build_companies_embed, build_company_info_embed, build_paginated_embed, build_recent_jobs_embed
+from job_bot.bot import (
+    build_companies_embed,
+    build_company_info_embed,
+    build_paginated_embed,
+    build_recent_jobs_embed,
+    sort_recent_jobs,
+)
 from job_bot.database import Database
-from job_bot.models import CanonicalJob
+from job_bot.models import CanonicalJob, JobPosting
+from job_bot.utils.normalization import normalize_job_posting
 from job_bot.watchlist import TrackClassifier, WatchlistService
 
 
@@ -241,6 +248,95 @@ def test_build_recent_jobs_embed_respects_page_size() -> None:
     assert len(embed.fields) == 1
     assert embed.fields[0].name == "3. Gamma • Internship"
     assert "Page 2/2" in embed.footer.text
+
+
+def test_sort_recent_jobs_prioritizes_fire_emoji_companies() -> None:
+    regular_newer = _canonical_job(1, "Alpha", "Role 1", "https://example.com/jobs/1")
+    regular_newer.first_seen = datetime(2026, 4, 9, 12, 0, tzinfo=timezone.utc)
+
+    hot_older = _canonical_job(2, "🔥 Intel", "Role 2", "https://example.com/jobs/2")
+    hot_older.first_seen = datetime(2026, 4, 9, 11, 0, tzinfo=timezone.utc)
+
+    regular_older = _canonical_job(3, "Beta", "Role 3", "https://example.com/jobs/3")
+    regular_older.first_seen = datetime(2026, 4, 9, 10, 0, tzinfo=timezone.utc)
+
+    jobs = sort_recent_jobs([regular_newer, hot_older, regular_older])
+
+    assert [job.company for job in jobs] == ["🔥 Intel", "Alpha", "Beta"]
+
+
+def test_sort_recent_jobs_uses_hot_watchlist_display_names() -> None:
+    regular_newer = _canonical_job(1, "Citadel", "Role 1", "https://example.com/jobs/1")
+    regular_newer.normalized_company = "citadel"
+    regular_newer.first_seen = datetime(2026, 4, 9, 12, 0, tzinfo=timezone.utc)
+
+    regular_older = _canonical_job(2, "Beta", "Role 2", "https://example.com/jobs/2")
+    regular_older.normalized_company = "beta"
+    regular_older.first_seen = datetime(2026, 4, 9, 11, 0, tzinfo=timezone.utc)
+
+    jobs = sort_recent_jobs(
+        [regular_newer, regular_older],
+        {"citadel": "🔥 Citadel"},
+    )
+
+    assert [job.company for job in jobs] == ["Citadel", "Beta"]
+
+    embed = build_recent_jobs_embed(
+        jobs,
+        page_index=0,
+        page_size=6,
+        company_display_names={"citadel": "🔥 Citadel"},
+    )
+
+    assert embed.fields[0].name == "1. 🔥 Citadel • Internship"
+
+
+@pytest.mark.asyncio
+async def test_mark_company_hot_updates_watchlist_and_recent_jobs(config_factory) -> None:
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    service = WatchlistService(config, database)
+
+    company_id = await database.upsert_watchlist_company(
+        company="Citadel",
+        normalized_company="citadel",
+        careers_url="https://www.citadel.com/careers",
+        homepage_url="https://www.citadel.com",
+        country="US",
+        categories=["big_tech"],
+        tier="t1",
+        scan_cadence="every_run",
+        tracks=["both"],
+        seed_source="test",
+        notes="",
+        active=True,
+        next_scan_at=None,
+    )
+
+    job = normalize_job_posting(
+        JobPosting(
+            title="Software Engineer Intern",
+            company="Citadel",
+            locations=["New York, NY"],
+            source_name="github_simplify_internships",
+            track="internship",
+            url="https://www.citadel.com/jobs/1",
+            canonical_url="https://www.citadel.com/jobs/1",
+            summary="Summer 2026 internship",
+            raw_data={"age": "0d"},
+        )
+    )
+    await database.save_job(job)
+
+    updated_company = await service.mark_company_hot("citadel")
+    hot_names = await database.get_hot_watchlist_company_names()
+    recent_jobs = await database.get_recent_jobs(limit=10)
+
+    assert int(updated_company["id"]) == company_id
+    assert updated_company["company"] == "🔥 Citadel"
+    assert hot_names == {"citadel": "🔥 Citadel"}
+    assert recent_jobs[0].company == "🔥 Citadel"
 
 
 def test_build_company_info_embed_uses_mobile_friendly_sections() -> None:

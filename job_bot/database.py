@@ -217,6 +217,24 @@ class Database:
                     jobs_found INTEGER NOT NULL,
                     error TEXT
                 );
+
+                CREATE TABLE IF NOT EXISTS job_user_profiles (
+                    user_id TEXT PRIMARY KEY,
+                    visibility TEXT NOT NULL DEFAULT 'matched',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS job_application_statuses (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT NOT NULL REFERENCES job_user_profiles(user_id) ON DELETE CASCADE,
+                    company_id INTEGER NOT NULL REFERENCES company_watchlist(id) ON DELETE CASCADE,
+                    status TEXT NOT NULL,
+                    notes TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(user_id, company_id)
+                );
                 """
             )
             self._ensure_column("canonical_jobs", "provenance_tags", "TEXT NOT NULL DEFAULT '[]'")
@@ -225,6 +243,7 @@ class Database:
             self._ensure_column("company_watchlist", "logo_source", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column("company_watchlist", "logo_verified_at", "TEXT")
             self._ensure_column("company_requests", "homepage_url", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column("job_application_statuses", "notes", "TEXT NOT NULL DEFAULT ''")
             self._connection.commit()
 
     async def close(self) -> None:
@@ -482,6 +501,40 @@ class Database:
                 (normalized, normalized),
             ).fetchone()
 
+    async def update_watchlist_company_name(self, company_id: int, company: str) -> bool:
+        async with self._lock:
+            existing = self._connection.execute(
+                "SELECT company FROM company_watchlist WHERE id = ?",
+                (company_id,),
+            ).fetchone()
+            if not existing or existing["company"] == company:
+                return False
+            self._connection.execute(
+                """
+                UPDATE company_watchlist
+                SET company = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (company, _utc_now(), company_id),
+            )
+            self._connection.commit()
+            return True
+
+    async def get_hot_watchlist_company_names(self) -> Dict[str, str]:
+        async with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT normalized_company, company
+                FROM company_watchlist
+                WHERE active = 1 AND company LIKE '🔥%'
+                ORDER BY updated_at DESC
+                """
+            ).fetchall()
+        hot_names: Dict[str, str] = {}
+        for row in rows:
+            hot_names.setdefault(row["normalized_company"], row["company"])
+        return hot_names
+
     async def get_watchlist_company_by_normalized_company(
         self,
         normalized_company: str,
@@ -574,6 +627,19 @@ class Database:
             )
             self._connection.commit()
             return True
+
+    async def update_canonical_company_name(self, normalized_company: str, company: str) -> int:
+        async with self._lock:
+            cursor = self._connection.execute(
+                """
+                UPDATE canonical_jobs
+                SET company = ?
+                WHERE normalized_company = ?
+                """,
+                (company, normalized_company),
+            )
+            self._connection.commit()
+            return int(cursor.rowcount or 0)
 
     async def get_due_watchlist_companies(
         self,
@@ -828,6 +894,197 @@ class Database:
                 (status, admin_notes, approver_user_id, watchlist_company_id, _utc_now(), request_id),
             )
             self._connection.commit()
+
+    async def get_job_community_profile(self, user_id: str) -> Optional[sqlite3.Row]:
+        async with self._lock:
+            return self._connection.execute(
+                "SELECT * FROM job_user_profiles WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+
+    async def accept_job_community_rules(
+        self,
+        user_id: str,
+        *,
+        default_visibility: str = "matched",
+    ) -> sqlite3.Row:
+        async with self._lock:
+            now = _utc_now()
+            existing = self._connection.execute(
+                "SELECT * FROM job_user_profiles WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+            if existing:
+                self._connection.execute(
+                    """
+                    UPDATE job_user_profiles
+                    SET updated_at = ?
+                    WHERE user_id = ?
+                    """,
+                    (now, user_id),
+                )
+            else:
+                self._connection.execute(
+                    """
+                    INSERT INTO job_user_profiles (user_id, visibility, created_at, updated_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (user_id, default_visibility, now, now),
+                )
+            self._connection.commit()
+            return self._connection.execute(
+                "SELECT * FROM job_user_profiles WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+
+    async def update_job_community_visibility(
+        self,
+        user_id: str,
+        visibility: str,
+    ) -> Optional[sqlite3.Row]:
+        async with self._lock:
+            existing = self._connection.execute(
+                "SELECT * FROM job_user_profiles WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+            if not existing:
+                return None
+            self._connection.execute(
+                """
+                UPDATE job_user_profiles
+                SET visibility = ?, updated_at = ?
+                WHERE user_id = ?
+                """,
+                (visibility, _utc_now(), user_id),
+            )
+            self._connection.commit()
+            return self._connection.execute(
+                "SELECT * FROM job_user_profiles WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+
+    async def get_job_application_status(
+        self,
+        *,
+        user_id: str,
+        company_id: int,
+    ) -> Optional[sqlite3.Row]:
+        async with self._lock:
+            return self._connection.execute(
+                """
+                SELECT s.*, c.company, c.normalized_company
+                FROM job_application_statuses s
+                JOIN company_watchlist c ON c.id = s.company_id
+                WHERE s.user_id = ? AND s.company_id = ?
+                LIMIT 1
+                """,
+                (user_id, company_id),
+            ).fetchone()
+
+    async def upsert_job_application_status(
+        self,
+        *,
+        user_id: str,
+        company_id: int,
+        status: str,
+        notes: Optional[str] = None,
+    ) -> sqlite3.Row:
+        async with self._lock:
+            now = _utc_now()
+            existing = self._connection.execute(
+                """
+                SELECT id, notes
+                FROM job_application_statuses
+                WHERE user_id = ? AND company_id = ?
+                """,
+                (user_id, company_id),
+            ).fetchone()
+            if existing:
+                resolved_notes = existing["notes"] if notes is None else notes
+                self._connection.execute(
+                    """
+                    UPDATE job_application_statuses
+                    SET status = ?, notes = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (status, resolved_notes, now, existing["id"]),
+                )
+            else:
+                self._connection.execute(
+                    """
+                    INSERT INTO job_application_statuses (
+                        user_id, company_id, status, notes, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (user_id, company_id, status, notes or "", now, now),
+                )
+            self._connection.commit()
+            return self._connection.execute(
+                """
+                SELECT s.*, c.company, c.normalized_company
+                FROM job_application_statuses s
+                JOIN company_watchlist c ON c.id = s.company_id
+                WHERE s.user_id = ? AND s.company_id = ?
+                LIMIT 1
+                """,
+                (user_id, company_id),
+            ).fetchone()
+
+    async def list_job_application_statuses_for_user(
+        self,
+        user_id: str,
+        *,
+        limit: int = 25,
+    ) -> List[sqlite3.Row]:
+        async with self._lock:
+            return self._connection.execute(
+                """
+                SELECT s.*, c.company, c.normalized_company
+                FROM job_application_statuses s
+                JOIN company_watchlist c ON c.id = s.company_id
+                WHERE s.user_id = ?
+                ORDER BY s.updated_at DESC, c.company COLLATE NOCASE ASC
+                LIMIT ?
+                """,
+                (user_id, limit),
+            ).fetchall()
+
+    async def list_job_peers(
+        self,
+        *,
+        company_id: int,
+        requester_user_id: str,
+        include_matched: bool,
+        limit: int = 25,
+    ) -> List[sqlite3.Row]:
+        visibility_values = ["open"]
+        if include_matched:
+            visibility_values.append("matched")
+        placeholders = ", ".join("?" for _ in visibility_values)
+        params: List[Any] = [company_id, requester_user_id, *visibility_values, limit]
+        async with self._lock:
+            return self._connection.execute(
+                f"""
+                SELECT s.*, 
+                       p.visibility, c.company, c.normalized_company
+                FROM job_application_statuses s
+                JOIN job_user_profiles p ON p.user_id = s.user_id
+                JOIN company_watchlist c ON c.id = s.company_id
+                WHERE s.company_id = ?
+                  AND s.user_id <> ?
+                  AND s.status <> 'hide'
+                  AND p.visibility IN ({placeholders})
+                ORDER BY
+                    CASE p.visibility
+                        WHEN 'open' THEN 0
+                        WHEN 'matched' THEN 1
+                        ELSE 2
+                    END,
+                    s.updated_at DESC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
 
     async def get_canonical_by_fingerprint_keys(self, keys: Iterable[str]) -> Optional[CanonicalJob]:
         values = [key for key in keys if key]

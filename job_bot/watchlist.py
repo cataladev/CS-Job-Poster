@@ -102,6 +102,13 @@ def _pretty_provenance_tags(categories: List[str]) -> List[str]:
     return sorted(set(tags))
 
 
+def _with_fire_prefix(company: str) -> str:
+    cleaned = company.strip()
+    if cleaned.startswith("🔥"):
+        return cleaned
+    return f"🔥 {cleaned}"
+
+
 @dataclass
 class TrackClassification:
     track: Optional[str]
@@ -431,6 +438,20 @@ class WatchlistService:
             return None
         targets = await self.database.get_company_scan_targets(int(company["id"]))
         return {"company": company, "targets": targets}
+
+    async def mark_company_hot(self, query: str) -> sqlite3.Row:
+        company = await self.database.find_watchlist_company(query)
+        if not company:
+            raise ValueError("Company not found in watchlist.")
+
+        hot_name = _with_fire_prefix(company["company"])
+        await self.database.update_watchlist_company_name(int(company["id"]), hot_name)
+        await self.database.update_canonical_company_name(company["normalized_company"], hot_name)
+
+        updated_company = await self.database.get_watchlist_company_by_id(int(company["id"]))
+        if updated_company is None:
+            raise ValueError("Company not found in watchlist.")
+        return updated_company
 
     def build_watchlist_metadata(self, company_row: Any) -> Dict[str, Any]:
         categories = _parse_json_list(company_row["categories"])

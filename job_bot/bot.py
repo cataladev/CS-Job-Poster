@@ -30,6 +30,63 @@ COMPANIES_STOP_EMOJI = "⏹️"
 DEFAULT_PAGE_SIZE = 10
 RECENT_PAGE_SIZE = 6
 HELP_PAGE_SIZE = 8
+JOB_PEER_PAGE_SIZE = 10
+MY_JOBS_PAGE_SIZE = 10
+
+JOB_VISIBILITY_DEFAULT = "matched"
+JOB_VISIBILITY_LABELS = {
+    "matched": "Matched Only",
+    "open": "Open",
+    "private": "Private",
+}
+JOB_STATUS_LABELS = {
+    "save": "Saved",
+    "hide": "Hidden",
+    "applied": "Applied",
+    "oa_received": "OA Received",
+    "interview": "Interview",
+    "rejected": "Rejected",
+    "offer": "Offer",
+}
+JOB_STATUS_ALIASES = {
+    "save": "save",
+    "saved": "save",
+    "bookmark": "save",
+    "bookmarked": "save",
+    "hide": "hide",
+    "hidden": "hide",
+    "applied": "applied",
+    "apply": "applied",
+    "application_sent": "applied",
+    "oa": "oa_received",
+    "oa_received": "oa_received",
+    "oareceived": "oa_received",
+    "online_assessment": "oa_received",
+    "onlineassessment": "oa_received",
+    "interview": "interview",
+    "interviews": "interview",
+    "rejected": "rejected",
+    "reject": "rejected",
+    "offer": "offer",
+    "offered": "offer",
+}
+JOB_STATUS_ORDER = {
+    "save": 0,
+    "applied": 1,
+    "oa_received": 2,
+    "interview": 3,
+    "offer": 4,
+    "rejected": 5,
+    "hide": 6,
+}
+JOB_COMMUNITY_RULES = "\n".join(
+    [
+        "Rules:",
+        "• Opt-in only",
+        "• No OA/interview leaks, screenshots, recruiter emails, or another person's private details",
+        "• Use this to find like-minded peers, not to share confidential process content",
+    ]
+)
 
 
 def user_has_admin_privileges(user: Any) -> bool:
@@ -120,11 +177,193 @@ def build_companies_embed(rows: Sequence[Any], *, page_index: int, query: str = 
     )
 
 
+def normalize_job_visibility(value: str) -> Optional[str]:
+    cleaned = value.strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "matched": "matched",
+        "match": "matched",
+        "matched_only": "matched",
+        "open": "open",
+        "everyone": "open",
+        "public": "open",
+        "private": "private",
+        "hidden": "private",
+        "off": "private",
+    }
+    return aliases.get(cleaned)
+
+
+def format_job_visibility(visibility: str) -> str:
+    return JOB_VISIBILITY_LABELS.get(visibility, visibility.replace("_", " ").title())
+
+
+def normalize_job_tracking_status(value: str) -> Optional[str]:
+    cleaned = value.strip().lower().replace("-", "_").replace(" ", "_")
+    return JOB_STATUS_ALIASES.get(cleaned)
+
+
+def parse_jobstatus_input(value: str) -> Optional[tuple[str, str]]:
+    raw = value.strip()
+    if not raw:
+        return None
+    if "|" in raw:
+        company_query, status_input = [part.strip() for part in raw.split("|", 1)]
+        status = normalize_job_tracking_status(status_input)
+        if company_query and status:
+            return company_query, status
+        return None
+
+    tokens = raw.split()
+    if len(tokens) < 2:
+        return None
+
+    for suffix_length in (2, 1):
+        if len(tokens) <= suffix_length:
+            continue
+        company_query = " ".join(tokens[:-suffix_length]).strip()
+        status_input = " ".join(tokens[-suffix_length:]).strip()
+        status = normalize_job_tracking_status(status_input)
+        if company_query and status:
+            return company_query, status
+    return None
+
+
+def parse_jobprocess_input(value: str) -> Optional[tuple[str, Optional[str], bool]]:
+    raw = value.strip()
+    if not raw:
+        return None
+    if "|" in raw:
+        company_query, note = [part.strip() for part in raw.split("|", 1)]
+        if not company_query or not note:
+            return None
+        return company_query, note, False
+
+    lowered = raw.lower()
+    for suffix in (" comments", " comment", " notes", " note"):
+        if lowered.endswith(suffix) and len(raw) > len(suffix):
+            return raw[: -len(suffix)].strip(), None, True
+    return raw, None, False
+
+
+def parse_process_command_input(value: str) -> tuple[str, str]:
+    raw = value.strip()
+    if not raw:
+        return "help", ""
+
+    if normalize_job_visibility(raw):
+        return "visibility", raw
+
+    head, _, tail = raw.partition(" ")
+    action = head.lower()
+    action_aliases = {
+        "help": "help",
+        "menu": "help",
+        "me": "myjobs",
+        "my": "myjobs",
+        "mine": "myjobs",
+        "peer": "jobpeers",
+        "peers": "jobpeers",
+        "visibility": "visibility",
+        "vis": "visibility",
+        "status": "jobstatus",
+        "set": "jobstatus",
+        "stat": "jobprocess",
+        "stats": "jobprocess",
+        "note": "jobprocess",
+        "notes": "jobprocess",
+        "comment": "jobprocess",
+        "comments": "jobprocess",
+    }
+    if action in action_aliases:
+        resolved = action_aliases[action]
+        if action in {"note", "notes", "comment", "comments"} and tail:
+            return resolved, f"{tail} notes"
+        return resolved, tail
+
+    if parse_jobstatus_input(raw):
+        return "jobstatus", raw
+    return "jobprocess", raw
+
+
+def format_job_tracking_status(status: str) -> str:
+    return JOB_STATUS_LABELS.get(status, status.replace("_", " ").title())
+
+
+def job_status_sort_key(status: str) -> int:
+    return JOB_STATUS_ORDER.get(status, 99)
+
+
+def job_statuses_help_text() -> str:
+    return ", ".join(f"`{name}`" for name in ["save", "hide", "applied", "oa", "interview", "rejected", "offer"])
+
+
+def jobstatus_usage_text() -> str:
+    return (
+        f"Use `!process status Company Name status` or `!jobstatus Company Name status` "
+        f"where status is one of {job_statuses_help_text()}."
+    )
+
+
+def jobprocess_usage_text() -> str:
+    return (
+        "Use `!process <company|id>` for company stats, "
+        "`!process <company|id> notes` for notes, or "
+        "`!process <company|id> | <note>` to save your note."
+    )
+
+
+def build_process_help_message(*, visibility: str, joined: bool) -> str:
+    lines = [
+        "You're in the job-process community." if joined else "Job process commands",
+        f"`Visibility:` {visibility}",
+        "",
+        "`Use:`",
+        "• `!process nvidia oa` set your status",
+        "• `!process peers nvidia` find peers",
+        "• `!process nvidia` view company process stats",
+        "• `!process nvidia notes` view notes",
+        "• `!process nvidia | recruiter said 2 rounds` save your note",
+        "• `!process me` view your tracker",
+        "• `!process open` or `!process visibility open` change discovery",
+        "",
+        JOB_COMMUNITY_RULES,
+    ]
+    return "\n".join(lines)
+
+
+def _clean_job_process_note(note: str) -> str:
+    return " ".join(note.strip().split())[:400]
+
+
+def _job_process_counts_text(rows: Sequence[Any]) -> str:
+    counts = Counter(row["status"] for row in rows if row["status"] != "hide")
+    ordered_statuses = [status for status, _ in sorted(JOB_STATUS_ORDER.items(), key=lambda item: item[1])]
+    parts = [
+        f"{format_job_tracking_status(status)} {counts[status]}"
+        for status in ordered_statuses
+        if counts.get(status)
+    ]
+    return " • ".join(parts) if parts else "No visible statuses yet."
+
+
+def _format_relative_timestamp(value: str, *, default: str = "just now") -> str:
+    if not value:
+        return default
+    try:
+        timestamp = datetime.fromisoformat(value)
+    except ValueError:
+        return value
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    return f"<t:{int(timestamp.timestamp())}:R>"
+
+
 def build_recent_jobs_embed(
     jobs: Sequence[Any],
     *,
     page_index: int,
     page_size: int = RECENT_PAGE_SIZE,
+    company_display_names: Optional[dict[str, str]] = None,
 ) -> discord.Embed:
     total = len(jobs)
     total_pages = max(1, ceil(total / page_size))
@@ -143,7 +382,7 @@ def build_recent_jobs_embed(
         embed.description = "No jobs stored yet."
     else:
         for display_index, job in enumerate(page_jobs, start=start + 1):
-            company = job.company or "Unknown"
+            company = _recent_company_display_name(job, company_display_names)
             track = job.track.replace("_", " ").title()
             role_title = job.title or "Open role"
             role_link = f"[{role_title}]({job.canonical_url})" if job.canonical_url else role_title
@@ -159,6 +398,38 @@ def build_recent_jobs_embed(
 
     embed.set_footer(text=_pagination_footer_text(total, safe_page_index, page_size))
     return embed
+
+
+def _is_hot_recent_job(job: Any) -> bool:
+    company = job.company or ""
+    if "🔥" in company:
+        return True
+    return any("🔥" in str(tag) for tag in getattr(job, "provenance_tags", []))
+
+
+def _recent_company_display_name(job: Any, company_display_names: Optional[dict[str, str]] = None) -> str:
+    normalized_company = getattr(job, "normalized_company", "")
+    if company_display_names and normalized_company in company_display_names:
+        return company_display_names[normalized_company]
+    return job.company or "Unknown"
+
+
+def sort_recent_jobs(
+    jobs: Sequence[Any],
+    company_display_names: Optional[dict[str, str]] = None,
+) -> List[Any]:
+    return sorted(
+        jobs,
+        key=lambda job: (
+            not (
+                "🔥" in _recent_company_display_name(job, company_display_names)
+                or _is_hot_recent_job(job)
+            ),
+            -job.first_seen.timestamp(),
+            _recent_company_display_name(job, company_display_names).lower(),
+            (job.title or "").lower(),
+        ),
+    )
 
 
 def _format_scan_timestamp(value: str, *, default: str) -> str:
@@ -254,6 +525,84 @@ def build_company_info_embed(company: Any, targets: Sequence[Any]) -> discord.Em
     return embed
 
 
+def build_help_entries() -> List[str]:
+    return [
+        "`!ping` - health check",
+        "`!help` - show the quick help menu",
+        "`!helpjobs` - show the full command menu",
+        "`!runjobs` - trigger a manual discovery run [admin only]",
+        "`!stats` - show stored job stats [admin only]",
+        "`!sources` - list configured sources [admin only]",
+        "`!recent` - show the most recent jobs",
+        "`!requestcompany <company> | <careers_url> | [homepage_url]` - request a company",
+        "`!companyrequests [pending|approved|denied|all]` - request queue [admin only]",
+        "`!approvecompany <request_id>` - approve a company request [admin only]",
+        "`!denycompany <request_id> [reason]` - deny a company request [admin only]",
+        "`!firecompany <company|id>` - mark a watchlist company as hot [admin only]",
+        "`!companies [query]` - list watchlist companies",
+        "`!companyinfo <company|id>` - show watchlist details",
+        "`!synccompanies` - reimport the company watchlist seed [admin only]",
+        "`!dedupecheck <url or text>` - test duplicate detection [admin only]",
+        "`!season [value]` - show season filter configuration [admin only]",
+        "`!summary [daily|weekly]` - show recent summary stats [admin only]",
+        "`!process` - join the process tracker and show examples",
+        "`!process nvidia oa` - set your status",
+        "`!process peers nvidia` - find peers",
+        "`!process nvidia` - view company process stats",
+        "`!process nvidia | recruiter said 2 rounds` - save your note",
+    ]
+
+
+def build_quick_help_embed(*, is_admin: bool) -> discord.Embed:
+    embed = discord.Embed(
+        title="Help",
+        description="Quick command guide. Use `!helpjobs` for the full menu.",
+        color=discord.Color.purple(),
+    )
+    embed.add_field(
+        name="Browse",
+        value="\n".join(
+            [
+                "`!recent` recent jobs",
+                "`!companies [query]` companies",
+                "`!companyinfo <company|id>` company details",
+            ]
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Requests",
+        value="`!requestcompany <company> | <careers_url> | [homepage_url]`",
+        inline=False,
+    )
+    embed.add_field(
+        name="Community",
+        value="\n".join(
+            [
+                "`!process` open the menu",
+                "`!process nvidia oa` update status",
+                "`!process peers nvidia` find peers",
+                "`!process nvidia` stats / notes",
+            ]
+        ),
+        inline=False,
+    )
+    if is_admin:
+        embed.add_field(
+            name="Admin",
+            value="\n".join(
+                [
+                    "`!runjobs` manual run",
+                    "`!firecompany <company|id>` mark hot",
+                    "`!synccompanies` refresh watchlist",
+                ]
+            ),
+            inline=False,
+        )
+    embed.set_footer(text="This message will disappear shortly.")
+    return embed
+
+
 async def run_bot() -> None:
     config = load_config()
     configure_logging(config.log_level)
@@ -280,7 +629,6 @@ async def run_bot() -> None:
     publisher = DiscordPublisher(config, database)
     pipeline = JobPipeline(config, database, publisher)
     scheduler = BotScheduler(config, pipeline)
-
     intents = discord.Intents.default()
     intents.message_content = True
     bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
@@ -311,8 +659,11 @@ async def run_bot() -> None:
         total_items: int,
         page_size: int = DEFAULT_PAGE_SIZE,
         build_page: Callable[[int], discord.Embed],
+        destination: Optional[Any] = None,
+        reaction_user_id: Optional[int] = None,
     ) -> None:
-        message = await ctx.send(embed=build_page(0))
+        target = destination or ctx
+        message = await target.send(embed=build_page(0))
         if total_items <= page_size:
             return
 
@@ -331,6 +682,7 @@ async def run_bot() -> None:
                 reaction.message.id == message.id
                 and not user.bot
                 and str(reaction.emoji) in controls
+                and (reaction_user_id is None or user.id == reaction_user_id)
             )
 
         while True:
@@ -364,11 +716,15 @@ async def run_bot() -> None:
         description: str = "",
         empty_text: str = "No items to show.",
         color: Optional[discord.Color] = None,
+        destination: Optional[Any] = None,
+        reaction_user_id: Optional[int] = None,
     ) -> None:
         await _send_paginated_embed_pages(
             ctx,
             total_items=len(entries),
             page_size=page_size,
+            destination=destination,
+            reaction_user_id=reaction_user_id,
             build_page=lambda page_index: build_paginated_embed(
                 title=title,
                 entries=entries,
@@ -392,6 +748,396 @@ async def run_bot() -> None:
         if isinstance(error, commands.CommandNotFound):
             return
         raise error
+
+    async def _require_job_community_profile(
+        ctx: commands.Context,
+    ) -> Optional[Any]:
+        profile = await database.get_job_community_profile(str(ctx.author.id))
+        if profile:
+            return profile
+        await ctx.send(
+            "Run `!process` first to opt in. Default visibility is `matched`, and you can change it with `!visibility`."
+        )
+        return None
+
+    async def _community_user_label(ctx: commands.Context, user_id: str) -> str:
+        try:
+            numeric_user_id = int(user_id)
+        except ValueError:
+            return user_id
+
+        if ctx.guild:
+            member = ctx.guild.get_member(numeric_user_id)
+            if member:
+                return member.display_name
+            with contextlib.suppress(discord.HTTPException, discord.NotFound, discord.Forbidden):
+                member = await ctx.guild.fetch_member(numeric_user_id)
+                return member.display_name
+
+        user = bot.get_user(numeric_user_id)
+        if user:
+            return getattr(user, "display_name", user.name)
+        with contextlib.suppress(discord.HTTPException, discord.NotFound, discord.Forbidden):
+            user = await bot.fetch_user(numeric_user_id)
+            return getattr(user, "display_name", user.name)
+        return user_id
+
+    async def _resolve_process_destination(
+        ctx: commands.Context,
+        *,
+        profile: Optional[Any] = None,
+        force_dm: bool = False,
+    ) -> Optional[Any]:
+        if not ctx.guild:
+            return ctx
+        if not force_dm and (not profile or profile["visibility"] == "open"):
+            return ctx
+        try:
+            destination = ctx.author.dm_channel or await ctx.author.create_dm()
+        except discord.HTTPException:
+            with contextlib.suppress(discord.HTTPException):
+                await ctx.message.delete()
+            await ctx.send(
+                "I couldn't DM you. Enable DMs from server members and try again.",
+                delete_after=15,
+            )
+            return None
+        with contextlib.suppress(discord.HTTPException):
+            await ctx.message.delete()
+        return destination
+
+    async def _send_process_message(
+        ctx: commands.Context,
+        content: str,
+        *,
+        profile: Optional[Any] = None,
+        force_dm: bool = False,
+    ) -> None:
+        destination = await _resolve_process_destination(ctx, profile=profile, force_dm=force_dm)
+        if destination is None:
+            return
+        await destination.send(content)
+
+    async def _handle_visibility(
+        ctx: commands.Context,
+        profile: Any,
+        value: str,
+    ) -> None:
+        if not value.strip():
+            await _send_process_message(
+                ctx,
+                f"Your visibility is `{format_job_visibility(profile['visibility'])}`. "
+                "Use `!process open`, `!process matched`, or `!process private` to change it.",
+                profile=profile,
+            )
+            return
+        visibility = normalize_job_visibility(value)
+        if not visibility:
+            await _send_process_message(
+                ctx,
+                "Visibility must be one of `matched`, `open`, or `private`.",
+                profile=profile,
+            )
+            return
+        updated = await database.update_job_community_visibility(str(ctx.author.id), visibility)
+        if not updated:
+            await ctx.send("Run `!process` first to opt in.")
+            return
+        await _send_process_message(
+            ctx,
+            f"Visibility updated to `{format_job_visibility(updated['visibility'])}`.",
+            profile=updated,
+        )
+
+    async def _handle_jobstatus(
+        ctx: commands.Context,
+        profile: Any,
+        value: str,
+    ) -> None:
+        parsed = parse_jobstatus_input(value)
+        if not parsed:
+            await _send_process_message(ctx, jobstatus_usage_text(), profile=profile)
+            return
+        company_query, status = parsed
+        company = await database.find_watchlist_company(company_query)
+        if not company:
+            await _send_process_message(
+                ctx,
+                "Company not found in watchlist. Use `!companies [query]` to search.",
+                profile=profile,
+            )
+            return
+        await database.upsert_job_application_status(
+            user_id=str(ctx.author.id),
+            company_id=int(company["id"]),
+            status=status,
+        )
+        if status == "hide":
+            await _send_process_message(
+                ctx,
+                f"Set your status for **{company['company']}** to `{format_job_tracking_status(status)}`. "
+                "You will not appear in peer lookups for this company.",
+                profile=profile,
+            )
+            return
+
+        visibility = profile["visibility"]
+        if visibility == "private":
+            visibility_note = "Your profile is still `Private`, so others cannot discover you yet."
+        elif visibility == "matched":
+            visibility_note = "Matched peers can see you only if they also track this company."
+        else:
+            visibility_note = "Open peers can discover you from this company."
+        await _send_process_message(
+            ctx,
+            f"Set your status for **{company['company']}** to `{format_job_tracking_status(status)}`. "
+            f"{visibility_note}",
+            profile=profile,
+        )
+
+    async def _handle_myjobs(
+        ctx: commands.Context,
+        profile: Any,
+    ) -> None:
+        rows = await database.list_job_application_statuses_for_user(
+            str(ctx.author.id),
+            limit=100,
+        )
+        if not rows:
+            await _send_process_message(
+                ctx,
+                "You have not tracked any companies yet. Use `!process nvidia applied` to start.",
+                profile=profile,
+                force_dm=True,
+            )
+            return
+        entries = [
+            (
+                f"**{row['company']}**\n"
+                f"`{format_job_tracking_status(row['status'])}` • updated {_format_relative_timestamp(row['updated_at'])}"
+                + (f"\nNote: {row['notes']}" if row["notes"] else "")
+            )
+            for row in rows
+        ]
+        destination = await _resolve_process_destination(ctx, profile=profile, force_dm=True)
+        if destination is None:
+            return
+        await _send_paginated_entries(
+            ctx,
+            title="Your Process Tracker",
+            entries=entries,
+            page_size=MY_JOBS_PAGE_SIZE,
+            description=f"Visibility: `{format_job_visibility(profile['visibility'])}`",
+            color=discord.Color.dark_blue(),
+            destination=destination,
+            reaction_user_id=ctx.author.id,
+        )
+
+    async def _handle_jobpeers(
+        ctx: commands.Context,
+        profile: Any,
+        query: str,
+    ) -> None:
+        company = await database.find_watchlist_company(query.strip())
+        if not company:
+            await _send_process_message(
+                ctx,
+                "Company not found in watchlist. Use `!companies [query]` to search.",
+                profile=profile,
+            )
+            return
+        own_status = await database.get_job_application_status(
+            user_id=str(ctx.author.id),
+            company_id=int(company["id"]),
+        )
+        include_matched = bool(own_status and own_status["status"] != "hide")
+        peers = await database.list_job_peers(
+            company_id=int(company["id"]),
+            requester_user_id=str(ctx.author.id),
+            include_matched=include_matched,
+            limit=100,
+        )
+        if not peers:
+            if include_matched:
+                await _send_process_message(
+                    ctx,
+                    f"No opted-in peers are currently visible for **{company['company']}**.",
+                    profile=profile,
+                    force_dm=True,
+                )
+            else:
+                await _send_process_message(
+                    ctx,
+                    f"No open peers are currently visible for **{company['company']}**. "
+                    "Set your own status on that company to unlock `matched` peers too.",
+                    profile=profile,
+                    force_dm=True,
+                )
+            return
+        labels: dict[str, str] = {}
+        for row in peers:
+            labels[row["user_id"]] = await _community_user_label(ctx, row["user_id"])
+        entries = [
+            (
+                f"**{labels[row['user_id']]}**\n"
+                f"`{format_job_tracking_status(row['status'])}` • "
+                f"`{format_job_visibility(row['visibility'])}` • "
+                f"updated {_format_relative_timestamp(row['updated_at'])}"
+                + (f"\nNote: {row['notes']}" if row["notes"] else "")
+            )
+            for row in peers
+        ]
+        description = (
+            f"Company: **{company['company']}**\n"
+            + (
+                "Showing `open` and `matched` peers because you also track this company."
+                if include_matched
+                else "Showing `open` peers only. Track this company yourself to unlock `matched` peers too."
+            )
+            + f"\n{JOB_COMMUNITY_RULES}"
+        )
+        destination = await _resolve_process_destination(ctx, profile=profile, force_dm=True)
+        if destination is None:
+            return
+        await _send_paginated_entries(
+            ctx,
+            title="Process Peers",
+            entries=entries,
+            page_size=JOB_PEER_PAGE_SIZE,
+            description=description,
+            color=discord.Color.gold(),
+            destination=destination,
+            reaction_user_id=ctx.author.id,
+        )
+
+    async def _handle_jobprocess(
+        ctx: commands.Context,
+        profile: Any,
+        value: str,
+    ) -> None:
+        parsed = parse_jobprocess_input(value)
+        if not parsed:
+            await _send_process_message(
+                ctx,
+                jobprocess_usage_text(),
+                profile=profile,
+                force_dm=True,
+            )
+            return
+        company_query, note, notes_only = parsed
+        company = await database.find_watchlist_company(company_query)
+        if not company:
+            await _send_process_message(
+                ctx,
+                "Company not found in watchlist. Use `!companies [query]` to search.",
+                profile=profile,
+                force_dm=True,
+            )
+            return
+        own_status = await database.get_job_application_status(
+            user_id=str(ctx.author.id),
+            company_id=int(company["id"]),
+        )
+
+        if note is not None:
+            cleaned_note = _clean_job_process_note(note)
+            if not cleaned_note:
+                await _send_process_message(
+                    ctx,
+                    "Notes cannot be empty.",
+                    profile=profile,
+                    force_dm=True,
+                )
+                return
+            current_status = own_status["status"] if own_status else "save"
+            await database.upsert_job_application_status(
+                user_id=str(ctx.author.id),
+                company_id=int(company["id"]),
+                status=current_status,
+                notes=cleaned_note,
+            )
+            await _send_process_message(
+                ctx,
+                f"Saved your note for **{company['company']}** under `{format_job_tracking_status(current_status)}`.",
+                profile=profile,
+                force_dm=True,
+            )
+            return
+
+        include_matched = bool(own_status and own_status["status"] != "hide")
+        peers = await database.list_job_peers(
+            company_id=int(company["id"]),
+            requester_user_id=str(ctx.author.id),
+            include_matched=include_matched,
+            limit=100,
+        )
+
+        visible_rows: List[Any] = list(peers)
+        if own_status and own_status["status"] != "hide":
+            visible_rows = [own_status, *visible_rows]
+
+        if not visible_rows:
+            await _send_process_message(
+                ctx,
+                f"No visible process data is available for **{company['company']}** yet.",
+                profile=profile,
+                force_dm=True,
+            )
+            return
+
+        count_summary = _job_process_counts_text(visible_rows)
+        description_lines = [
+            f"Company: **{company['company']}**",
+            f"Visible statuses: {count_summary}",
+            (
+                "Scope: `open` + `matched` peers"
+                if include_matched
+                else "Scope: `open` peers only"
+            ),
+        ]
+        if own_status and own_status["status"] != "hide":
+            description_lines.append(
+                f"Your status: `{format_job_tracking_status(own_status['status'])}`"
+            )
+
+        entry_rows = visible_rows
+        if notes_only:
+            entry_rows = [row for row in visible_rows if row["notes"]]
+            if not entry_rows:
+                await _send_process_message(
+                    ctx,
+                    f"No visible notes are available for **{company['company']}** yet.",
+                    profile=profile,
+                    force_dm=True,
+                )
+                return
+
+        labels: dict[str, str] = {}
+        for row in entry_rows:
+            if row["user_id"] == str(ctx.author.id):
+                continue
+            labels[row["user_id"]] = await _community_user_label(ctx, row["user_id"])
+        entries = [
+            (
+                f"**{'You' if row['user_id'] == str(ctx.author.id) else labels[row['user_id']]}**\n"
+                f"`{format_job_tracking_status(row['status'])}` • updated {_format_relative_timestamp(row['updated_at'])}"
+                + (f"\nNote: {row['notes']}" if row["notes"] else "")
+            )
+            for row in entry_rows
+        ]
+        destination = await _resolve_process_destination(ctx, profile=profile, force_dm=True)
+        if destination is None:
+            return
+        await _send_paginated_entries(
+            ctx,
+            title="Job Process",
+            entries=entries,
+            page_size=JOB_PEER_PAGE_SIZE,
+            description="\n".join(description_lines),
+            color=discord.Color.orange(),
+            destination=destination,
+            reaction_user_id=ctx.author.id,
+        )
 
     @bot.command(name="ping")
     async def ping(ctx: commands.Context) -> None:
@@ -450,6 +1196,8 @@ async def run_bot() -> None:
         if not jobs:
             await ctx.send("No jobs stored yet.")
             return
+        hot_company_names = await database.get_hot_watchlist_company_names()
+        jobs = sort_recent_jobs(jobs, hot_company_names)
         await _send_paginated_embed_pages(
             ctx,
             total_items=len(jobs),
@@ -458,6 +1206,7 @@ async def run_bot() -> None:
                 jobs,
                 page_index=page_index,
                 page_size=RECENT_PAGE_SIZE,
+                company_display_names=hot_company_names,
             ),
         )
 
@@ -534,39 +1283,93 @@ async def run_bot() -> None:
         await ctx.send(embed=embed)
 
     async def _send_helpjobs(ctx: commands.Context) -> None:
-        entries = [
-            "`!ping` - health check",
-            "`!help` - show this help message",
-            "`!runjobs` - trigger a manual discovery run [admin only]",
-            "`!stats` - show stored job stats [admin only]",
-            "`!sources` - list configured sources [admin only]",
-            "`!recent` - show the most recent jobs",
-            "`!requestcompany <company> | <careers_url> | [homepage_url]` - request a company",
-            "`!companyrequests [pending|approved|denied|all]` - request queue [admin only]",
-            "`!approvecompany <request_id>` - approve a company request [admin only]",
-            "`!denycompany <request_id> [reason]` - deny a company request [admin only]",
-            "`!companies [query]` - list watchlist companies",
-            "`!companyinfo <company|id>` - show watchlist details",
-            "`!synccompanies` - reimport the company watchlist seed [admin only]",
-            "`!dedupecheck <url or text>` - test duplicate detection [admin only]",
-            "`!season [value]` - show season filter configuration [admin only]",
-            "`!summary [daily|weekly]` - show recent summary stats [admin only]",
-        ]
         await _send_paginated_entries(
             ctx,
             title="Command Help",
-            entries=entries,
+            entries=build_help_entries(),
             page_size=HELP_PAGE_SIZE,
             color=discord.Color.purple(),
         )
 
     @bot.command(name="help")
     async def help_command(ctx: commands.Context) -> None:
-        await _send_helpjobs(ctx)
+        await ctx.send(
+            embed=build_quick_help_embed(is_admin=user_has_admin_privileges(ctx.author)),
+            delete_after=45,
+        )
+        with contextlib.suppress(discord.HTTPException):
+            await ctx.message.delete()
 
     @bot.command(name="helpjobs")
     async def helpjobs(ctx: commands.Context) -> None:
         await _send_helpjobs(ctx)
+
+    @bot.command(name="process", aliases=["jobsaccept"])
+    async def process_command(ctx: commands.Context, *, value: str = "") -> None:
+        existing = await database.get_job_community_profile(str(ctx.author.id))
+        profile = await database.accept_job_community_rules(
+            str(ctx.author.id),
+            default_visibility=JOB_VISIBILITY_DEFAULT,
+        )
+        action, payload = parse_process_command_input(value)
+        if action == "help":
+            await _send_process_message(
+                ctx,
+                build_process_help_message(
+                    visibility=format_job_visibility(profile["visibility"]),
+                    joined=not bool(existing),
+                ),
+                profile=profile,
+            )
+            return
+        if action == "visibility":
+            await _handle_visibility(ctx, profile, payload)
+            return
+        if action == "jobstatus":
+            await _handle_jobstatus(ctx, profile, payload)
+            return
+        if action == "myjobs":
+            await _handle_myjobs(ctx, profile)
+            return
+        if action == "jobpeers":
+            await _handle_jobpeers(ctx, profile, payload)
+            return
+        await _handle_jobprocess(ctx, profile, payload)
+
+    @bot.command(name="visibility")
+    async def visibility_command(ctx: commands.Context, *, value: str = "") -> None:
+        profile = await _require_job_community_profile(ctx)
+        if not profile:
+            return
+        await _handle_visibility(ctx, profile, value)
+
+    @bot.command(name="jobstatus")
+    async def jobstatus_command(ctx: commands.Context, *, value: str) -> None:
+        profile = await _require_job_community_profile(ctx)
+        if not profile:
+            return
+        await _handle_jobstatus(ctx, profile, value)
+
+    @bot.command(name="myjobs")
+    async def myjobs_command(ctx: commands.Context) -> None:
+        profile = await _require_job_community_profile(ctx)
+        if not profile:
+            return
+        await _handle_myjobs(ctx, profile)
+
+    @bot.command(name="jobpeers")
+    async def jobpeers_command(ctx: commands.Context, *, query: str) -> None:
+        profile = await _require_job_community_profile(ctx)
+        if not profile:
+            return
+        await _handle_jobpeers(ctx, profile, query)
+
+    @bot.command(name="jobprocess", aliases=["jobstat"])
+    async def jobprocess_command(ctx: commands.Context, *, value: str) -> None:
+        profile = await _require_job_community_profile(ctx)
+        if not profile:
+            return
+        await _handle_jobprocess(ctx, profile, value)
 
     @bot.command(name="requestcompany")
     async def requestcompany(ctx: commands.Context, *, value: str) -> None:
@@ -642,6 +1445,16 @@ async def run_bot() -> None:
             await ctx.send(str(exc))
             return
         await ctx.send(f"Denied request #{request_id}.")
+
+    @bot.command(name="firecompany")
+    @restricted_command
+    async def firecompany(ctx: commands.Context, *, query: str) -> None:
+        try:
+            company = await watchlist_service.mark_company_hot(query)
+        except ValueError as exc:
+            await ctx.send(str(exc))
+            return
+        await ctx.send(f"Marked {company['company']} as a hot company.")
 
     @bot.command(name="companies")
     async def companies(ctx: commands.Context, *, query: str = "") -> None:
