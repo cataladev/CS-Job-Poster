@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from job_bot.bot import build_companies_embed
+from job_bot.bot import build_companies_embed, build_paginated_embed
 from job_bot.database import Database
 from job_bot.watchlist import TrackClassifier, WatchlistService
 
@@ -142,3 +142,16 @@ def test_build_companies_embed_shows_page_metadata() -> None:
     assert embed.title == "Watchlist Companies"
     assert "`#1` **Alpha**" in embed.description
     assert "Page 1/1" in embed.footer.text
+
+
+def test_build_paginated_embed_uses_requested_page_size() -> None:
+    embed = build_paginated_embed(
+        title="Recent Jobs",
+        entries=["one", "two", "three"],
+        page_index=1,
+        page_size=2,
+    )
+
+    assert embed.title == "Recent Jobs"
+    assert embed.description == "three"
+    assert "Page 2/2" in embed.footer.text
