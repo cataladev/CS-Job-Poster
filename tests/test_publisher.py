@@ -172,7 +172,7 @@ def test_build_embed_uses_human_readable_source_labels(config_factory) -> None:
 @pytest.mark.asyncio
 async def test_resolve_logo_url_falls_back_to_troll_thumbnail(config_factory) -> None:
     class DummyDatabase:
-        async def get_company_branding(self, normalized_company):
+        async def get_watchlist_company_by_normalized_company(self, normalized_company):
             return None
 
     publisher = DiscordPublisher(config_factory(), database=DummyDatabase())  # type: ignore[arg-type]
@@ -186,3 +186,99 @@ async def test_resolve_logo_url_falls_back_to_troll_thumbnail(config_factory) ->
     logo_url = await publisher._resolve_logo_url(job)
 
     assert logo_url == "https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/72x72/1f9cc.png"
+
+
+@pytest.mark.asyncio
+async def test_resolve_logo_url_prefers_cached_verified_logo(config_factory) -> None:
+    class DummyDatabase:
+        async def get_watchlist_company_by_normalized_company(self, normalized_company):
+            return {
+                "id": 1,
+                "homepage_url": "https://openai.com",
+                "careers_url": "https://jobs.ashbyhq.com/openai",
+                "logo_url": "https://cdn.example.com/openai-logo.png",
+                "logo_source": "ashby",
+                "logo_verified_at": "2026-04-08T12:00:00+00:00",
+            }
+
+        async def update_watchlist_branding(self, **kwargs):
+            return False
+
+    publisher = DiscordPublisher(config_factory(), database=DummyDatabase())  # type: ignore[arg-type]
+    job = _canonical_job(
+        job_id=7,
+        title="Software Engineer Intern",
+        normalized_title="software engineer intern",
+        canonical_url="https://jobs.ashbyhq.com/openai/7",
+    )
+    job.company = "OpenAI"
+    job.normalized_company = "openai"
+
+    logo_url = await publisher._resolve_logo_url(job)
+
+    assert logo_url == "https://cdn.example.com/openai-logo.png"
+
+
+@pytest.mark.asyncio
+async def test_refresh_jobs_uses_resolved_logo_on_existing_post(config_factory) -> None:
+    class DummyMessage:
+        def __init__(self):
+            self.embed = None
+
+        async def edit(self, *, embed):
+            self.embed = embed
+
+    class DummyChannel:
+        def __init__(self, message):
+            self.message = message
+
+        async def fetch_message(self, message_id):
+            return self.message
+
+    class DummyBot:
+        def __init__(self, channel):
+            self.channel = channel
+
+        async def wait_until_ready(self):
+            return None
+
+        def get_channel(self, channel_id):
+            return self.channel
+
+        async def fetch_channel(self, channel_id):
+            return self.channel
+
+    class DummyDatabase:
+        async def get_post_records_for_canonical(self, canonical_id):
+            return [{"channel_id": "111", "message_id": "222"}]
+
+        async def get_watchlist_company_by_normalized_company(self, normalized_company):
+            return {
+                "id": 1,
+                "homepage_url": "https://openai.com",
+                "careers_url": "https://jobs.ashbyhq.com/openai",
+                "logo_url": "https://cdn.example.com/openai-logo.png",
+                "logo_source": "ashby",
+                "logo_verified_at": "2026-04-08T12:00:00+00:00",
+            }
+
+        async def update_watchlist_branding(self, **kwargs):
+            return False
+
+    message = DummyMessage()
+    publisher = DiscordPublisher(config_factory(), database=DummyDatabase())  # type: ignore[arg-type]
+    publisher.bind_bot(DummyBot(DummyChannel(message)))  # type: ignore[arg-type]
+
+    job = _canonical_job(
+        job_id=8,
+        title="Software Engineer Intern",
+        normalized_title="software engineer intern",
+        canonical_url="https://jobs.ashbyhq.com/openai/8",
+    )
+    job.company = "OpenAI"
+    job.normalized_company = "openai"
+
+    refreshed = await publisher.refresh_jobs([job])
+
+    assert refreshed == [8]
+    assert message.embed.thumbnail.url == "https://cdn.example.com/openai-logo.png"

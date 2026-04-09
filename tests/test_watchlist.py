@@ -8,7 +8,7 @@ from job_bot.watchlist import TrackClassifier, WatchlistService
 
 
 @pytest.mark.asyncio
-async def test_watchlist_seed_import_creates_company_and_targets(config_factory, tmp_path) -> None:
+async def test_watchlist_seed_import_creates_company_and_targets(config_factory, tmp_path, monkeypatch) -> None:
     seed_path = tmp_path / "company_watchlist_seed.csv"
     seed_path.write_text(
         "\n".join(
@@ -25,6 +25,11 @@ async def test_watchlist_seed_import_creates_company_and_targets(config_factory,
     await database.initialize()
     service = WatchlistService(config, database)
 
+    async def fake_fetch(self, url, *, http_client=None):  # noqa: ANN001
+        return ""
+
+    monkeypatch.setattr("job_bot.branding.BrandingResolver._fetch_html", fake_fetch)
+
     stats = await service.sync_seed()
     rows = await service.list_companies()
     targets = await database.get_due_company_scan_targets(
@@ -38,15 +43,21 @@ async def test_watchlist_seed_import_creates_company_and_targets(config_factory,
 
 
 @pytest.mark.asyncio
-async def test_company_request_approval_promotes_to_watchlist(config_factory) -> None:
+async def test_company_request_approval_promotes_to_watchlist(config_factory, monkeypatch) -> None:
     config = config_factory()
     database = Database(config.sqlite_db_path)
     await database.initialize()
     service = WatchlistService(config, database)
 
+    async def fake_fetch(self, url, *, http_client=None):  # noqa: ANN001
+        return ""
+
+    monkeypatch.setattr("job_bot.branding.BrandingResolver._fetch_html", fake_fetch)
+
     request_id = await service.request_company(
         company="OpenAI",
         careers_url="https://jobs.ashbyhq.com/openai",
+        homepage_url="https://openai.com",
         requester_user_id="123",
         requester_channel_id="456",
     )
@@ -58,6 +69,24 @@ async def test_company_request_approval_promotes_to_watchlist(config_factory) ->
 
     assert approved["company"] == "OpenAI"
     assert any(target["target_type"] == "ashby" for target in targets)
+    assert approved["homepage_url"] == "https://openai.com/"
+
+
+@pytest.mark.asyncio
+async def test_company_request_rejects_shared_ats_homepage(config_factory) -> None:
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    service = WatchlistService(config, database)
+
+    with pytest.raises(ValueError, match="Homepage URL must be a valid branded public company URL."):
+        await service.request_company(
+            company="OpenAI",
+            careers_url="https://jobs.ashbyhq.com/openai",
+            homepage_url="https://jobs.ashbyhq.com",
+            requester_user_id="123",
+            requester_channel_id="456",
+        )
 
 
 def test_track_classifier_distinguishes_internship_and_new_grad() -> None:

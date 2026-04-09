@@ -76,6 +76,9 @@ class WatchlistCompany:
     normalized_company: str
     careers_url: str
     homepage_url: str
+    logo_url: str
+    logo_source: str
+    logo_verified_at: Optional[datetime]
     country: str
     categories: List[str]
     tier: str
@@ -96,6 +99,7 @@ class CompanyRequest:
     company: str
     normalized_company: str
     careers_url: str
+    homepage_url: str
     requester_user_id: str
     requester_channel_id: str
     status: str

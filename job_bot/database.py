@@ -160,6 +160,9 @@ class Database:
                     normalized_company TEXT NOT NULL,
                     careers_url TEXT NOT NULL,
                     homepage_url TEXT NOT NULL,
+                    logo_url TEXT NOT NULL DEFAULT '',
+                    logo_source TEXT NOT NULL DEFAULT '',
+                    logo_verified_at TEXT,
                     country TEXT NOT NULL,
                     categories TEXT NOT NULL,
                     tier TEXT NOT NULL,
@@ -180,6 +183,7 @@ class Database:
                     company TEXT NOT NULL,
                     normalized_company TEXT NOT NULL,
                     careers_url TEXT NOT NULL,
+                    homepage_url TEXT NOT NULL DEFAULT '',
                     requester_user_id TEXT NOT NULL,
                     requester_channel_id TEXT NOT NULL,
                     status TEXT NOT NULL,
@@ -217,6 +221,10 @@ class Database:
             )
             self._ensure_column("canonical_jobs", "provenance_tags", "TEXT NOT NULL DEFAULT '[]'")
             self._ensure_column("job_variants", "provenance_tags", "TEXT NOT NULL DEFAULT '[]'")
+            self._ensure_column("company_watchlist", "logo_url", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column("company_watchlist", "logo_source", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column("company_watchlist", "logo_verified_at", "TEXT")
+            self._ensure_column("company_requests", "homepage_url", "TEXT NOT NULL DEFAULT ''")
             self._connection.commit()
 
     async def close(self) -> None:
@@ -325,12 +333,15 @@ class Database:
         notes: str,
         active: bool,
         next_scan_at: Optional[str],
+        logo_url: str = "",
+        logo_source: str = "",
+        logo_verified_at: Optional[str] = None,
     ) -> int:
         async with self._lock:
             now = _utc_now()
             existing = self._connection.execute(
                 """
-                SELECT id, categories, tracks, notes
+                SELECT id, categories, tracks, notes, homepage_url, logo_url, logo_source, logo_verified_at
                 FROM company_watchlist
                 WHERE normalized_company = ? AND careers_url = ?
                 """,
@@ -344,11 +355,18 @@ class Database:
                 merged_notes = " | ".join(
                     part for part in [existing["notes"], notes] if part
                 )[:1000]
+                resolved_homepage = homepage_url or existing["homepage_url"] or ""
+                resolved_logo_url = logo_url or existing["logo_url"] or ""
+                resolved_logo_source = logo_source or existing["logo_source"] or ""
+                resolved_logo_verified_at = logo_verified_at or existing["logo_verified_at"]
                 self._connection.execute(
                     """
                     UPDATE company_watchlist
                     SET company = ?,
                         homepage_url = ?,
+                        logo_url = ?,
+                        logo_source = ?,
+                        logo_verified_at = ?,
                         country = ?,
                         categories = ?,
                         tier = ?,
@@ -363,7 +381,10 @@ class Database:
                     """,
                     (
                         company,
-                        homepage_url,
+                        resolved_homepage,
+                        resolved_logo_url,
+                        resolved_logo_source,
+                        resolved_logo_verified_at,
                         country,
                         _json_dump(merged_categories),
                         tier,
@@ -383,16 +404,20 @@ class Database:
             cursor = self._connection.execute(
                 """
                 INSERT INTO company_watchlist (
-                    company, normalized_company, careers_url, homepage_url, country,
+                    company, normalized_company, careers_url, homepage_url,
+                    logo_url, logo_source, logo_verified_at, country,
                     categories, tier, scan_cadence, tracks, seed_source, notes,
                     active, next_scan_at, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     company,
                     normalized_company,
                     careers_url,
                     homepage_url,
+                    logo_url,
+                    logo_source,
+                    logo_verified_at,
                     country,
                     _json_dump(categories),
                     tier,
@@ -457,14 +482,32 @@ class Database:
                 (normalized, normalized),
             ).fetchone()
 
+    async def get_watchlist_company_by_normalized_company(
+        self,
+        normalized_company: str,
+    ) -> Optional[sqlite3.Row]:
+        async with self._lock:
+            return self._connection.execute(
+                """
+                SELECT *
+                FROM company_watchlist
+                WHERE normalized_company = ?
+                ORDER BY active DESC, updated_at DESC
+                LIMIT 1
+                """,
+                (normalized_company,),
+            ).fetchone()
+
     async def get_company_branding(self, normalized_company: str) -> Optional[sqlite3.Row]:
         async with self._lock:
             return self._connection.execute(
                 """
-                SELECT company, normalized_company, homepage_url, careers_url
+                SELECT company, normalized_company, homepage_url, careers_url,
+                       logo_url, logo_source, logo_verified_at
                 FROM company_watchlist
                 WHERE normalized_company = ?
                 ORDER BY
+                    CASE WHEN logo_url <> '' THEN 0 ELSE 1 END,
                     CASE WHEN homepage_url <> '' THEN 0 ELSE 1 END,
                     active DESC,
                     updated_at DESC
@@ -472,6 +515,65 @@ class Database:
                 """,
                 (normalized_company,),
             ).fetchone()
+
+    async def update_watchlist_branding(
+        self,
+        *,
+        company_id: int,
+        homepage_url: Optional[str] = None,
+        logo_url: Optional[str] = None,
+        logo_source: Optional[str] = None,
+        logo_verified_at: Optional[str] = None,
+    ) -> bool:
+        async with self._lock:
+            existing = self._connection.execute(
+                """
+                SELECT homepage_url, logo_url, logo_source, logo_verified_at
+                FROM company_watchlist
+                WHERE id = ?
+                """,
+                (company_id,),
+            ).fetchone()
+            if not existing:
+                return False
+
+            resolved_homepage = existing["homepage_url"] if homepage_url is None else homepage_url
+            resolved_logo_url = existing["logo_url"] if logo_url is None else logo_url
+            resolved_logo_source = existing["logo_source"] if logo_source is None else logo_source
+            resolved_logo_verified_at = (
+                existing["logo_verified_at"] if logo_verified_at is None else logo_verified_at
+            )
+
+            changed = (
+                resolved_homepage != existing["homepage_url"]
+                or resolved_logo_url != existing["logo_url"]
+                or resolved_logo_source != existing["logo_source"]
+                or resolved_logo_verified_at != existing["logo_verified_at"]
+            )
+            if not changed:
+                return False
+
+            self._connection.execute(
+                """
+                UPDATE company_watchlist
+                SET homepage_url = ?,
+                    logo_url = ?,
+                    logo_source = ?,
+                    logo_verified_at = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    resolved_homepage,
+                    resolved_logo_url,
+                    resolved_logo_source,
+                    resolved_logo_verified_at,
+                    _utc_now(),
+                    company_id,
+                ),
+            )
+            self._connection.commit()
+            return True
 
     async def get_due_watchlist_companies(
         self,
@@ -634,6 +736,7 @@ class Database:
         company: str,
         normalized_company: str,
         careers_url: str,
+        homepage_url: str,
         requester_user_id: str,
         requester_channel_id: str,
     ) -> int:
@@ -642,14 +745,16 @@ class Database:
             cursor = self._connection.execute(
                 """
                 INSERT INTO company_requests (
-                    company, normalized_company, careers_url, requester_user_id, requester_channel_id,
-                    status, admin_notes, approver_user_id, watchlist_company_id, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, 'pending', '', NULL, NULL, ?, ?)
+                    company, normalized_company, careers_url, homepage_url,
+                    requester_user_id, requester_channel_id, status, admin_notes,
+                    approver_user_id, watchlist_company_id, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'pending', '', NULL, NULL, ?, ?)
                 """,
                 (
                     company,
                     normalized_company,
                     careers_url,
+                    homepage_url,
                     requester_user_id,
                     requester_channel_id,
                     now,
@@ -1083,6 +1188,27 @@ class Database:
                 (cutoff,),
             )
             rows = cursor.fetchall()
+        return [self._row_to_canonical(row) for row in rows]
+
+    async def get_posted_canonical_jobs_for_companies(
+        self,
+        normalized_companies: Iterable[str],
+    ) -> List[CanonicalJob]:
+        values = sorted({value for value in normalized_companies if value})
+        if not values:
+            return []
+        placeholders = ", ".join("?" for _ in values)
+        async with self._lock:
+            rows = self._connection.execute(
+                f"""
+                SELECT DISTINCT c.*
+                FROM canonical_jobs c
+                JOIN discord_posts d ON d.canonical_id = c.id
+                WHERE c.normalized_company IN ({placeholders})
+                ORDER BY c.last_seen DESC
+                """,
+                values,
+            ).fetchall()
         return [self._row_to_canonical(row) for row in rows]
 
     async def search_text(self, query: str, limit: int = 25) -> List[CanonicalJob]:
