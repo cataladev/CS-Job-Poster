@@ -51,6 +51,30 @@ SHARED_HOST_SUFFIXES = (
 )
 FALLBACK_COMPANY_EMOJI = "🧌"
 FALLBACK_COMPANY_THUMBNAIL_URL = "https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/72x72/1f9cc.png"
+SOURCE_LABELS = {
+    "github_simplify_internships": "GitHub",
+    "github_simplify_new_grad": "GitHub",
+    "github": "GitHub",
+    "company_watchlist_internship": "Company Page",
+    "company_watchlist_new_grad": "Company Page",
+    "company_pages": "Company Page",
+    "greenhouse": "Greenhouse",
+    "lever": "Lever",
+    "ashby": "Ashby",
+    "workday": "Workday",
+    "yc": "Y Combinator",
+    "wellfound": "Wellfound",
+}
+SOURCE_DISPLAY_ORDER = {
+    "GitHub": 0,
+    "Company Page": 1,
+    "Greenhouse": 2,
+    "Lever": 3,
+    "Ashby": 4,
+    "Workday": 5,
+    "Y Combinator": 6,
+    "Wellfound": 7,
+}
 
 
 class DiscordPublisher:
@@ -95,6 +119,59 @@ class DiscordPublisher:
             await asyncio.sleep(self.config.publish_delay_seconds)
         return posted_ids
 
+    async def refresh_jobs(self, jobs: List[CanonicalJob]) -> List[int]:
+        if not self.bot or not self.database:
+            return []
+
+        await self.bot.wait_until_ready()
+        refreshed_ids: List[int] = []
+        for job in jobs:
+            if job.status != "active" or job.id is None:
+                continue
+
+            post_records = await self.database.get_post_records_for_canonical(job.id)
+            if not post_records:
+                continue
+
+            logo_url = await self._resolve_logo_url(job)
+            embed = self._build_embed(job, logo_url=logo_url)
+            refreshed_any = False
+
+            for record in post_records:
+                try:
+                    channel_id = int(record["channel_id"])
+                    message_id = int(record["message_id"])
+                    channel = self.bot.get_channel(channel_id)
+                    if channel is None:
+                        channel = await self.bot.fetch_channel(channel_id)
+                    message = await channel.fetch_message(message_id)
+                    await message.edit(embed=embed)
+                    refreshed_any = True
+                except discord.NotFound:
+                    self.logger.warning(
+                        "Post record missing for canonical %s in channel %s",
+                        job.id,
+                        record["channel_id"],
+                    )
+                except discord.Forbidden:
+                    self.logger.warning(
+                        "Missing permission to refresh canonical %s in channel %s",
+                        job.id,
+                        record["channel_id"],
+                    )
+                except discord.HTTPException as exc:
+                    self.logger.warning(
+                        "Failed to refresh canonical %s in channel %s: %s",
+                        job.id,
+                        record["channel_id"],
+                        exc,
+                    )
+
+            if refreshed_any:
+                refreshed_ids.append(job.id)
+
+        return refreshed_ids
+
     def _build_embed(self, job: CanonicalJob, *, logo_url: Optional[str] = None) -> discord.Embed:
         embed = discord.Embed(
             title=job.title,
@@ -109,7 +186,7 @@ class DiscordPublisher:
         )
         embed.add_field(name="Location", value=job.location or "Unknown", inline=True)
         embed.add_field(name="Track", value=job.track.replace("_", " ").title(), inline=True)
-        embed.add_field(name="Source(s)", value=", ".join(job.source_names) or "Unknown", inline=False)
+        embed.add_field(name="Source(s)", value=self._format_source_names(job.source_names), inline=False)
         if job.provenance_tags:
             embed.add_field(
                 name="Watchlist",
@@ -130,6 +207,22 @@ class DiscordPublisher:
             embed.set_thumbnail(url=logo_url)
         embed.set_footer(text="Internship Aggregator Bot")
         return embed
+
+    def _format_source_names(self, source_names: List[str]) -> str:
+        if not source_names:
+            return "Unknown"
+
+        labels = []
+        seen = set()
+        for source_name in source_names:
+            label = SOURCE_LABELS.get(source_name, source_name.replace("_", " ").title())
+            if label in seen:
+                continue
+            seen.add(label)
+            labels.append(label)
+
+        labels.sort(key=lambda label: (SOURCE_DISPLAY_ORDER.get(label, 99), label))
+        return ", ".join(labels) or "Unknown"
 
     def _display_company_name(self, company: str, logo_url: Optional[str]) -> str:
         base = company or "Unknown"

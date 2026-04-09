@@ -60,22 +60,27 @@ class JobPipeline:
 
                 priority_results = await source_manager.run_priority_sources()
                 stats.sources_checked += len(priority_results)
-                candidate_post_ids.update(await self._process_results(priority_results, stats))
+                new_candidate_ids, new_refresh_ids = await self._process_results(priority_results, stats)
+                candidate_post_ids.update(new_candidate_ids)
                 await self._publish_candidates(candidate_post_ids, stats)
+                await self._refresh_candidates(new_refresh_ids)
 
                 async for result in source_manager.iter_secondary_sources():
                     stats.sources_checked += 1
-                    new_candidate_ids = await self._process_results([result], stats)
+                    new_candidate_ids, new_refresh_ids = await self._process_results([result], stats)
                     if not new_candidate_ids:
+                        await self._refresh_candidates(new_refresh_ids)
                         continue
                     candidate_post_ids.update(new_candidate_ids)
                     await self._publish_candidates(new_candidate_ids, stats)
+                    await self._refresh_candidates(new_refresh_ids)
 
             stats.finished_at = utc_now()
             return stats
 
-    async def _process_results(self, results: List[SourceResult], stats: RunStats) -> Set[int]:
+    async def _process_results(self, results: List[SourceResult], stats: RunStats) -> tuple[Set[int], Set[int]]:
         candidate_post_ids: Set[int] = set()
+        refresh_post_ids: Set[int] = set()
         for result in results:
             filtered_count = 0
             new_count = 0
@@ -95,7 +100,7 @@ class JobPipeline:
                     continue
 
                 resolved = await self.dedupe.resolve(job)
-                canonical_id, created = await self.database.save_job(
+                canonical_id, created, refresh_required = await self.database.save_job(
                     job,
                     canonical_id=resolved.canonical_id,
                 )
@@ -110,6 +115,8 @@ class JobPipeline:
                     )
                 if created:
                     new_count += 1
+                elif refresh_required:
+                    refresh_post_ids.add(canonical_id)
                 if job.status == "active":
                     candidate_post_ids.add(canonical_id)
 
@@ -127,7 +134,7 @@ class JobPipeline:
                 metadata=result.metadata,
                 error="; ".join(result.errors) if result.errors else None,
             )
-        return candidate_post_ids
+        return candidate_post_ids, refresh_post_ids
 
     async def _publish_candidates(self, canonical_ids: Set[int], stats: RunStats) -> None:
         pending_ids = set(canonical_ids) - set(stats.posted_canonical_ids)
@@ -139,6 +146,12 @@ class JobPipeline:
             return
         stats.jobs_posted += len(posted_ids)
         stats.posted_canonical_ids.extend(posted_ids)
+
+    async def _refresh_candidates(self, canonical_ids: Set[int]) -> None:
+        if not canonical_ids:
+            return
+        canonical_jobs = await self.database.get_canonical_jobs(sorted(canonical_ids))
+        await self.publisher.refresh_jobs(canonical_jobs)
 
     async def _discover_seed(self, job: JobPosting) -> None:
         urls = [job.canonical_url or job.url] + list(job.alternate_urls)

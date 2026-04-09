@@ -8,9 +8,14 @@ from job_bot.pipeline import JobPipeline
 class StubPublisher:
     def __init__(self):
         self.jobs = []
+        self.refreshed_jobs = []
 
     async def publish_jobs(self, jobs):
         self.jobs.extend(jobs)
+        return [job.id for job in jobs if job.id is not None]
+
+    async def refresh_jobs(self, jobs):
+        self.refreshed_jobs.extend(jobs)
         return [job.id for job in jobs if job.id is not None]
 
 
@@ -77,6 +82,8 @@ async def test_pipeline_posts_one_canonical_job_for_duplicates(config_factory, m
 
     assert stats.jobs_posted == 1
     assert len(publisher.jobs) == 1
+    assert len(publisher.refreshed_jobs) == 1
+    assert set(publisher.refreshed_jobs[0].source_names) == {"github_simplify_internships", "greenhouse"}
     assert persisted["total_canonical_jobs"] == 1
 
 

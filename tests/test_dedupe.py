@@ -24,7 +24,7 @@ async def test_cross_platform_duplicate_detected(config_factory) -> None:
             summary="Summer 2026 internship",
         )
     )
-    canonical_id, _ = await database.save_job(github_job)
+    canonical_id, _, _ = await database.save_job(github_job)
 
     greenhouse_job = normalize_job_posting(
         JobPosting(
@@ -77,4 +77,3 @@ async def test_distinct_openings_are_not_merged(config_factory) -> None:
     decision = await dedupe.resolve(frontend)
 
     assert decision.is_duplicate is False
-
