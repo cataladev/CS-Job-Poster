@@ -1,9 +1,11 @@
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
-from job_bot.bot import build_companies_embed, build_paginated_embed
+from job_bot.bot import build_companies_embed, build_company_info_embed, build_paginated_embed, build_recent_jobs_embed
 from job_bot.database import Database
+from job_bot.models import CanonicalJob
 from job_bot.watchlist import TrackClassifier, WatchlistService
 
 
@@ -184,3 +186,102 @@ def test_build_paginated_embed_uses_requested_page_size() -> None:
     assert embed.title == "Recent Jobs"
     assert embed.description == "three"
     assert "Page 2/2" in embed.footer.text
+
+
+def _canonical_job(job_id: int, company: str, title: str, url: str) -> CanonicalJob:
+    return CanonicalJob(
+        id=job_id,
+        track="internship",
+        title=title,
+        company=company,
+        location="New York, NY",
+        canonical_url=url,
+        summary="Software internship",
+        season_term="Summer 2026",
+        employment_type=None,
+        remote_status="onsite",
+        status="active",
+        normalized_company=company.lower(),
+        normalized_title=title.lower(),
+        normalized_locations=["new york ny"],
+        dedupe_fingerprint=f"fingerprint-{job_id}",
+        source_names=["github_simplify_internships"],
+        provenance_tags=[],
+        first_seen=datetime(2026, 4, 9, tzinfo=timezone.utc),
+        last_seen=datetime(2026, 4, 9, tzinfo=timezone.utc),
+    )
+
+
+def test_build_recent_jobs_embed_uses_linked_mobile_friendly_fields() -> None:
+    jobs = [
+        _canonical_job(1, "Mirage", "Software Engineer - Early Career", "https://example.com/jobs/1"),
+        _canonical_job(2, "OpenAI", "Software Engineer Intern", "https://example.com/jobs/2"),
+    ]
+
+    embed = build_recent_jobs_embed(jobs, page_index=0, page_size=6)
+
+    assert embed.title == "Recent Jobs"
+    assert embed.description == "Tap a role title to open the job listing."
+    assert len(embed.fields) == 2
+    assert embed.fields[0].name == "1. Mirage • Internship"
+    assert "[Software Engineer - Early Career](https://example.com/jobs/1)" in embed.fields[0].value
+    assert "New York, NY • Summer 2026 • Found 2026-04-09" in embed.fields[0].value
+    assert "Page 1/1" in embed.footer.text
+
+
+def test_build_recent_jobs_embed_respects_page_size() -> None:
+    jobs = [
+        _canonical_job(1, "Alpha", "Role 1", "https://example.com/jobs/1"),
+        _canonical_job(2, "Beta", "Role 2", "https://example.com/jobs/2"),
+        _canonical_job(3, "Gamma", "Role 3", "https://example.com/jobs/3"),
+    ]
+
+    embed = build_recent_jobs_embed(jobs, page_index=1, page_size=2)
+
+    assert len(embed.fields) == 1
+    assert embed.fields[0].name == "3. Gamma • Internship"
+    assert "Page 2/2" in embed.footer.text
+
+
+def test_build_company_info_embed_uses_mobile_friendly_sections() -> None:
+    company = {
+        "id": 504,
+        "company": "NVIDIA",
+        "tier": "t1",
+        "categories": '["big_tech"]',
+        "tracks": '["both"]',
+        "careers_url": "https://nvidia.wd5.myworkdayjobs.com/NVIDIAExternalCareerSite",
+        "homepage_url": "",
+        "logo_source": "workday",
+        "logo_url": "https://nvidia.wd5.myworkdayjobs.com/NVIDIAExternalCareerSite/assets/logo",
+        "scan_cadence": "every_run",
+        "last_scan_at": "",
+        "next_scan_at": "2026-04-09T00:51:29.764942+00:00",
+    }
+    targets = [
+        {
+            "target_type": "workday",
+            "locator": '{"host":"nvidia.wd5.myworkdayjobs.com","site":"NVIDIAExternalCareerSite","tenant":"nvidia"}',
+        }
+    ]
+
+    embed = build_company_info_embed(company, targets)
+
+    assert embed.title == "NVIDIA"
+    assert embed.url == company["careers_url"]
+    assert "`#504` • Tier `t1` • Tracks `both`" in embed.description
+    assert "Categories: big_tech" in embed.description
+    assert embed.thumbnail.url == company["logo_url"]
+    assert embed.fields[0].name == "Links"
+    assert "[Open careers site](https://nvidia.wd5.myworkdayjobs.com/NVIDIAExternalCareerSite)" in embed.fields[0].value
+    assert "Homepage: none" in embed.fields[0].value
+    assert embed.fields[1].name == "Branding"
+    assert "Source: `workday`" in embed.fields[1].value
+    assert "[Open logo asset](https://nvidia.wd5.myworkdayjobs.com/NVIDIAExternalCareerSite/assets/logo)" in embed.fields[1].value
+    assert embed.fields[2].name == "Scan"
+    assert "Cadence: `every_run`" in embed.fields[2].value
+    assert "Last: never" in embed.fields[2].value
+    assert "Next: <t:" in embed.fields[2].value
+    assert embed.fields[3].name == "Targets"
+    assert embed.fields[3].value == "`Workday` nvidia.wd5.myworkdayjobs.com / NVIDIAExternalCareerSite"
+    assert "{" not in embed.fields[3].value

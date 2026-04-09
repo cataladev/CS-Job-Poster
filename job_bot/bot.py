@@ -5,8 +5,9 @@ import contextlib
 import json
 import logging
 from collections import Counter
+from datetime import datetime, timezone
 from math import ceil
-from typing import Any, List, Optional, Sequence
+from typing import Any, Callable, List, Optional, Sequence
 
 import discord
 from discord.ext import commands
@@ -27,7 +28,7 @@ COMPANIES_PREV_EMOJI = "⬅️"
 COMPANIES_NEXT_EMOJI = "➡️"
 COMPANIES_STOP_EMOJI = "⏹️"
 DEFAULT_PAGE_SIZE = 10
-RECENT_PAGE_SIZE = 8
+RECENT_PAGE_SIZE = 6
 HELP_PAGE_SIZE = 8
 
 
@@ -75,16 +76,21 @@ def build_paginated_embed(
         description=body,
         color=color or discord.Color.blurple(),
     )
-    if total:
-        footer_text = (
-            f"Page {safe_page_index + 1}/{total_pages} • "
-            f"Showing {start + 1}-{end} of {total} • "
-            f"Use reactions to browse"
-        )
-    else:
-        footer_text = "Page 1/1"
-    embed.set_footer(text=footer_text)
+    embed.set_footer(text=_pagination_footer_text(total, safe_page_index, page_size))
     return embed
+
+
+def _pagination_footer_text(total: int, page_index: int, page_size: int) -> str:
+    total_pages = max(1, ceil(total / page_size))
+    if not total:
+        return "Page 1/1"
+    start = page_index * page_size
+    end = min(start + page_size, total)
+    return (
+        f"Page {page_index + 1}/{total_pages} • "
+        f"Showing {start + 1}-{end} of {total} • "
+        f"Use reactions to browse"
+    )
 
 
 def _company_categories(row: Any) -> str:
@@ -112,6 +118,140 @@ def build_companies_embed(rows: Sequence[Any], *, page_index: int, query: str = 
         empty_text="No companies matched that query.",
         color=discord.Color.blurple(),
     )
+
+
+def build_recent_jobs_embed(
+    jobs: Sequence[Any],
+    *,
+    page_index: int,
+    page_size: int = RECENT_PAGE_SIZE,
+) -> discord.Embed:
+    total = len(jobs)
+    total_pages = max(1, ceil(total / page_size))
+    safe_page_index = min(max(page_index, 0), total_pages - 1)
+    start = safe_page_index * page_size
+    end = min(start + page_size, total)
+    page_jobs = jobs[start:end]
+
+    embed = discord.Embed(
+        title="Recent Jobs",
+        description="Tap a role title to open the job listing.",
+        color=discord.Color.green(),
+    )
+
+    if not page_jobs:
+        embed.description = "No jobs stored yet."
+    else:
+        for display_index, job in enumerate(page_jobs, start=start + 1):
+            company = job.company or "Unknown"
+            track = job.track.replace("_", " ").title()
+            role_title = job.title or "Open role"
+            role_link = f"[{role_title}]({job.canonical_url})" if job.canonical_url else role_title
+            detail_parts = [job.location or "Unknown"]
+            if job.season_term:
+                detail_parts.append(job.season_term)
+            detail_parts.append(f"Found {job.first_seen.strftime('%Y-%m-%d')}")
+            embed.add_field(
+                name=f"{display_index}. {company} • {track}",
+                value=f"{role_link}\n" + " • ".join(detail_parts),
+                inline=False,
+            )
+
+    embed.set_footer(text=_pagination_footer_text(total, safe_page_index, page_size))
+    return embed
+
+
+def _format_scan_timestamp(value: str, *, default: str) -> str:
+    if not value:
+        return default
+    try:
+        timestamp = datetime.fromisoformat(value)
+    except ValueError:
+        return value
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    unix_timestamp = int(timestamp.timestamp())
+    return f"<t:{unix_timestamp}:f> • <t:{unix_timestamp}:R>"
+
+
+def _format_company_target(target: Any) -> str:
+    target_type = str(target["target_type"]).replace("_", " ").title()
+    try:
+        locator = json.loads(target["locator"] or "{}")
+    except json.JSONDecodeError:
+        locator = target["locator"] or ""
+
+    if isinstance(locator, dict):
+        locator_url = locator.get("url")
+        if locator_url:
+            return f"`{target_type}` [Open target]({locator_url})"
+
+        host = locator.get("host")
+        site = locator.get("site")
+        token = locator.get("token")
+        pieces = [part for part in [host, site or token] if part]
+        if pieces:
+            return f"`{target_type}` " + " / ".join(pieces)
+
+    if isinstance(locator, str) and locator.startswith(("http://", "https://")):
+        return f"`{target_type}` [Open target]({locator})"
+
+    return f"`{target_type}` {locator}"
+
+
+def build_company_info_embed(company: Any, targets: Sequence[Any]) -> discord.Embed:
+    categories = ", ".join(json.loads(company["categories"] or "[]")) or "none"
+    tracks = ", ".join(json.loads(company["tracks"] or "[]")) or "none"
+    description_lines = [
+        f"`#{company['id']}` • Tier `{company['tier']}` • Tracks `{tracks}`",
+        f"Categories: {categories}",
+    ]
+
+    embed = discord.Embed(
+        title=company["company"],
+        url=company["careers_url"] or company["homepage_url"] or None,
+        description="\n".join(description_lines),
+        color=discord.Color.teal(),
+    )
+
+    if company["logo_url"]:
+        embed.set_thumbnail(url=company["logo_url"])
+
+    links_lines = [f"Careers: [Open careers site]({company['careers_url']})"]
+    if company["homepage_url"]:
+        links_lines.append(f"Homepage: [Open homepage]({company['homepage_url']})")
+    else:
+        links_lines.append("Homepage: none")
+    embed.add_field(name="Links", value="\n".join(links_lines), inline=False)
+
+    branding_lines = [f"Source: `{company['logo_source'] or 'none'}`"]
+    if company["logo_url"]:
+        branding_lines.append(f"Logo: [Open logo asset]({company['logo_url']})")
+    else:
+        branding_lines.append("Logo: none")
+    embed.add_field(name="Branding", value="\n".join(branding_lines), inline=False)
+
+    embed.add_field(
+        name="Scan",
+        value="\n".join(
+            [
+                f"Cadence: `{company['scan_cadence']}`",
+                f"Last: {_format_scan_timestamp(company['last_scan_at'], default='never')}",
+                f"Next: {_format_scan_timestamp(company['next_scan_at'], default='now')}",
+            ]
+        ),
+        inline=False,
+    )
+
+    target_lines = [_format_company_target(target) for target in targets[:8]]
+    if len(targets) > 8:
+        target_lines.append(f"...and {len(targets) - 8} more")
+    embed.add_field(
+        name="Targets",
+        value="\n".join(target_lines) if target_lines else "none",
+        inline=False,
+    )
+    return embed
 
 
 async def run_bot() -> None:
@@ -165,28 +305,15 @@ async def run_bot() -> None:
                     refreshed_count,
                 )
 
-    async def _send_paginated_entries(
+    async def _send_paginated_embed_pages(
         ctx: commands.Context,
         *,
-        title: str,
-        entries: Sequence[str],
+        total_items: int,
         page_size: int = DEFAULT_PAGE_SIZE,
-        description: str = "",
-        empty_text: str = "No items to show.",
-        color: Optional[discord.Color] = None,
+        build_page: Callable[[int], discord.Embed],
     ) -> None:
-        message = await ctx.send(
-            embed=build_paginated_embed(
-                title=title,
-                entries=entries,
-                page_index=0,
-                page_size=page_size,
-                description=description,
-                empty_text=empty_text,
-                color=color,
-            )
-        )
-        if len(entries) <= page_size:
+        message = await ctx.send(embed=build_page(0))
+        if total_items <= page_size:
             return
 
         controls = [COMPANIES_PREV_EMOJI, COMPANIES_NEXT_EMOJI, COMPANIES_STOP_EMOJI]
@@ -197,7 +324,7 @@ async def run_bot() -> None:
             return
 
         current_page = 0
-        total_pages = ceil(len(entries) / page_size)
+        total_pages = ceil(total_items / page_size)
 
         def _check(reaction: discord.Reaction, user: discord.abc.User) -> bool:
             return (
@@ -224,19 +351,34 @@ async def run_bot() -> None:
             elif emoji == COMPANIES_NEXT_EMOJI:
                 current_page = (current_page + 1) % total_pages
 
-            await message.edit(
-                embed=build_paginated_embed(
-                    title=title,
-                    entries=entries,
-                    page_index=current_page,
-                    page_size=page_size,
-                    description=description,
-                    empty_text=empty_text,
-                    color=color,
-                )
-            )
+            await message.edit(embed=build_page(current_page))
             with contextlib.suppress(discord.HTTPException):
                 await message.remove_reaction(reaction.emoji, user)
+
+    async def _send_paginated_entries(
+        ctx: commands.Context,
+        *,
+        title: str,
+        entries: Sequence[str],
+        page_size: int = DEFAULT_PAGE_SIZE,
+        description: str = "",
+        empty_text: str = "No items to show.",
+        color: Optional[discord.Color] = None,
+    ) -> None:
+        await _send_paginated_embed_pages(
+            ctx,
+            total_items=len(entries),
+            page_size=page_size,
+            build_page=lambda page_index: build_paginated_embed(
+                title=title,
+                entries=entries,
+                page_index=page_index,
+                page_size=page_size,
+                description=description,
+                empty_text=empty_text,
+                color=color,
+            ),
+        )
 
     # Restricted commands use a real command check instead of an in-command guard so
     # unauthorized users never trigger any side effects or interim "working..." messages.
@@ -308,18 +450,15 @@ async def run_bot() -> None:
         if not jobs:
             await ctx.send("No jobs stored yet.")
             return
-        entries = [
-            f"**{job.company}**\n"
-            f"`{job.track}` • {job.title}\n"
-            f"{job.location}"
-            for job in jobs
-        ]
-        await _send_paginated_entries(
+        await _send_paginated_embed_pages(
             ctx,
-            title="Recent Jobs",
-            entries=entries,
+            total_items=len(jobs),
             page_size=RECENT_PAGE_SIZE,
-            color=discord.Color.green(),
+            build_page=lambda page_index: build_recent_jobs_embed(
+                jobs,
+                page_index=page_index,
+                page_size=RECENT_PAGE_SIZE,
+            ),
         )
 
     @bot.command(name="dedupecheck")
@@ -536,34 +675,7 @@ async def run_bot() -> None:
             return
         company = result["company"]
         targets = result["targets"]
-        target_lines = []
-        for target in targets[:10]:
-            locator = json.loads(target["locator"])
-            display = locator.get("url") or locator.get("token") or locator
-            target_lines.append(f"{target['target_type']}: {display}")
-        embed = discord.Embed(
-            title=f"#{company['id']} {company['company']}",
-            color=discord.Color.teal(),
-        )
-        embed.add_field(name="Tier", value=company["tier"], inline=True)
-        embed.add_field(
-            name="Categories",
-            value=", ".join(json.loads(company["categories"] or "[]")) or "none",
-            inline=True,
-        )
-        embed.add_field(
-            name="Tracks",
-            value=", ".join(json.loads(company["tracks"] or "[]")) or "none",
-            inline=True,
-        )
-        embed.add_field(name="Careers", value=company["careers_url"], inline=False)
-        embed.add_field(name="Homepage", value=company["homepage_url"] or "none", inline=False)
-        embed.add_field(name="Logo source", value=company["logo_source"] or "none", inline=True)
-        embed.add_field(name="Logo URL", value=company["logo_url"] or "none", inline=False)
-        embed.add_field(name="Last scan", value=company["last_scan_at"] or "never", inline=True)
-        embed.add_field(name="Next scan", value=company["next_scan_at"] or "now", inline=True)
-        embed.add_field(name="Targets", value=" | ".join(target_lines) if target_lines else "none", inline=False)
-        await ctx.send(embed=embed)
+        await ctx.send(embed=build_company_info_embed(company, targets))
 
     @bot.command(name="synccompanies")
     @restricted_command
