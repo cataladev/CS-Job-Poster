@@ -36,6 +36,24 @@ DEFAULT_RESTRICTED_ROLE_IDS = {
 }
 
 
+def user_has_any_allowed_role(user: Any, allowed_role_ids: set[int]) -> bool:
+    author_role_ids = {role.id for role in getattr(user, "roles", [])}
+    return bool(author_role_ids.intersection(allowed_role_ids))
+
+
+def ensure_user_has_allowed_role(user: Any, allowed_role_ids: set[int]) -> bool:
+    if user_has_any_allowed_role(user, allowed_role_ids):
+        return True
+    raise commands.CheckFailure("This command requires one of the allowed roles.")
+
+
+def build_restricted_role_check(allowed_role_ids: set[int]):
+    def predicate(ctx: commands.Context) -> bool:
+        return ensure_user_has_allowed_role(ctx.author, allowed_role_ids)
+
+    return commands.check(predicate)
+
+
 def build_paginated_embed(
     *,
     title: str,
@@ -226,15 +244,7 @@ async def run_bot() -> None:
                 await message.remove_reaction(reaction.emoji, user)
 
     allowed_role_ids = set(config.discord_admin_role_ids or DEFAULT_RESTRICTED_ROLE_IDS)
-
-    def _is_restricted_operator(ctx: commands.Context) -> bool:
-        author_role_ids = {role.id for role in getattr(ctx.author, "roles", [])}
-        return bool(author_role_ids.intersection(allowed_role_ids))
-
-    def _require_restricted_access(ctx: commands.Context) -> bool:
-        if _is_restricted_operator(ctx):
-            return True
-        raise commands.CheckFailure("This command requires one of the allowed roles.")
+    restricted_command = build_restricted_role_check(allowed_role_ids)
 
     @bot.event
     async def on_command_error(ctx: commands.Context, error: Exception) -> None:
@@ -250,8 +260,8 @@ async def run_bot() -> None:
         await ctx.send("pong")
 
     @bot.command(name="runjobs")
+    @restricted_command
     async def runjobs(ctx: commands.Context) -> None:
-        _require_restricted_access(ctx)
         message = await ctx.send(
             "Running job discovery pipeline. New jobs will post as sources finish."
         )
@@ -266,8 +276,8 @@ async def run_bot() -> None:
         await message.delete()
 
     @bot.command(name="stats")
+    @restricted_command
     async def stats_command(ctx: commands.Context) -> None:
-        _require_restricted_access(ctx)
         stats = await database.get_stats()
         embed = discord.Embed(title="Job Stats", color=discord.Color.blue())
         embed.add_field(name="Canonical jobs", value=str(stats["total_canonical_jobs"]), inline=True)
@@ -277,8 +287,8 @@ async def run_bot() -> None:
         await ctx.send(embed=embed)
 
     @bot.command(name="sources")
+    @restricted_command
     async def sources_command(ctx: commands.Context) -> None:
-        _require_restricted_access(ctx)
         entries = []
         for source in build_sources(config):
             status = "enabled" if source.settings.enabled else "disabled"
@@ -317,8 +327,8 @@ async def run_bot() -> None:
         )
 
     @bot.command(name="dedupecheck")
+    @restricted_command
     async def dedupecheck_command(ctx: commands.Context, *, query: str) -> None:
-        _require_restricted_access(ctx)
         query = query.strip()
         if query.startswith("http://") or query.startswith("https://"):
             canonical = canonicalize_url(query)
@@ -354,8 +364,8 @@ async def run_bot() -> None:
         )
 
     @bot.command(name="season")
+    @restricted_command
     async def season_command(ctx: commands.Context, *, value: str = "") -> None:
-        _require_restricted_access(ctx)
         configured = ", ".join(config.season_filter) if config.season_filter else "none"
         if value:
             await ctx.send(
@@ -365,8 +375,8 @@ async def run_bot() -> None:
         await ctx.send(f"Current season filter: {configured}")
 
     @bot.command(name="summary")
+    @restricted_command
     async def summary_command(ctx: commands.Context, period: str = "daily") -> None:
-        _require_restricted_access(ctx)
         hours = 24 if period.lower() == "daily" else 24 * 7
         jobs = await database.get_jobs_for_summary(hours)
         if not jobs:
@@ -452,8 +462,8 @@ async def run_bot() -> None:
         await ctx.send(f"Request submitted as #{request_id}: {company}")
 
     @bot.command(name="companyrequests")
+    @restricted_command
     async def companyrequests(ctx: commands.Context, status: str = "pending") -> None:
-        _require_restricted_access(ctx)
         requests = await watchlist_service.list_requests(status=status if status != "all" else None)
         if not requests:
             await ctx.send("No company requests found.")
@@ -472,8 +482,8 @@ async def run_bot() -> None:
         )
 
     @bot.command(name="approvecompany")
+    @restricted_command
     async def approvecompany(ctx: commands.Context, request_id: int) -> None:
-        _require_restricted_access(ctx)
         try:
             company = await watchlist_service.approve_request(
                 request_id=request_id,
@@ -485,8 +495,8 @@ async def run_bot() -> None:
         await ctx.send(f"Approved {company['company']} into the watchlist.")
 
     @bot.command(name="denycompany")
+    @restricted_command
     async def denycompany(ctx: commands.Context, request_id: int, *, reason: str = "Denied") -> None:
-        _require_restricted_access(ctx)
         try:
             await watchlist_service.deny_request(
                 request_id=request_id,
@@ -560,8 +570,8 @@ async def run_bot() -> None:
         await ctx.send(embed=embed)
 
     @bot.command(name="synccompanies")
+    @restricted_command
     async def synccompanies(ctx: commands.Context) -> None:
-        _require_restricted_access(ctx)
         stats = await watchlist_service.sync_seed(force_brand_refresh=True)
         refreshed_posts = await _refresh_branding_posts(stats.get("branding_updated_companies", []))
         await ctx.send(
