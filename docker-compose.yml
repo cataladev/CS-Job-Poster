@@ -7,7 +7,7 @@ services:
       POSTGRES_USER: jobbot
       POSTGRES_PASSWORD: jobbot
     ports:
-      - "5432:5432"
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
       - job-bot-postgres-data:/var/lib/postgresql/data
     healthcheck:

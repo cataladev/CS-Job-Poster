@@ -114,6 +114,7 @@ Important env values:
 
 Current default behavior in [`.env.example`](.env.example):
 
+- `POSTGRES_HOST_PORT=5432`
 - `DATABASE_URL=postgresql://jobbot:jobbot@localhost:5432/jobbot`
 - `SCHEDULED_RUN_HOURS=12,20`
 - `SCHEDULE_TIMEZONE=America/New_York`
@@ -144,6 +145,7 @@ Primary local workflow is Postgres-backed. Docker Compose is the default databas
 
 Set these values in `.env` for local development:
 
+- `POSTGRES_HOST_PORT=5432`
 - `DATABASE_URL=postgresql://jobbot:jobbot@localhost:5432/jobbot`
 - `DISCORD_TOKEN`
 - `DISCORD_CHANNEL_ID`
@@ -166,6 +168,13 @@ source .venv/bin/activate
 make postgres-up
 make db-migrate
 make dev-postgres
+```
+
+If port `5432` is already in use on your machine, pick a different host port in `.env` and keep `DATABASE_URL` in sync. Example:
+
+```env
+POSTGRES_HOST_PORT=5433
+DATABASE_URL=postgresql://jobbot:jobbot@localhost:5433/jobbot
 ```
 
 What each command does:
