@@ -424,7 +424,7 @@ class Database:
             like = f"%{query.lower()}%"
             sql += " AND (lower(company) LIKE ? OR lower(tier) LIKE ? OR lower(categories) LIKE ?)"
             params.extend([like, like, like])
-        sql += " ORDER BY tier ASC, company ASC LIMIT ?"
+        sql += " ORDER BY company COLLATE NOCASE ASC, tier ASC LIMIT ?"
         params.append(limit)
         async with self._lock:
             return self._connection.execute(sql, params).fetchall()

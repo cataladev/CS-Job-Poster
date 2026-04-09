@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from job_bot.bot import build_companies_embed
 from job_bot.database import Database
 from job_bot.watchlist import TrackClassifier, WatchlistService
 
@@ -75,3 +76,69 @@ def test_track_classifier_distinguishes_internship_and_new_grad() -> None:
 
     assert internship.track == "internship"
     assert new_grad.track == "new_grad"
+
+
+@pytest.mark.asyncio
+async def test_watchlist_list_companies_returns_alphabetical_order(config_factory) -> None:
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    service = WatchlistService(config, database)
+
+    await database.upsert_watchlist_company(
+        company="Zeta",
+        normalized_company="zeta",
+        careers_url="https://example.com/zeta",
+        homepage_url="https://zeta.example.com",
+        country="US",
+        categories=["startup"],
+        tier="t3",
+        scan_cadence="7d",
+        tracks=["both"],
+        seed_source="test",
+        notes="",
+        active=True,
+        next_scan_at=None,
+    )
+    await database.upsert_watchlist_company(
+        company="Alpha",
+        normalized_company="alpha",
+        careers_url="https://example.com/alpha",
+        homepage_url="https://alpha.example.com",
+        country="US",
+        categories=["startup"],
+        tier="t3",
+        scan_cadence="7d",
+        tracks=["both"],
+        seed_source="test",
+        notes="",
+        active=True,
+        next_scan_at=None,
+    )
+
+    rows = await service.list_companies(limit=10)
+
+    assert [row["company"] for row in rows] == ["Alpha", "Zeta"]
+
+
+def test_build_companies_embed_shows_page_metadata() -> None:
+    rows = [
+        {
+            "id": 1,
+            "company": "Alpha",
+            "tier": "t1",
+            "categories": '["big_tech"]',
+        },
+        {
+            "id": 2,
+            "company": "Beta",
+            "tier": "t2",
+            "categories": '["fortune500"]',
+        },
+    ]
+
+    embed = build_companies_embed(rows, page_index=0, query="")
+
+    assert embed.title == "Watchlist Companies"
+    assert "`#1` **Alpha**" in embed.description
+    assert "Page 1/1" in embed.footer.text
