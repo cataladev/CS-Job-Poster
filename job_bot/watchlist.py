@@ -143,6 +143,8 @@ class WatchlistResolver:
         canonical = canonicalize_url(careers_url)
         targets: List[Dict[str, Any]] = []
 
+        # Prefer structured ATS expansion whenever we can derive a board seed. Falling
+        # back to a generic company page parser is intentionally the last option.
         seed = extract_board_seed(canonical, "internship")
         if seed:
             targets.append(
@@ -236,6 +238,8 @@ class WatchlistSeedImporter:
                     stats["targets_upserted"] += 1
                 pending_company_ids.append(company_id)
 
+        # Importing the seed also doubles as a branding hygiene pass. This keeps the
+        # watchlist from drifting back toward ATS-root homepage URLs after future imports.
         updated_companies, logos_verified = await self._enrich_branding(
             pending_company_ids,
             force=force_brand_refresh,
@@ -317,6 +321,8 @@ class WatchlistService:
             raise ValueError("A valid public careers URL is required.")
         sanitized_homepage = ""
         if homepage_url.strip():
+            # Homepage is optional, but when provided it must be a real branded company
+            # domain. Shared ATS roots are useful for crawling, not for branding.
             sanitized_homepage = sanitize_brand_homepage_url(homepage_url.strip())
             if not sanitized_homepage:
                 raise ValueError("Homepage URL must be a valid branded public company URL.")
@@ -375,6 +381,8 @@ class WatchlistService:
                 active=True,
                 verified_at=_utc_now().isoformat(),
             )
+        # Approved requests are enriched immediately so moderators do not need to wait for
+        # the next scheduled sync to see a proper logo or cleaned homepage metadata.
         company = await self.database.get_watchlist_company_by_id(company_id)
         if company:
             await self.branding.ensure_company_branding(

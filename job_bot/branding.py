@@ -14,6 +14,8 @@ from job_bot.utils.http import AsyncHttpClient
 from job_bot.utils.normalization import canonicalize_url
 
 
+# These are multi-tenant ATS or recruiting hosts. They are valid careers URLs, but they
+# are not trustworthy "company homepage" domains for favicon-based branding.
 SHARED_BRANDING_HOST_SUFFIXES = (
     "greenhouse.io",
     "lever.co",
@@ -34,6 +36,8 @@ SHARED_BRANDING_HOST_SUFFIXES = (
     "gem.com",
     "rippling.com",
 )
+# TODO: Extend strict provider parsing to other ATSes only when they expose a stable,
+# provider-specific logo signal. Do not add domain guessing or search-based fallback here.
 SUPPORTED_PROVIDER_SOURCES = {"ashby", "lever", "workday", "greenhouse"}
 
 ASHBY_LOGO_PATTERNS = (
@@ -121,6 +125,9 @@ class BrandingResolver:
         force: bool = False,
         http_client: Optional[AsyncHttpClient] = None,
     ) -> BrandingResolution:
+        # This method is the single place that decides whether a company gets a "real"
+        # logo, a branded favicon, or the Discord-side troll fallback. Keep it strict:
+        # verified provider asset first, then verified branded domain only.
         company_id = int(company_row["id"])
         current_homepage = sanitize_brand_homepage_url(company_row["homepage_url"] or "")
         current_logo_url = (company_row["logo_url"] or "").strip()
@@ -220,6 +227,9 @@ class BrandingResolver:
         *,
         http_client: Optional[AsyncHttpClient] = None,
     ) -> Optional[str]:
+        # Canonical jobs should normally resolve through cached company branding. The
+        # provider fallback below exists for jobs that were seen before the watchlist row
+        # was enriched or for one-off canonical URLs outside the watchlist.
         if job.normalized_company:
             company_row = await self.database.get_watchlist_company_by_normalized_company(job.normalized_company)
             if company_row:
@@ -306,6 +316,9 @@ class BrandingResolver:
             "greenhouse": GREENHOUSE_LOGO_PATTERNS,
         }.get(provider, ())
 
+        # Each extractor intentionally uses a tiny, provider-specific ruleset instead of
+        # generic "first image on the page" parsing. False positives here are worse than
+        # missing a logo because they can silently misbrand posts in Discord.
         for pattern in patterns:
             match = re.search(pattern, html, re.IGNORECASE)
             if not match:

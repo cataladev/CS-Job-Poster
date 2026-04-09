@@ -60,6 +60,8 @@ class JobPipeline:
                 )
                 source_manager = SourceManager(context)
 
+                # Priority sources run first so the bot can post high-signal GitHub results
+                # quickly, then enrich/merge them as slower ATS sources finish.
                 priority_results = await source_manager.run_priority_sources()
                 stats.sources_checked += len(priority_results)
                 new_candidate_ids, new_refresh_ids = await self._process_results(priority_results, stats, http_client)
@@ -122,6 +124,8 @@ class JobPipeline:
                     )
                 if created:
                     new_count += 1
+                    # Resolve branding before the first Discord post so brand-new jobs can
+                    # use a verified logo immediately instead of waiting for a later refresh.
                     await self.branding.ensure_branding_for_posting(job, http_client=http_client)
                 elif refresh_required:
                     refresh_post_ids.add(canonical_id)
@@ -158,6 +162,8 @@ class JobPipeline:
     async def _refresh_candidates(self, canonical_ids: Set[int]) -> None:
         if not canonical_ids:
             return
+        # Secondary sources and branding backfills can improve an already-posted canonical.
+        # Refreshing the embed keeps source labels and logos current without reposting jobs.
         canonical_jobs = await self.database.get_canonical_jobs(sorted(canonical_ids))
         await self.publisher.refresh_jobs(canonical_jobs)
 
