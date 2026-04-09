@@ -220,7 +220,7 @@ CREATE TABLE IF NOT EXISTS company_scan_history (
 
 CREATE TABLE IF NOT EXISTS job_user_profiles (
     user_id TEXT PRIMARY KEY,
-    visibility TEXT NOT NULL DEFAULT 'matched',
+    visibility TEXT NOT NULL DEFAULT 'private',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -251,6 +251,87 @@ CREATE INDEX IF NOT EXISTS idx_process_notes_company_created_at
 
 CREATE INDEX IF NOT EXISTS idx_process_notes_user_company
     ON process_notes(user_id, company_id);
+
+CREATE TABLE IF NOT EXISTS process_role_scopes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id INTEGER REFERENCES company_watchlist(id) ON DELETE SET NULL,
+    canonical_job_id INTEGER REFERENCES canonical_jobs(id) ON DELETE SET NULL,
+    legacy_company_id INTEGER UNIQUE REFERENCES company_watchlist(id) ON DELETE SET NULL,
+    company TEXT NOT NULL,
+    normalized_company TEXT NOT NULL,
+    role_title TEXT NOT NULL,
+    normalized_role_title TEXT NOT NULL,
+    track TEXT NOT NULL,
+    season_term TEXT NOT NULL,
+    canonical_job_url TEXT NOT NULL DEFAULT '',
+    role_key TEXT NOT NULL UNIQUE,
+    scope_origin TEXT NOT NULL DEFAULT 'manual',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS process_role_statuses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL REFERENCES job_user_profiles(user_id) ON DELETE CASCADE,
+    scope_id INTEGER NOT NULL REFERENCES process_role_scopes(id) ON DELETE CASCADE,
+    legacy_status_id INTEGER UNIQUE REFERENCES job_application_statuses(id) ON DELETE SET NULL,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(user_id, scope_id)
+);
+
+CREATE TABLE IF NOT EXISTS process_role_notes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    status_id INTEGER NOT NULL REFERENCES process_role_statuses(id) ON DELETE CASCADE,
+    scope_id INTEGER NOT NULL REFERENCES process_role_scopes(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL REFERENCES job_user_profiles(user_id) ON DELETE CASCADE,
+    legacy_note_id INTEGER UNIQUE REFERENCES process_notes(id) ON DELETE SET NULL,
+    body TEXT NOT NULL,
+    moderation_status TEXT NOT NULL DEFAULT 'active',
+    report_count INTEGER NOT NULL DEFAULT 0,
+    deleted_at TEXT,
+    deleted_by_user_id TEXT,
+    deleted_reason TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS process_note_reports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    note_id INTEGER NOT NULL REFERENCES process_role_notes(id) ON DELETE CASCADE,
+    reporter_user_id TEXT NOT NULL REFERENCES job_user_profiles(user_id) ON DELETE CASCADE,
+    reason TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(note_id, reporter_user_id)
+);
+
+CREATE TABLE IF NOT EXISTS process_activity_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL REFERENCES job_user_profiles(user_id) ON DELETE CASCADE,
+    scope_id INTEGER REFERENCES process_role_scopes(id) ON DELETE SET NULL,
+    event_type TEXT NOT NULL,
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_process_role_scopes_company
+    ON process_role_scopes(normalized_company, track, season_term, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_process_role_statuses_user
+    ON process_role_statuses(user_id, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_process_role_statuses_scope
+    ON process_role_statuses(scope_id, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_process_role_notes_scope_created_at
+    ON process_role_notes(scope_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_process_role_notes_status
+    ON process_role_notes(status_id, moderation_status, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_process_activity_events_user_type
+    ON process_activity_events(user_id, event_type, created_at DESC);
 """
 
 POSTGRES_SCHEMA = SQLITE_SCHEMA.replace(
@@ -368,6 +449,7 @@ class Database:
             self._ensure_column("company_requests", "homepage_url", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column("job_application_statuses", "notes", "TEXT NOT NULL DEFAULT ''")
             self._migrate_legacy_process_notes()
+            self._migrate_legacy_process_roles()
             self._connection.commit()
 
     async def close(self) -> None:
@@ -439,6 +521,181 @@ class Database:
             """
         )
 
+    def _migrate_legacy_process_roles(self) -> None:
+        # Preserve old company-only process data by materializing one synthetic
+        # role scope per company. New writes should target the role-scoped tables
+        # directly; this bridge keeps older local databases readable.
+        legacy_status_rows = self._connection.execute(
+            """
+            SELECT
+                s.id,
+                s.user_id,
+                s.company_id,
+                s.status,
+                s.created_at,
+                s.updated_at,
+                c.company,
+                c.normalized_company
+            FROM job_application_statuses s
+            JOIN company_watchlist c ON c.id = s.company_id
+            """
+        ).fetchall()
+
+        if not legacy_status_rows:
+            return
+
+        legacy_scope_ids: dict[int, int] = {}
+
+        for row in legacy_status_rows:
+            company_id = int(row["company_id"])
+            if company_id in legacy_scope_ids:
+                continue
+            existing_scope = self._connection.execute(
+                """
+                SELECT id
+                FROM process_role_scopes
+                WHERE legacy_company_id = ?
+                """,
+                (company_id,),
+            ).fetchone()
+            if existing_scope:
+                legacy_scope_ids[company_id] = int(existing_scope["id"])
+                continue
+            scope_id = self._insert_and_get_id(
+                """
+                INSERT INTO process_role_scopes (
+                    company_id,
+                    canonical_job_id,
+                    legacy_company_id,
+                    company,
+                    normalized_company,
+                    role_title,
+                    normalized_role_title,
+                    track,
+                    season_term,
+                    canonical_job_url,
+                    role_key,
+                    scope_origin,
+                    created_at,
+                    updated_at
+                ) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, '', ?, 'legacy', ?, ?)
+                """,
+                (
+                    company_id,
+                    company_id,
+                    row["company"],
+                    row["normalized_company"],
+                    "General / Legacy",
+                    "general legacy",
+                    "legacy",
+                    "Legacy",
+                    f"legacy:{company_id}",
+                    row["created_at"],
+                    row["updated_at"],
+                ),
+            )
+            legacy_scope_ids[company_id] = scope_id
+
+        for row in legacy_status_rows:
+            company_id = int(row["company_id"])
+            scope_id = legacy_scope_ids[company_id]
+            existing_status = self._connection.execute(
+                """
+                SELECT id
+                FROM process_role_statuses
+                WHERE legacy_status_id = ?
+                """,
+                (row["id"],),
+            ).fetchone()
+            if existing_status:
+                continue
+            self._connection.execute(
+                """
+                INSERT INTO process_role_statuses (
+                    user_id,
+                    scope_id,
+                    legacy_status_id,
+                    status,
+                    created_at,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    row["user_id"],
+                    scope_id,
+                    row["id"],
+                    row["status"],
+                    row["created_at"],
+                    row["updated_at"],
+                ),
+            )
+
+        legacy_note_rows = self._connection.execute(
+            """
+            SELECT
+                n.id,
+                n.user_id,
+                n.company_id,
+                n.body,
+                n.created_at,
+                n.updated_at,
+                s.id AS legacy_status_id
+            FROM process_notes n
+            JOIN job_application_statuses s
+              ON s.user_id = n.user_id
+             AND s.company_id = n.company_id
+            """
+        ).fetchall()
+
+        for row in legacy_note_rows:
+            existing_note = self._connection.execute(
+                """
+                SELECT id
+                FROM process_role_notes
+                WHERE legacy_note_id = ?
+                """,
+                (row["id"],),
+            ).fetchone()
+            if existing_note:
+                continue
+            status_row = self._connection.execute(
+                """
+                SELECT id, scope_id
+                FROM process_role_statuses
+                WHERE legacy_status_id = ?
+                """,
+                (row["legacy_status_id"],),
+            ).fetchone()
+            if not status_row:
+                continue
+            self._connection.execute(
+                """
+                INSERT INTO process_role_notes (
+                    status_id,
+                    scope_id,
+                    user_id,
+                    legacy_note_id,
+                    body,
+                    moderation_status,
+                    report_count,
+                    deleted_at,
+                    deleted_by_user_id,
+                    deleted_reason,
+                    created_at,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, 'active', 0, NULL, NULL, '', ?, ?)
+                """,
+                (
+                    status_row["id"],
+                    status_row["scope_id"],
+                    row["user_id"],
+                    row["id"],
+                    row["body"],
+                    row["created_at"],
+                    row["updated_at"],
+                ),
+            )
+
     def _latest_process_note_join_sql(self) -> str:
         return """
             LEFT JOIN (
@@ -454,6 +711,22 @@ class Database:
                AND latest_note_meta.company_id = s.company_id
             LEFT JOIN process_notes latest_note
                 ON latest_note.id = latest_note_meta.latest_note_id
+        """
+
+    def _latest_role_note_join_sql(self) -> str:
+        return """
+            LEFT JOIN (
+                SELECT
+                    status_id,
+                    MAX(id) AS latest_note_id,
+                    COUNT(*) AS note_count
+                FROM process_role_notes
+                WHERE moderation_status = 'active'
+                GROUP BY status_id
+            ) latest_role_note_meta
+                ON latest_role_note_meta.status_id = s.id
+            LEFT JOIN process_role_notes latest_role_note
+                ON latest_role_note.id = latest_role_note_meta.latest_note_id
         """
 
     def _insert_process_note_locked(
@@ -1128,7 +1401,7 @@ class Database:
         self,
         user_id: str,
         *,
-        default_visibility: str = "matched",
+        default_visibility: str = "private",
     ) -> DbRow:
         async with self._lock:
             now = _utc_now()
@@ -1437,6 +1710,608 @@ class Database:
                 """,
                 params,
             ).fetchall()
+
+    async def upsert_process_role_scope(
+        self,
+        *,
+        company_id: Optional[int],
+        canonical_job_id: Optional[int],
+        company: str,
+        normalized_company: str,
+        role_title: str,
+        normalized_role_title: str,
+        track: str,
+        season_term: str,
+        canonical_job_url: str = "",
+        scope_origin: str = "manual",
+    ) -> DbRow:
+        role_key = "|".join(
+            [
+                normalized_company,
+                normalized_role_title,
+                track,
+                season_term,
+            ]
+        )
+        async with self._lock:
+            now = _utc_now()
+            existing = self._connection.execute(
+                """
+                SELECT *
+                FROM process_role_scopes
+                WHERE role_key = ?
+                LIMIT 1
+                """,
+                (role_key,),
+            ).fetchone()
+            if existing:
+                self._connection.execute(
+                    """
+                    UPDATE process_role_scopes
+                    SET company_id = COALESCE(company_id, ?),
+                        canonical_job_id = COALESCE(canonical_job_id, ?),
+                        company = ?,
+                        canonical_job_url = CASE
+                            WHEN canonical_job_url = '' THEN ?
+                            ELSE canonical_job_url
+                        END,
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        company_id,
+                        canonical_job_id,
+                        company,
+                        canonical_job_url,
+                        now,
+                        existing["id"],
+                    ),
+                )
+                self._connection.commit()
+                return self._connection.execute(
+                    "SELECT * FROM process_role_scopes WHERE id = ?",
+                    (existing["id"],),
+                ).fetchone()
+
+            scope_id = self._insert_and_get_id(
+                """
+                INSERT INTO process_role_scopes (
+                    company_id,
+                    canonical_job_id,
+                    legacy_company_id,
+                    company,
+                    normalized_company,
+                    role_title,
+                    normalized_role_title,
+                    track,
+                    season_term,
+                    canonical_job_url,
+                    role_key,
+                    scope_origin,
+                    created_at,
+                    updated_at
+                ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    company_id,
+                    canonical_job_id,
+                    company,
+                    normalized_company,
+                    role_title,
+                    normalized_role_title,
+                    track,
+                    season_term,
+                    canonical_job_url,
+                    role_key,
+                    scope_origin,
+                    now,
+                    now,
+                ),
+            )
+            self._connection.commit()
+            return self._connection.execute(
+                "SELECT * FROM process_role_scopes WHERE id = ?",
+                (scope_id,),
+            ).fetchone()
+
+    async def get_process_role_scope(self, scope_id: int) -> Optional[DbRow]:
+        async with self._lock:
+            return self._connection.execute(
+                "SELECT * FROM process_role_scopes WHERE id = ?",
+                (scope_id,),
+            ).fetchone()
+
+    async def list_process_role_scopes_for_company(
+        self,
+        *,
+        company_id: int,
+        limit: int = 100,
+    ) -> List[DbRow]:
+        async with self._lock:
+            return self._connection.execute(
+                """
+                SELECT *
+                FROM process_role_scopes
+                WHERE company_id = ?
+                ORDER BY
+                    CASE WHEN track = 'legacy' THEN 1 ELSE 0 END,
+                    updated_at DESC,
+                    role_title ASC
+                LIMIT ?
+                """,
+                (company_id, limit),
+            ).fetchall()
+
+    async def find_process_role_scopes(
+        self,
+        *,
+        normalized_company: str,
+        normalized_role_title: str = "",
+        season_term: str = "",
+        track: Optional[str] = None,
+        limit: int = 25,
+    ) -> List[DbRow]:
+        sql = """
+            SELECT *
+            FROM process_role_scopes
+            WHERE normalized_company = ?
+        """
+        params: List[Any] = [normalized_company]
+        if normalized_role_title:
+            sql += " AND normalized_role_title = ?"
+            params.append(normalized_role_title)
+        if season_term:
+            sql += " AND season_term = ?"
+            params.append(season_term)
+        if track:
+            sql += " AND track = ?"
+            params.append(track)
+        sql += " ORDER BY updated_at DESC LIMIT ?"
+        params.append(limit)
+        async with self._lock:
+            return self._connection.execute(sql, params).fetchall()
+
+    async def get_process_role_status(
+        self,
+        *,
+        user_id: str,
+        scope_id: int,
+    ) -> Optional[DbRow]:
+        async with self._lock:
+            return self._connection.execute(
+                f"""
+                SELECT
+                    s.id,
+                    s.user_id,
+                    s.scope_id,
+                    s.status,
+                    s.created_at,
+                    s.updated_at,
+                    scope.company,
+                    scope.normalized_company,
+                    scope.role_title,
+                    scope.track,
+                    scope.season_term,
+                    scope.canonical_job_url,
+                    COALESCE(latest_role_note_meta.note_count, 0) AS note_count,
+                    latest_role_note.body AS latest_note,
+                    latest_role_note.created_at AS latest_note_at
+                FROM process_role_statuses s
+                JOIN process_role_scopes scope ON scope.id = s.scope_id
+                {self._latest_role_note_join_sql()}
+                WHERE s.user_id = ? AND s.scope_id = ?
+                LIMIT 1
+                """,
+                (user_id, scope_id),
+            ).fetchone()
+
+    async def upsert_process_role_status(
+        self,
+        *,
+        user_id: str,
+        scope_id: int,
+        status: str,
+    ) -> DbRow:
+        async with self._lock:
+            now = _utc_now()
+            existing = self._connection.execute(
+                """
+                SELECT id
+                FROM process_role_statuses
+                WHERE user_id = ? AND scope_id = ?
+                """,
+                (user_id, scope_id),
+            ).fetchone()
+            if existing:
+                self._connection.execute(
+                    """
+                    UPDATE process_role_statuses
+                    SET status = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (status, now, existing["id"]),
+                )
+            else:
+                self._connection.execute(
+                    """
+                    INSERT INTO process_role_statuses (
+                        user_id, scope_id, legacy_status_id, status, created_at, updated_at
+                    ) VALUES (?, ?, NULL, ?, ?, ?)
+                    """,
+                    (user_id, scope_id, status, now, now),
+                )
+            self._connection.execute(
+                """
+                UPDATE process_role_scopes
+                SET updated_at = ?
+                WHERE id = ?
+                """,
+                (now, scope_id),
+            )
+            self._connection.commit()
+            return self._connection.execute(
+                f"""
+                SELECT
+                    s.id,
+                    s.user_id,
+                    s.scope_id,
+                    s.status,
+                    s.created_at,
+                    s.updated_at,
+                    scope.company,
+                    scope.normalized_company,
+                    scope.role_title,
+                    scope.track,
+                    scope.season_term,
+                    scope.canonical_job_url,
+                    COALESCE(latest_role_note_meta.note_count, 0) AS note_count,
+                    latest_role_note.body AS latest_note,
+                    latest_role_note.created_at AS latest_note_at
+                FROM process_role_statuses s
+                JOIN process_role_scopes scope ON scope.id = s.scope_id
+                {self._latest_role_note_join_sql()}
+                WHERE s.user_id = ? AND s.scope_id = ?
+                LIMIT 1
+                """,
+                (user_id, scope_id),
+            ).fetchone()
+
+    async def list_process_role_statuses_for_user(
+        self,
+        user_id: str,
+        *,
+        active_only: bool = False,
+        limit: int = 100,
+    ) -> List[DbRow]:
+        sql = f"""
+            SELECT
+                s.id,
+                s.user_id,
+                s.scope_id,
+                s.status,
+                s.created_at,
+                s.updated_at,
+                scope.company,
+                scope.normalized_company,
+                scope.role_title,
+                scope.track,
+                scope.season_term,
+                scope.canonical_job_url,
+                COALESCE(latest_role_note_meta.note_count, 0) AS note_count,
+                latest_role_note.body AS latest_note,
+                latest_role_note.created_at AS latest_note_at
+            FROM process_role_statuses s
+            JOIN process_role_scopes scope ON scope.id = s.scope_id
+            {self._latest_role_note_join_sql()}
+            WHERE s.user_id = ?
+        """
+        params: List[Any] = [user_id]
+        if active_only:
+            sql += " AND s.status NOT IN ('hide', 'rejected', 'offer')"
+        sql += " ORDER BY s.updated_at DESC, lower(scope.company) ASC LIMIT ?"
+        params.append(limit)
+        async with self._lock:
+            return self._connection.execute(sql, params).fetchall()
+
+    async def list_process_role_peers(
+        self,
+        *,
+        scope_id: int,
+        requester_user_id: str,
+        include_matched: bool,
+        limit: int = 100,
+    ) -> List[DbRow]:
+        visibility_values = ["open"]
+        if include_matched:
+            visibility_values.append("matched")
+        placeholders = ", ".join("?" for _ in visibility_values)
+        params: List[Any] = [scope_id, requester_user_id, *visibility_values, limit]
+        async with self._lock:
+            return self._connection.execute(
+                f"""
+                SELECT
+                    s.id,
+                    s.user_id,
+                    s.scope_id,
+                    s.status,
+                    s.created_at,
+                    s.updated_at,
+                    p.visibility,
+                    scope.company,
+                    scope.normalized_company,
+                    scope.role_title,
+                    scope.track,
+                    scope.season_term,
+                    COALESCE(latest_role_note_meta.note_count, 0) AS note_count,
+                    latest_role_note.body AS latest_note,
+                    latest_role_note.created_at AS latest_note_at
+                FROM process_role_statuses s
+                JOIN process_role_scopes scope ON scope.id = s.scope_id
+                JOIN job_user_profiles p ON p.user_id = s.user_id
+                {self._latest_role_note_join_sql()}
+                WHERE s.scope_id = ?
+                  AND s.user_id <> ?
+                  AND s.status <> 'hide'
+                  AND p.visibility IN ({placeholders})
+                ORDER BY
+                    CASE p.visibility
+                        WHEN 'open' THEN 0
+                        WHEN 'matched' THEN 1
+                        ELSE 2
+                    END,
+                    s.updated_at DESC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+
+    async def add_process_role_note(
+        self,
+        *,
+        status_id: int,
+        scope_id: int,
+        user_id: str,
+        body: str,
+    ) -> DbRow:
+        async with self._lock:
+            now = _utc_now()
+            note_id = self._insert_and_get_id(
+                """
+                INSERT INTO process_role_notes (
+                    status_id,
+                    scope_id,
+                    user_id,
+                    legacy_note_id,
+                    body,
+                    moderation_status,
+                    report_count,
+                    deleted_at,
+                    deleted_by_user_id,
+                    deleted_reason,
+                    created_at,
+                    updated_at
+                ) VALUES (?, ?, ?, NULL, ?, 'active', 0, NULL, NULL, '', ?, ?)
+                """,
+                (status_id, scope_id, user_id, body.strip(), now, now),
+            )
+            self._connection.execute(
+                """
+                UPDATE process_role_statuses
+                SET updated_at = ?
+                WHERE id = ?
+                """,
+                (now, status_id),
+            )
+            self._connection.execute(
+                """
+                UPDATE process_role_scopes
+                SET updated_at = ?
+                WHERE id = ?
+                """,
+                (now, scope_id),
+            )
+            self._connection.commit()
+            return self._connection.execute(
+                "SELECT * FROM process_role_notes WHERE id = ?",
+                (note_id,),
+            ).fetchone()
+
+    async def list_process_role_notes(
+        self,
+        *,
+        scope_id: int,
+        requester_user_id: str,
+        include_matched: bool,
+        limit: int = 100,
+    ) -> List[DbRow]:
+        visibility_values = ["open"]
+        if include_matched:
+            visibility_values.append("matched")
+        placeholders = ", ".join("?" for _ in visibility_values)
+        params: List[Any] = [
+            scope_id,
+            requester_user_id,
+            requester_user_id,
+            *visibility_values,
+            limit,
+        ]
+        async with self._lock:
+            return self._connection.execute(
+                f"""
+                SELECT
+                    n.id,
+                    n.status_id,
+                    n.scope_id,
+                    n.user_id,
+                    n.body,
+                    n.moderation_status,
+                    n.report_count,
+                    n.created_at,
+                    n.updated_at,
+                    s.status,
+                    p.visibility,
+                    scope.company,
+                    scope.role_title,
+                    scope.track,
+                    scope.season_term
+                FROM process_role_notes n
+                JOIN process_role_statuses s
+                    ON s.id = n.status_id
+                JOIN job_user_profiles p
+                    ON p.user_id = n.user_id
+                JOIN process_role_scopes scope
+                    ON scope.id = n.scope_id
+                WHERE n.scope_id = ?
+                  AND n.moderation_status = 'active'
+                  AND s.status <> 'hide'
+                  AND (
+                      n.user_id = ?
+                      OR (n.user_id <> ? AND p.visibility IN ({placeholders}))
+                  )
+                ORDER BY n.created_at DESC, n.id DESC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+
+    async def get_process_role_note(self, note_id: int) -> Optional[DbRow]:
+        async with self._lock:
+            return self._connection.execute(
+                """
+                SELECT
+                    n.*,
+                    s.status,
+                    scope.company,
+                    scope.role_title,
+                    scope.track,
+                    scope.season_term
+                FROM process_role_notes n
+                JOIN process_role_statuses s ON s.id = n.status_id
+                JOIN process_role_scopes scope ON scope.id = n.scope_id
+                WHERE n.id = ?
+                LIMIT 1
+                """,
+                (note_id,),
+            ).fetchone()
+
+    async def report_process_role_note(
+        self,
+        *,
+        note_id: int,
+        reporter_user_id: str,
+        reason: str,
+        auto_hide_threshold: int = 2,
+    ) -> Optional[DbRow]:
+        async with self._lock:
+            note = self._connection.execute(
+                "SELECT * FROM process_role_notes WHERE id = ?",
+                (note_id,),
+            ).fetchone()
+            if not note:
+                return None
+            self._connection.execute(
+                """
+                INSERT OR IGNORE INTO process_note_reports (
+                    note_id, reporter_user_id, reason, created_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (note_id, reporter_user_id, reason.strip(), _utc_now()),
+            )
+            report_count = self._connection.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM process_note_reports
+                WHERE note_id = ?
+                """,
+                (note_id,),
+            ).fetchone()["count"]
+            moderation_status = "hidden" if report_count >= auto_hide_threshold else note["moderation_status"]
+            self._connection.execute(
+                """
+                UPDATE process_role_notes
+                SET report_count = ?, moderation_status = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (report_count, moderation_status, _utc_now(), note_id),
+            )
+            self._connection.commit()
+            return self._connection.execute(
+                "SELECT * FROM process_role_notes WHERE id = ?",
+                (note_id,),
+            ).fetchone()
+
+    async def delete_process_role_note(
+        self,
+        *,
+        note_id: int,
+        actor_user_id: str,
+        allow_moderator_delete: bool,
+        reason: str = "",
+    ) -> Optional[DbRow]:
+        async with self._lock:
+            note = self._connection.execute(
+                "SELECT * FROM process_role_notes WHERE id = ?",
+                (note_id,),
+            ).fetchone()
+            if not note:
+                return None
+            if note["user_id"] != actor_user_id and not allow_moderator_delete:
+                return None
+            self._connection.execute(
+                """
+                UPDATE process_role_notes
+                SET moderation_status = 'deleted',
+                    deleted_at = ?,
+                    deleted_by_user_id = ?,
+                    deleted_reason = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (_utc_now(), actor_user_id, reason.strip(), _utc_now(), note_id),
+            )
+            self._connection.commit()
+            return self._connection.execute(
+                "SELECT * FROM process_role_notes WHERE id = ?",
+                (note_id,),
+            ).fetchone()
+
+    async def record_process_activity(
+        self,
+        *,
+        user_id: str,
+        event_type: str,
+        scope_id: Optional[int] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        async with self._lock:
+            self._connection.execute(
+                """
+                INSERT INTO process_activity_events (
+                    user_id, scope_id, event_type, metadata, created_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (user_id, scope_id, event_type, _json_dump(metadata or {}), _utc_now()),
+            )
+            self._connection.commit()
+
+    async def count_recent_process_activity(
+        self,
+        *,
+        user_id: str,
+        event_type: str,
+        since_seconds: int,
+    ) -> int:
+        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=since_seconds)).isoformat()
+        async with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM process_activity_events
+                WHERE user_id = ? AND event_type = ? AND created_at >= ?
+                """,
+                (user_id, event_type, cutoff),
+            ).fetchone()
+        return int(row["count"] if row else 0)
 
     async def get_canonical_by_fingerprint_keys(self, keys: Iterable[str]) -> Optional[CanonicalJob]:
         values = [key for key in keys if key]

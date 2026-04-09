@@ -26,7 +26,7 @@ Contribution docs live in [CONTRIBUTING.md](/Users/carlos/Development/Job%20Bot/
 - Uses embeds for job posts and command output
 - Uses reaction-based pagination for list-style commands such as `!help`, `!sources`, `!recent`, `!companies`, and `!companyrequests`
 - Tries to show a company icon in job embeds and falls back to a troll thumbnail plus `🧌` in the company field when no safe company icon can be derived
-- Includes an opt-in process tracker with visibility-scoped statuses, peer discovery, and per-company note history
+- Includes an opt-in process tracker with role-scoped statuses, peer discovery, and per-note moderation history split by track and season
 
 ## Source Order
 
@@ -72,6 +72,8 @@ High-signal files:
   Exact, strong, and fuzzy dedupe.
 - [`job_bot/database.py`](job_bot/database.py)
   Postgres-first persistence layer, schema bootstrap, and SQLite fallback for tests/local runs.
+- [`job_bot/process_tracking.py`](job_bot/process_tracking.py)
+  Shared process-tracking rules for role scopes, season/track parsing, moderation, and next-action guidance.
 - [`job_bot/watchlist.py`](job_bot/watchlist.py)
   Watchlist import, company requests, target resolution.
 - [`job_bot/sources/`](job_bot/sources)
@@ -256,10 +258,10 @@ User commands:
 - `!summary [daily|weekly]`
 - `!process`
 - `!visibility [open|matched|private]`
-- `!jobstatus <company> <status>`
+- `!jobstatus <scope_id> <status>`
 - `!myjobs`
-- `!jobpeers <company>`
-- `!jobprocess <company|id>`
+- `!jobpeers <scope_id>`
+- `!jobprocess <scope_id>`
 
 List-style commands use embed pagination with reactions:
 
@@ -275,12 +277,18 @@ Watchlist commands:
 
 Process tracker commands:
 
-- `!process` join the process tracker and show usage
-- `!process <company> <save|hide|applied|oa|interview|rejected|offer>` set your current status
-- `!process <company|id>` view visible company process stats
-- `!process <company|id> notes` view visible note history
-- `!process <company|id> | <note>` append a new process note without overwriting older notes
-- `!process peers <company>` find visible peers for that company
+- `!process` opt in and show your active tracked roles in DM
+- `!process set <company> | <role> | <season> | <status>` create or update a role scope
+- `!process set <company> | <role> | <track> | <season> | <status>` when track cannot be inferred cleanly
+- `!process company <company>` list tracked role scopes for that company
+- `!process view <scope_id>` show visible process state for one role scope
+- `!process status <scope_id> <status>` update one role scope quickly
+- `!process peers <scope_id>` find visible peers for one role scope
+- `!process notes <scope_id>` read visible note history for one role scope
+- `!process note <scope_id> | <note>` append a new note without overwriting older notes
+- `!process report <note_id> [reason]` report leaked/private content
+- `!process deletenote <note_id> [reason]` delete your own note, or admin-delete a bad note
+- `!process open|matched|private` change discovery visibility for peers; command replies still stay in DM by default
 
 Admin-only commands:
 
@@ -398,6 +406,37 @@ It includes:
 
 If you want the bot to cover a company reliably, this is the first place to look.
 
+## Process Tracking
+
+Process tracking is role-scoped, not company-scoped.
+
+That means:
+
+- `Software Engineer Intern • Summer 2027` and `Software Engineer • New Grad • Fall 2027` are different scopes
+- notes are stored in their own table and preserved as history instead of being overwritten into one field
+- peer discovery is filtered by your visibility plus the exact role scope
+- bot replies for process commands are DM-first to avoid leaking sensitive recruiting details into public channels
+
+Visibility affects who can discover your role scope:
+
+- `private`: only you can see your process data
+- `matched`: other users only see you when they track the same role scope too
+- `open`: anyone in the process community can discover your visible role scope
+
+Moderation and anti-spam guardrails:
+
+- notes block links, contact info, and common leaked/private content patterns
+- note creation, status updates, and note reports are rate-limited
+- users can report notes
+- users can delete their own notes
+- server admins can delete problematic notes
+
+What `!process` should show in practice:
+
+- the active companies and exact role scopes you are tracking
+- the last update time for each scope
+- a “Next:” prompt that tells you whether to follow up, wait, finish an OA, or update where the process is stuck
+
 ## Most Common Changes
 
 ### Add or tune a source
@@ -443,6 +482,8 @@ Scheduler code is in [`job_bot/scheduler.py`](job_bot/scheduler.py).
 - Company logos now use strict verified branding only: cached provider logos first, then verified branded favicons, then the troll fallback.
 - Shared ATS hosts are intentionally not used as branded homepage domains. If a company is requested manually, pass a real company homepage as the optional third argument when you have one.
 - `!synccompanies` performs a branding backfill and refreshes already-posted embeds when a better verified logo becomes available.
+- Process commands default to DM replies in guilds. Visibility changes peer discovery only; it does not make command output public.
+- Legacy company-only process data is still migrated into synthetic `General / Legacy` scopes so older local databases do not lose history.
 
 ## Production
 

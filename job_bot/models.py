@@ -194,7 +194,6 @@ class AppConfig:
     publish_delay_seconds: float
     max_job_age_hours: int
     user_agent: str
-    discord_admin_role_ids: List[int]
     company_seed_path: str
     source_settings: Dict[str, SourceSettings]
 

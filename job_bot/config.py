@@ -24,12 +24,6 @@ def _parse_csv(value: Optional[str]) -> List[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
-def _parse_int_list(value: Optional[str]) -> List[int]:
-    if not value:
-        return []
-    return [int(item.strip()) for item in value.split(",") if item.strip()]
-
-
 def _parse_int_csv(value: Optional[str], default: List[int]) -> List[int]:
     if not value:
         return default
@@ -110,7 +104,6 @@ def load_config() -> AppConfig:
             "USER_AGENT",
             "internship-aggregator-bot/1.0 (+https://github.com/SimplifyJobs)",
         ),
-        discord_admin_role_ids=_parse_int_list(os.getenv("DISCORD_ADMIN_ROLE_IDS")),
         company_seed_path=os.getenv("COMPANY_SEED_PATH", "data/company_watchlist_seed.csv"),
         source_settings=source_settings,
     )
