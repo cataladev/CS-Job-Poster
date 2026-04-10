@@ -11,6 +11,7 @@ from job_bot.bot import (
     normalize_job_visibility,
     parse_jobstatus_input,
     parse_process_command_input,
+    should_dm_process_reply,
 )
 from job_bot.database import Database
 from job_bot.process_tracking import (
@@ -82,6 +83,15 @@ async def test_accept_job_community_rules_defaults_to_private_visibility(config_
 
     assert profile["user_id"] == "123"
     assert profile["visibility"] == "private"
+
+
+def test_process_reply_routing_respects_open_visibility() -> None:
+    assert should_dm_process_reply(in_guild=False, visibility="private") is False
+    assert should_dm_process_reply(in_guild=True, visibility=None) is True
+    assert should_dm_process_reply(in_guild=True, visibility="private") is True
+    assert should_dm_process_reply(in_guild=True, visibility="matched") is True
+    assert should_dm_process_reply(in_guild=True, visibility="open") is False
+    assert should_dm_process_reply(in_guild=True, visibility="open", force_dm=True) is True
 
 
 def test_process_tracking_normalizers_parsers_and_next_action() -> None:

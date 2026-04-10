@@ -302,7 +302,7 @@ Watchlist commands:
 
 Process tracker commands:
 
-- `!process` opt in and show your active tracked roles in DM
+- `!process` opt in and show your active tracked roles
 - `!process set <company> | <role> | <season> | <status>` create or update a role scope
 - `!process set <company> | <role> | <track> | <season> | <status>` when track cannot be inferred cleanly
 - `!process company <company>` list tracked role scopes for that company
@@ -313,7 +313,7 @@ Process tracker commands:
 - `!process note <scope_id> | <note>` append a new note without overwriting older notes
 - `!process report <note_id> [reason]` report leaked/private content
 - `!process deletenote <note_id> [reason]` delete your own note, or admin-delete a bad note
-- `!process open|matched|private` change discovery visibility for peers; command replies still stay in DM by default
+- `!process open|matched|private` change process reply visibility and peer discovery; `open` keeps replies in the current chat
 
 Help commands:
 
@@ -451,7 +451,7 @@ That means:
 - `Software Engineer Intern • Summer 2027` and `Software Engineer • New Grad • Fall 2027` are different scopes
 - notes are stored in their own table and preserved as history instead of being overwritten into one field
 - peer discovery is filtered by your visibility plus the exact role scope
-- bot replies for process commands are DM-first to avoid leaking sensitive recruiting details into public channels
+- bot replies for process commands stay in-channel only when your visibility is `open`; otherwise they default to DM
 
 Visibility affects who can discover your role scope:
 
