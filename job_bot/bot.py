@@ -354,7 +354,7 @@ def build_process_help_message(*, visibility: str, joined: bool) -> str:
     lines = [
         "You're in the job-process community." if joined else "Job process commands",
         f"`Visibility:` {visibility}",
-        "Process replies stay in DM by default. Visibility only controls peer discovery.",
+        "Process replies stay in chat when your visibility is `open`; otherwise they default to DM.",
         "",
         "`Use:`",
         "• `!process` or `!process me` view your active tracked roles",
@@ -367,7 +367,7 @@ def build_process_help_message(*, visibility: str, joined: bool) -> str:
         "• `!process notes 12` read visible notes",
         "• `!process report 34 leaked oa details` report a note",
         "• `!process deletenote 34` delete your own note",
-        "• `!process open` or `!process visibility open` change discovery",
+        "• `!process open` or `!process visibility open` change reply and discovery visibility",
         "",
         JOB_COMMUNITY_RULES,
     ]
@@ -376,6 +376,20 @@ def build_process_help_message(*, visibility: str, joined: bool) -> str:
 
 def _clean_job_process_note(note: str) -> str:
     return clean_process_note(note)
+
+
+def should_dm_process_reply(
+    *,
+    in_guild: bool,
+    visibility: Optional[str],
+    force_dm: bool = False,
+) -> bool:
+    """Route process replies to DM unless the user explicitly set visibility to open."""
+    if not in_guild:
+        return False
+    if force_dm:
+        return True
+    return (visibility or "").strip().lower() != "open"
 
 
 def _latest_process_note_text(row: Any) -> str:
@@ -628,7 +642,7 @@ def build_help_page_definitions() -> List[tuple[str, List[tuple[str, List[str]]]
                 (
                     "Process Tracking",
                     [
-                        "`!process` - DM-first dashboard for your active tracked roles",
+                        "`!process` - dashboard for your active tracked roles",
                         "`!process set <company> | <role> | <season> | <status>` - track a role scope",
                         "`!process set <company> | <role> | <track> | <season> | <status>` - set track explicitly",
                         "`!process company <company>` - list role scopes for one company",
@@ -644,7 +658,7 @@ def build_help_page_definitions() -> List[tuple[str, List[tuple[str, List[str]]]
                         "`!process note <scope_id> | <note>` - save a note",
                         "`!process report <note_id> [reason]` - report leaked/private content",
                         "`!process deletenote <note_id> [reason]` - delete your own note",
-                        "`!process open|matched|private` - change peer discovery visibility",
+                        "`!process open|matched|private` - change process reply and peer discovery visibility",
                     ],
                 ),
                 (
@@ -692,7 +706,7 @@ def build_help_embed(page_index: int) -> discord.Embed:
     embed = discord.Embed(
         title=f"Help • {page_title}",
         description=(
-            "Process commands reply in DM by default.\n"
+            "Process commands stay in chat when your visibility is `open`; otherwise they reply in DM.\n"
             "Admin commands require Discord administrator privileges."
         ),
         color=discord.Color.purple(),
@@ -961,10 +975,14 @@ async def run_bot() -> None:
         profile: Optional[Any] = None,
         force_dm: bool = False,
     ) -> Optional[Any]:
-        # Process updates are treated as sensitive community data. In guilds we
-        # always reply over DM and delete the invoking message when possible so
-        # status updates or notes do not leak into public channels by default.
-        if not ctx.guild:
+        # Process updates default to DM in guilds unless the user explicitly
+        # set visibility to open. This keeps the sensitive default intact while
+        # still honoring public process-sharing when a user opts in.
+        if not should_dm_process_reply(
+            in_guild=bool(ctx.guild),
+            visibility=profile["visibility"] if profile else None,
+            force_dm=force_dm,
+        ):
             return ctx
         try:
             destination = ctx.author.dm_channel or await ctx.author.create_dm()
@@ -1081,7 +1099,6 @@ async def run_bot() -> None:
                 ctx,
                 failure_message,
                 profile=profile,
-                force_dm=True,
             )
             return False
         return True
@@ -1097,7 +1114,6 @@ async def run_bot() -> None:
                 f"Your visibility is `{format_job_visibility(profile['visibility'])}`. "
                 "Use `!process open`, `!process matched`, or `!process private` to change it.",
                 profile=profile,
-                force_dm=True,
             )
             return
         visibility = normalize_job_visibility(value)
@@ -1106,7 +1122,6 @@ async def run_bot() -> None:
                 ctx,
                 "Visibility must be one of `matched`, `open`, or `private`.",
                 profile=profile,
-                force_dm=True,
             )
             return
         updated = await database.update_job_community_visibility(str(ctx.author.id), visibility)
@@ -1117,7 +1132,6 @@ async def run_bot() -> None:
             ctx,
             f"Visibility updated to `{format_job_visibility(updated['visibility'])}`.",
             profile=updated,
-            force_dm=True,
         )
 
     async def _handle_jobstatus(
@@ -1147,13 +1161,12 @@ async def run_bot() -> None:
                     ctx,
                     "Role scope not found. Use `!process company Company Name` to list scope IDs.",
                     profile=profile,
-                    force_dm=True,
                 )
                 return
         else:
             parsed = parse_process_status_command(value)
             if not parsed:
-                await _send_process_message(ctx, jobstatus_usage_text(), profile=profile, force_dm=True)
+                await _send_process_message(ctx, jobstatus_usage_text(), profile=profile)
                 return
             company_query, role_title, season_term, status, explicit_track = parsed
             _, scope, error_message = await _resolve_process_scope_for_set(
@@ -1163,14 +1176,13 @@ async def run_bot() -> None:
                 explicit_track=explicit_track,
             )
             if error_message:
-                await _send_process_message(ctx, error_message, profile=profile, force_dm=True)
+                await _send_process_message(ctx, error_message, profile=profile)
                 return
             if scope is None:
                 await _send_process_message(
                     ctx,
                     "I couldn't resolve that role scope.",
                     profile=profile,
-                    force_dm=True,
                 )
                 return
             scope_id = int(scope["id"])
@@ -1198,7 +1210,6 @@ async def run_bot() -> None:
                 f"Next: {next_action}"
             ),
             profile=profile,
-            force_dm=True,
         )
 
     async def _handle_myjobs(
@@ -1220,7 +1231,6 @@ async def run_bot() -> None:
                     joined=joined_recently,
                 ),
                 profile=profile,
-                force_dm=True,
             )
             return
         entries = [
@@ -1233,7 +1243,7 @@ async def run_bot() -> None:
             )
             for row in rows
         ]
-        destination = await _resolve_process_destination(ctx, profile=profile, force_dm=True)
+        destination = await _resolve_process_destination(ctx, profile=profile)
         if destination is None:
             return
         await _send_paginated_entries(
@@ -1261,7 +1271,6 @@ async def run_bot() -> None:
                 ctx,
                 "Company not found in watchlist. Use `!companies [query]` to search.",
                 profile=profile,
-                force_dm=True,
             )
             return
         scopes = await database.list_process_role_scopes_for_company(
@@ -1274,7 +1283,6 @@ async def run_bot() -> None:
                 f"No process role scopes exist for **{company['company']}** yet. "
                 "Use `!process set Company | Role | Season | Status` to create one.",
                 profile=profile,
-                force_dm=True,
             )
             return
 
@@ -1307,7 +1315,7 @@ async def run_bot() -> None:
                 f"{own_status_text}"
             )
 
-        destination = await _resolve_process_destination(ctx, profile=profile, force_dm=True)
+        destination = await _resolve_process_destination(ctx, profile=profile)
         if destination is None:
             return
         await _send_paginated_entries(
@@ -1331,7 +1339,6 @@ async def run_bot() -> None:
                 ctx,
                 "Use `!process peers <scope_id>`.",
                 profile=profile,
-                force_dm=True,
             )
             return
         scope = await database.get_process_role_scope(int(query.strip()))
@@ -1340,7 +1347,6 @@ async def run_bot() -> None:
                 ctx,
                 "Role scope not found. Use `!process company Company Name` to list scope IDs.",
                 profile=profile,
-                force_dm=True,
             )
             return
         own_status = await database.get_process_role_status(
@@ -1359,7 +1365,6 @@ async def run_bot() -> None:
                 ctx,
                 f"No visible peers are currently available for **{scope['role_title']}** (`#{scope['id']}`).",
                 profile=profile,
-                force_dm=True,
             )
             return
         labels: dict[str, str] = {}
@@ -1384,7 +1389,7 @@ async def run_bot() -> None:
             )
             + f"\n{JOB_COMMUNITY_RULES}"
         )
-        destination = await _resolve_process_destination(ctx, profile=profile, force_dm=True)
+        destination = await _resolve_process_destination(ctx, profile=profile)
         if destination is None:
             return
         await _send_paginated_entries(
@@ -1408,7 +1413,6 @@ async def run_bot() -> None:
                 ctx,
                 "Use `!process view <scope_id>`.",
                 profile=profile,
-                force_dm=True,
             )
             return
         scope = await database.get_process_role_scope(int(value.strip()))
@@ -1417,7 +1421,6 @@ async def run_bot() -> None:
                 ctx,
                 "Role scope not found.",
                 profile=profile,
-                force_dm=True,
             )
             return
         own_status = await database.get_process_role_status(
@@ -1439,7 +1442,6 @@ async def run_bot() -> None:
                 ctx,
                 f"No visible process data is available for **{scope['role_title']}** (`#{scope['id']}`) yet.",
                 profile=profile,
-                force_dm=True,
             )
             return
         count_summary = _job_process_counts_text(visible_rows)
@@ -1464,7 +1466,7 @@ async def run_bot() -> None:
             )
             for row in visible_rows
         ]
-        destination = await _resolve_process_destination(ctx, profile=profile, force_dm=True)
+        destination = await _resolve_process_destination(ctx, profile=profile)
         if destination is None:
             return
         await _send_paginated_entries(
@@ -1488,12 +1490,11 @@ async def run_bot() -> None:
                 ctx,
                 "Use `!process notes <scope_id>`.",
                 profile=profile,
-                force_dm=True,
             )
             return
         scope = await database.get_process_role_scope(int(value.strip()))
         if not scope:
-            await _send_process_message(ctx, "Role scope not found.", profile=profile, force_dm=True)
+            await _send_process_message(ctx, "Role scope not found.", profile=profile)
             return
         own_status = await database.get_process_role_status(
             user_id=str(ctx.author.id),
@@ -1511,7 +1512,6 @@ async def run_bot() -> None:
                 ctx,
                 f"No visible notes are available for **{scope['role_title']}** (`#{scope['id']}`) yet.",
                 profile=profile,
-                force_dm=True,
             )
             return
         labels: dict[str, str] = {}
@@ -1527,7 +1527,7 @@ async def run_bot() -> None:
             )
             for row in rows
         ]
-        destination = await _resolve_process_destination(ctx, profile=profile, force_dm=True)
+        destination = await _resolve_process_destination(ctx, profile=profile)
         if destination is None:
             return
         await _send_paginated_entries(
@@ -1552,7 +1552,6 @@ async def run_bot() -> None:
                 ctx,
                 "Use `!process note <scope_id> | <note>`.",
                 profile=profile,
-                force_dm=True,
             )
             return
         if not await _rate_limit_process_action(
@@ -1571,17 +1570,16 @@ async def run_bot() -> None:
                 ctx,
                 "Use a numeric scope ID. Get one from `!process` or `!process company Company Name`.",
                 profile=profile,
-                force_dm=True,
             )
             return
         scope = await database.get_process_role_scope(int(scope_raw))
         if not scope:
-            await _send_process_message(ctx, "Role scope not found.", profile=profile, force_dm=True)
+            await _send_process_message(ctx, "Role scope not found.", profile=profile)
             return
         cleaned_note = _clean_job_process_note(note_text)
         validation_error = validate_process_note(cleaned_note)
         if validation_error:
-            await _send_process_message(ctx, validation_error, profile=profile, force_dm=True)
+            await _send_process_message(ctx, validation_error, profile=profile)
             return
         status_row = await database.get_process_role_status(
             user_id=str(ctx.author.id),
@@ -1612,7 +1610,6 @@ async def run_bot() -> None:
                 f"(`#{scope['id']}` • `{scope['season_term']}`)."
             ),
             profile=profile,
-            force_dm=True,
         )
 
     async def _handle_process_report(
@@ -1636,7 +1633,6 @@ async def run_bot() -> None:
                 ctx,
                 "Use `!process report <note_id> [reason]`.",
                 profile=profile,
-                force_dm=True,
             )
             return
         note_id_token, _, reason = raw.partition(" ")
@@ -1645,19 +1641,17 @@ async def run_bot() -> None:
                 ctx,
                 "Use `!process report <note_id> [reason]`.",
                 profile=profile,
-                force_dm=True,
             )
             return
         note = await database.get_process_role_note(int(note_id_token))
         if not note:
-            await _send_process_message(ctx, "Note not found.", profile=profile, force_dm=True)
+            await _send_process_message(ctx, "Note not found.", profile=profile)
             return
         if note["user_id"] == str(ctx.author.id):
             await _send_process_message(
                 ctx,
                 "Use `!process deletenote <note_id>` to remove your own note.",
                 profile=profile,
-                force_dm=True,
             )
             return
         updated_note = await database.report_process_role_note(
@@ -1676,7 +1670,7 @@ async def run_bot() -> None:
             message = f"Reported note `#{note_id_token}`. It is now hidden pending review."
         else:
             message = f"Reported note `#{note_id_token}`."
-        await _send_process_message(ctx, message, profile=profile, force_dm=True)
+        await _send_process_message(ctx, message, profile=profile)
 
     async def _handle_process_delete_note(
         ctx: commands.Context,
@@ -1689,7 +1683,6 @@ async def run_bot() -> None:
                 ctx,
                 "Use `!process deletenote <note_id> [reason]`.",
                 profile=profile,
-                force_dm=True,
             )
             return
         note_id_token, _, reason = raw.partition(" ")
@@ -1698,7 +1691,6 @@ async def run_bot() -> None:
                 ctx,
                 "Use `!process deletenote <note_id> [reason]`.",
                 profile=profile,
-                force_dm=True,
             )
             return
         deleted_note = await database.delete_process_role_note(
@@ -1712,14 +1704,12 @@ async def run_bot() -> None:
                 ctx,
                 "You can only delete your own notes unless you are a server administrator.",
                 profile=profile,
-                force_dm=True,
             )
             return
         await _send_process_message(
             ctx,
             f"Deleted note `#{note_id_token}`.",
             profile=profile,
-            force_dm=True,
         )
 
     @bot.command(name="ping")

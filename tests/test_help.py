@@ -29,7 +29,7 @@ def test_help_pages_include_expected_grouped_sections() -> None:
 def test_help_pages_include_current_process_tracking_commands() -> None:
     flattened = _flatten_help_entries()
 
-    assert "`!process` - DM-first dashboard for your active tracked roles" in flattened
+    assert "`!process` - dashboard for your active tracked roles" in flattened
     assert "`!process set <company> | <role> | <season> | <status>` - track a role scope" in flattened
     assert (
         "`!process set <company> | <role> | <track> | <season> | <status>` - set track explicitly"
@@ -43,7 +43,7 @@ def test_help_pages_include_current_process_tracking_commands() -> None:
     assert "`!process note <scope_id> | <note>` - save a note" in flattened
     assert "`!process report <note_id> [reason]` - report leaked/private content" in flattened
     assert "`!process deletenote <note_id> [reason]` - delete your own note" in flattened
-    assert "`!process open|matched|private` - change peer discovery visibility" in flattened
+    assert "`!process open|matched|private` - change process reply and peer discovery visibility" in flattened
 
 
 def test_help_pages_mark_admin_commands_clearly() -> None:
@@ -76,7 +76,7 @@ def test_help_embed_uses_shared_grouped_pages() -> None:
     assert browse_embed.title == "Help • Browse"
     assert process_embed.title == "Help • Process Tracking"
     assert admin_embed.title == "Help • Admin"
-    assert "Process commands reply in DM by default." in browse_embed.description
+    assert "Process commands stay in chat when your visibility is `open`; otherwise they reply in DM." in browse_embed.description
     assert "Admin commands require Discord administrator privileges." in browse_embed.description
     assert [field.name for field in browse_embed.fields] == ["Browse", "Companies", "Requests"]
     assert [field.name for field in process_embed.fields] == [
