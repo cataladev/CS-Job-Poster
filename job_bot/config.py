@@ -3,13 +3,16 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 import yaml
 from dotenv import load_dotenv
 
 from job_bot.models import AppConfig, SourceSettings
 from job_bot.utils.normalization import normalize_company_name
+
+RUNTIME_CONFIG_INTERNSHIP_CHANNEL_KEY = "discord_channel_id"
+RUNTIME_CONFIG_NEW_GRAD_CHANNEL_KEY = "discord_new_grad_channel_id"
 
 
 def _parse_bool(value: Optional[str], default: bool = False) -> bool:
@@ -57,7 +60,7 @@ def _coerce_source_settings(name: str, payload: Dict[str, Any]) -> SourceSetting
 
 
 def load_config() -> AppConfig:
-    load_dotenv()
+    load_dotenv(dotenv_path=Path(".env"), override=False)
 
     source_config_path = os.getenv("SOURCE_CONFIG_PATH", "config/sources.yaml")
     yaml_payload = _load_yaml(Path(source_config_path))
@@ -123,6 +126,26 @@ def _apply_source_overrides(config: AppConfig) -> None:
             not config.enable_new_grad_source or config.discord_new_grad_channel_id is None
         ):
             settings.enabled = False
+
+
+def apply_runtime_channel_overrides(
+    config: AppConfig,
+    runtime_config: Mapping[str, Mapping[str, Any]],
+) -> None:
+    internship_row = runtime_config.get(RUNTIME_CONFIG_INTERNSHIP_CHANNEL_KEY)
+    if internship_row and internship_row.get("value"):
+        config.discord_channel_id = int(internship_row["value"])
+
+    if RUNTIME_CONFIG_NEW_GRAD_CHANNEL_KEY in runtime_config:
+        raw_value = runtime_config[RUNTIME_CONFIG_NEW_GRAD_CHANNEL_KEY].get("value")
+        config.discord_new_grad_channel_id = int(raw_value) if raw_value else None
+
+
+def is_new_grad_collection_enabled(config: AppConfig) -> bool:
+    return any(
+        settings.track == "new_grad" and settings.enabled
+        for settings in config.source_settings.values()
+    )
 
 
 def configure_logging(level: str) -> None:

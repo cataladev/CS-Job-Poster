@@ -1,0 +1,15 @@
+[Unit]
+Description=Auto-update CS Job Poster from origin/__BRANCH__
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=__APP_DIR__
+Environment=APP_DIR=__APP_DIR__
+Environment=APP_USER=__APP_USER__
+Environment=BRANCH=__BRANCH__
+Environment=SERVICE_NAME=__SERVICE_NAME__
+Environment=LOCK_FILE=__LOCK_FILE__
+ExecStart=__APP_DIR__/deploy/job-bot-auto-update.sh

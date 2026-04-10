@@ -282,3 +282,103 @@ async def test_refresh_jobs_uses_resolved_logo_on_existing_post(config_factory) 
 
     assert refreshed == [8]
     assert message.embed.thumbnail.url == "https://cdn.example.com/openai-logo.png"
+
+
+@pytest.mark.asyncio
+async def test_publish_jobs_uses_updated_runtime_channel_without_restart(config_factory) -> None:
+    class DummyMessage:
+        id = 999
+
+    class DummyChannel:
+        def __init__(self, channel_id):
+            self.id = channel_id
+            self.sent_embeds = []
+
+        async def send(self, *, embed):
+            self.sent_embeds.append(embed)
+            return DummyMessage()
+
+    class DummyBot:
+        def __init__(self, channels):
+            self.channels = channels
+
+        async def wait_until_ready(self):
+            return None
+
+        def get_channel(self, channel_id):
+            return self.channels.get(channel_id)
+
+        async def fetch_channel(self, channel_id):
+            return self.channels[channel_id]
+
+    class DummyDatabase:
+        def __init__(self):
+            self.marked_posts = []
+
+        async def is_posted(self, canonical_id, channel_id):
+            return False
+
+        async def get_posted_candidates(self, **kwargs):
+            return []
+
+        async def mark_posted(self, canonical_id, track, channel_id, message_id):
+            self.marked_posts.append((canonical_id, track, channel_id, message_id))
+
+    config = config_factory()
+    config.discord_channel_id = 333
+    database = DummyDatabase()
+    internship_channel = DummyChannel(333)
+    publisher = DiscordPublisher(config, database=database)  # type: ignore[arg-type]
+    publisher.bind_bot(DummyBot({333: internship_channel}))  # type: ignore[arg-type]
+
+    async def fake_resolve_logo_url(*args, **kwargs):
+        return None
+
+    publisher._resolve_logo_url = fake_resolve_logo_url  # type: ignore[assignment]
+
+    job = _canonical_job(
+        job_id=9,
+        title="Software Engineer Intern",
+        normalized_title="software engineer intern",
+        canonical_url="https://example.com/jobs/9",
+    )
+
+    posted = await publisher.publish_jobs([job])
+
+    assert posted == [9]
+    assert len(internship_channel.sent_embeds) == 1
+    assert database.marked_posts == [(9, "internship", 333, 999)]
+
+
+@pytest.mark.asyncio
+async def test_publish_jobs_skips_new_grad_when_channel_disabled(config_factory) -> None:
+    class DummyBot:
+        async def wait_until_ready(self):
+            return None
+
+    class DummyDatabase:
+        async def is_posted(self, canonical_id, channel_id):
+            return False
+
+        async def get_posted_candidates(self, **kwargs):
+            return []
+
+        async def mark_posted(self, canonical_id, track, channel_id, message_id):
+            raise AssertionError("mark_posted should not be called when the channel is disabled")
+
+    config = config_factory()
+    config.discord_new_grad_channel_id = None
+    publisher = DiscordPublisher(config, database=DummyDatabase())  # type: ignore[arg-type]
+    publisher.bind_bot(DummyBot())  # type: ignore[arg-type]
+
+    job = _canonical_job(
+        job_id=10,
+        title="Software Engineer, New Grad",
+        normalized_title="software engineer new grad",
+        canonical_url="https://example.com/jobs/10",
+    )
+    job.track = "new_grad"
+
+    posted = await publisher.publish_jobs([job])
+
+    assert posted == []

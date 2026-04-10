@@ -315,6 +315,13 @@ CREATE TABLE IF NOT EXISTS process_activity_events (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS runtime_config (
+    key TEXT PRIMARY KEY,
+    value TEXT,
+    updated_by_user_id TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_process_role_scopes_company
     ON process_role_scopes(normalized_company, track, season_term, updated_at DESC);
 
@@ -755,6 +762,56 @@ class Database:
             "SELECT * FROM process_notes WHERE id = ?",
             (note_id,),
         ).fetchone()
+
+    async def get_runtime_config_value(self, key: str) -> Optional[DbRow]:
+        async with self._lock:
+            return self._connection.execute(
+                """
+                SELECT key, value, updated_by_user_id, updated_at
+                FROM runtime_config
+                WHERE key = ?
+                """,
+                (key,),
+            ).fetchone()
+
+    async def set_runtime_config_value(
+        self,
+        key: str,
+        value: Optional[str],
+        updated_by_user_id: str,
+    ) -> DbRow:
+        async with self._lock:
+            now = _utc_now()
+            self._connection.execute(
+                """
+                INSERT INTO runtime_config (key, value, updated_by_user_id, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_by_user_id = excluded.updated_by_user_id,
+                    updated_at = excluded.updated_at
+                """,
+                (key, value, updated_by_user_id, now),
+            )
+            self._connection.commit()
+            return self._connection.execute(
+                """
+                SELECT key, value, updated_by_user_id, updated_at
+                FROM runtime_config
+                WHERE key = ?
+                """,
+                (key,),
+            ).fetchone()
+
+    async def list_runtime_config(self) -> List[DbRow]:
+        async with self._lock:
+            return self._connection.execute(
+                """
+                SELECT key, value, updated_by_user_id, updated_at
+                FROM runtime_config
+                ORDER BY key ASC
+                """
+            ).fetchall()
 
     async def get_github_state(self, repository: str, path: str) -> Optional[DbRow]:
         async with self._lock:

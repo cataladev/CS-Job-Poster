@@ -328,11 +328,16 @@ Admin-only commands:
 - `!dedupecheck <url or text>`
 - `!season [value]`
 - `!summary [daily|weekly]`
+- `!showchannels`
+- `!setinternchannel <channel_id>`
+- `!setnewgradchannel <channel_id|off>`
 - `!companyrequests [pending|approved|denied|all]`
 - `!approvecompany <request_id>`
 - `!denycompany <request_id> [reason]`
 - `!firecompany <company|id>`
 - `!synccompanies`
+
+Channel routing changes made through Discord persist in the database, apply live without restarting the bot, and only affect where jobs are posted. They do not change secret env vars or new-grad source enablement.
 
 Admin-only commands require Discord `Administrator` permission in the server.
 
@@ -524,70 +529,59 @@ Minimum production requirements:
 
 - Python 3.11
 - Postgres
-- `.env` with `DATABASE_URL`
+- a production env file with `DATABASE_URL`
 - Discord bot token and channel IDs
+
+For a full Ubuntu VPS runbook, use [`deploy/single-vps.md`](deploy/single-vps.md).
+
+The repo now includes:
+
+- [`deploy/bootstrap-single-vps.sh`](deploy/bootstrap-single-vps.sh) to install packages, Docker, the virtualenv, and the `systemd` units
+- [`deploy/job-bot.service`](deploy/job-bot.service) for the long-running bot
+- [`deploy/job-bot-auto-update.sh`](deploy/job-bot-auto-update.sh) plus the bundled timer/service units to poll `origin/main` and redeploy automatically
+- [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) to run tests on pushes to `main` and trigger the VPS-side auto-update unit over SSH
 
 Recommended deployment flow:
 
 1. Clone the repo on the server.
-2. Create the virtualenv.
-3. Install requirements.
-4. Create `.env`.
-5. Run Alembic migrations.
-6. Optionally import legacy SQLite data once.
-7. Start the bot under `systemd`.
+2. Run `sudo bash deploy/bootstrap-single-vps.sh`.
+3. Fill in `/etc/job-bot/job-bot.env`.
+4. Optionally import legacy SQLite data once.
+5. Start or restart `job-bot.service`.
+6. Enable either the bundled auto-update timer, the GitHub Actions deploy workflow, or both.
 
 Example:
 
 ```bash
-git clone https://github.com/cataladev/CS-Job-Poster.git
-cd CS-Job-Poster
-python3.11 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
-.venv/bin/alembic upgrade head
-.venv/bin/python scripts/import_sqlite_to_postgres.py   # optional, one-time
+sudo mkdir -p /opt/job-bot
+sudo chown "$USER":"$USER" /opt/job-bot
+git clone https://github.com/cataladev/CS-Job-Poster.git /opt/job-bot/app
+cd /opt/job-bot/app
+sudo APP_USER=jobbot DEPLOY_USER="$USER" APP_DIR=/opt/job-bot/app BRANCH=main \
+  bash deploy/bootstrap-single-vps.sh
+sudoedit /etc/job-bot/job-bot.env
+sudo systemctl restart job-bot.service
+sudo systemctl start job-bot-auto-update.timer
 ```
 
-After that, run the bot under a long-lived supervisor such as `systemd`.
-
-Example `systemd` unit:
-
-```ini
-[Unit]
-Description=CS Job Poster
-After=network.target
-
-[Service]
-WorkingDirectory=/opt/cs-job-poster
-ExecStart=/opt/cs-job-poster/.venv/bin/python bot.py
-Restart=always
-RestartSec=5
-EnvironmentFile=/opt/cs-job-poster/.env
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Before starting or restarting the service on a deploy, run migrations against the production `DATABASE_URL`:
+Before starting or restarting the service on a deploy, run migrations against the production `DATABASE_URL` if you are not using the bundled `job-bot.service` unit:
 
 ```bash
-cd /opt/cs-job-poster
+cd /opt/job-bot/app
 source .venv/bin/activate
 alembic upgrade head
-systemctl restart cs-job-poster
+sudo systemctl restart job-bot.service
 ```
 
-Update / redeploy sequence:
+Manual update / redeploy sequence:
 
 ```bash
-cd /opt/cs-job-poster
+cd /opt/job-bot/app
 git pull --ff-only
 source .venv/bin/activate
 pip install -r requirements.txt
 alembic upgrade head
-systemctl restart cs-job-poster
+sudo systemctl restart job-bot.service
 ```
 
 ## Working Rules For This Repo

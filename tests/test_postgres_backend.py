@@ -86,5 +86,25 @@ async def test_postgres_backend_can_initialize_and_persist() -> None:
         stats = await database.get_stats()
         assert stats["total_canonical_jobs"] == 1
         assert stats["total_jobs_found"] == 1
+
+        runtime_row = await database.set_runtime_config_value(
+            "discord_channel_id",
+            "333",
+            "42",
+        )
+        assert runtime_row["value"] == "333"
+
+        disabled_new_grad = await database.set_runtime_config_value(
+            "discord_new_grad_channel_id",
+            None,
+            "42",
+        )
+        assert disabled_new_grad["value"] is None
+
+        runtime_rows = await database.list_runtime_config()
+        assert {row["key"]: row["value"] for row in runtime_rows} == {
+            "discord_channel_id": "333",
+            "discord_new_grad_channel_id": None,
+        }
     finally:
         await database.close()

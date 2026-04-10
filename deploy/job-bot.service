@@ -1,0 +1,26 @@
+[Unit]
+Description=CS Job Poster bot
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=__APP_USER__
+Group=__APP_USER__
+SupplementaryGroups=docker
+WorkingDirectory=__APP_DIR__
+EnvironmentFile=__ENV_FILE__
+ExecStartPre=/usr/bin/env bash -lc 'cd "__APP_DIR__" && /usr/bin/docker compose up -d postgres'
+ExecStartPre=/usr/bin/env bash -lc 'cd "__APP_DIR__" && .venv/bin/python scripts/wait_for_postgres.py'
+ExecStartPre=/usr/bin/env bash -lc 'cd "__APP_DIR__" && .venv/bin/alembic upgrade head'
+ExecStart=__APP_DIR__/.venv/bin/python bot.py
+Restart=always
+RestartSec=10
+TimeoutStartSec=300
+TimeoutStopSec=60
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

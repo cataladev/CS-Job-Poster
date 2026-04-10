@@ -55,6 +55,12 @@ def test_help_pages_mark_admin_commands_clearly() -> None:
     assert "`!dedupecheck <url or text>` - test duplicate detection [admin only]" in flattened
     assert "`!season [value]` - show season filter configuration [admin only]" in flattened
     assert "`!summary [daily|weekly]` - show recent summary stats [admin only]" in flattened
+    assert "`!showchannels` - show effective posting channel routing [admin only]" in flattened
+    assert "`!setinternchannel <channel_id>` - update the internship posting channel [admin only]" in flattened
+    assert (
+        "`!setnewgradchannel <channel_id|off>` - update or disable the new-grad posting channel [admin only]"
+        in flattened
+    )
     assert "`!companyrequests [pending|approved|denied|all]` - request queue [admin only]" in flattened
     assert "`!approvecompany <request_id>` - approve a company request [admin only]" in flattened
     assert "`!denycompany <request_id> [reason]` - deny a company request [admin only]" in flattened

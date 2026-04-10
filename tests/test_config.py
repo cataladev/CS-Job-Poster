@@ -13,6 +13,8 @@ def test_load_config_defaults_to_fixed_daily_schedule(monkeypatch, tmp_path) -> 
         "DISCORD_CHANNEL_ID",
         "DISCORD_NEW_GRAD_CHANNEL_ID",
         "ENABLE_NEW_GRAD_SOURCE",
+        "DATABASE_URL",
+        "SQLITE_DB_PATH",
         "SOURCE_CONFIG_PATH",
     ]:
         monkeypatch.delenv(key, raising=False)

@@ -13,7 +13,14 @@ import discord
 from discord.ext import commands
 from rapidfuzz import fuzz
 
-from job_bot.config import configure_logging, load_config
+from job_bot.config import (
+    RUNTIME_CONFIG_INTERNSHIP_CHANNEL_KEY,
+    RUNTIME_CONFIG_NEW_GRAD_CHANNEL_KEY,
+    apply_runtime_channel_overrides,
+    configure_logging,
+    is_new_grad_collection_enabled,
+    load_config,
+)
 from job_bot.database import Database
 from job_bot.process_tracking import (
     PROCESS_NOTE_RATE_LIMIT_MAX,
@@ -54,6 +61,7 @@ DEFAULT_PAGE_SIZE = 10
 RECENT_PAGE_SIZE = 6
 JOB_PEER_PAGE_SIZE = 10
 MY_JOBS_PAGE_SIZE = 10
+CHANNEL_STATUS_DISABLED = "disabled"
 
 JOB_VISIBILITY_DEFAULT = PROCESS_VISIBILITY_DEFAULT
 JOB_STATUS_ORDER = {
@@ -87,10 +95,105 @@ def ensure_user_has_admin_privileges(user: Any) -> bool:
 
 
 def build_admin_only_check():
-    def predicate(ctx: commands.Context) -> bool:
-        return ensure_user_has_admin_privileges(ctx.author)
+    async def predicate(ctx: commands.Context) -> bool:
+        if user_has_admin_privileges(ctx.author):
+            return True
+        if ctx.guild is not None:
+            raise commands.CheckFailure("This command requires Discord administrator privileges.")
+
+        author_id = getattr(ctx.author, "id", None)
+        if author_id is None:
+            raise commands.CheckFailure("This command requires Discord administrator privileges.")
+
+        for guild in ctx.bot.guilds:
+            member = guild.get_member(author_id)
+            if member is None:
+                with contextlib.suppress(discord.HTTPException, discord.Forbidden, discord.NotFound):
+                    member = await guild.fetch_member(author_id)
+            if member and user_has_admin_privileges(member):
+                return True
+
+        raise commands.CheckFailure("This command requires Discord administrator privileges.")
 
     return commands.check(predicate)
+
+
+def parse_channel_command_value(value: str, *, allow_off: bool = False) -> Optional[int]:
+    token = value.strip()
+    if allow_off and token.lower() == "off":
+        return None
+    if not token.isdigit():
+        expected = "`off` or a numeric channel ID" if allow_off else "a numeric channel ID"
+        raise ValueError(f"Use {expected}.")
+    return int(token)
+
+
+def validate_configurable_channel(channel: Any, bot_member: Any) -> Optional[str]:
+    if getattr(channel, "guild", None) is None or not hasattr(channel, "permissions_for") or not hasattr(channel, "send"):
+        return "Channel must be a text channel I can post in."
+
+    permissions = channel.permissions_for(bot_member)
+    if not getattr(permissions, "view_channel", False):
+        return "I can't view that channel."
+
+    channel_type = getattr(channel, "type", None)
+    is_thread = channel_type in {
+        discord.ChannelType.news_thread,
+        discord.ChannelType.private_thread,
+        discord.ChannelType.public_thread,
+    }
+    can_send = (
+        getattr(permissions, "send_messages_in_threads", False)
+        if is_thread
+        else getattr(permissions, "send_messages", False)
+    )
+    if not can_send:
+        return "I can't send messages to that channel."
+    if not getattr(permissions, "embed_links", False):
+        return "I can't embed links in that channel."
+    return None
+
+
+def build_channel_configuration_message(
+    *,
+    config: Any,
+    runtime_config: dict[str, Any],
+    startup_channel_defaults: dict[str, Optional[int]],
+    startup_new_grad_collection_enabled: bool,
+) -> str:
+    internship_source = (
+        "runtime override" if RUNTIME_CONFIG_INTERNSHIP_CHANNEL_KEY in runtime_config else "env default"
+    )
+    new_grad_source = (
+        "runtime override" if RUNTIME_CONFIG_NEW_GRAD_CHANNEL_KEY in runtime_config else "env default"
+    )
+    internship_default = startup_channel_defaults.get(RUNTIME_CONFIG_INTERNSHIP_CHANNEL_KEY)
+    new_grad_default = startup_channel_defaults.get(RUNTIME_CONFIG_NEW_GRAD_CHANNEL_KEY)
+
+    return "\n".join(
+        [
+            "Channel routing:",
+            (
+                f"Internship: `{config.discord_channel_id}` "
+                f"({internship_source}; startup default `{internship_default}`)"
+            ),
+            (
+                f"New grad: "
+                f"`{config.discord_new_grad_channel_id}`"
+                if config.discord_new_grad_channel_id is not None
+                else f"New grad: `{CHANNEL_STATUS_DISABLED}`"
+            )
+            + (
+                f" ({new_grad_source}; startup default `{new_grad_default}`)"
+                if new_grad_default is not None
+                else f" ({new_grad_source}; startup default `{CHANNEL_STATUS_DISABLED}`)"
+            ),
+            (
+                "New-grad collection at startup: "
+                f"`{'enabled' if startup_new_grad_collection_enabled else 'disabled'}`"
+            ),
+        ]
+    )
 
 
 def build_paginated_embed(
@@ -568,6 +671,9 @@ def build_help_page_definitions() -> List[tuple[str, List[tuple[str, List[str]]]
                         "`!dedupecheck <url or text>` - test duplicate detection [admin only]",
                         "`!season [value]` - show season filter configuration [admin only]",
                         "`!summary [daily|weekly]` - show recent summary stats [admin only]",
+                        "`!showchannels` - show effective posting channel routing [admin only]",
+                        "`!setinternchannel <channel_id>` - update the internship posting channel [admin only]",
+                        "`!setnewgradchannel <channel_id|off>` - update or disable the new-grad posting channel [admin only]",
                         "`!firecompany <company|id>` - mark a watchlist company as hot [admin only]",
                         "`!synccompanies` - reimport the company watchlist seed [admin only]",
                     ],
@@ -603,6 +709,11 @@ async def run_bot() -> None:
     config = load_config()
     configure_logging(config.log_level)
     logger = logging.getLogger("bot")
+    startup_channel_defaults = {
+        RUNTIME_CONFIG_INTERNSHIP_CHANNEL_KEY: config.discord_channel_id,
+        RUNTIME_CONFIG_NEW_GRAD_CHANNEL_KEY: config.discord_new_grad_channel_id,
+    }
+    startup_new_grad_collection_enabled = is_new_grad_collection_enabled(config)
 
     if not config.discord_token:
         raise RuntimeError("DISCORD_TOKEN is required")
@@ -611,6 +722,11 @@ async def run_bot() -> None:
 
     database = Database(config.database_dsn)
     await database.initialize()
+    runtime_config_rows = await database.list_runtime_config()
+    apply_runtime_channel_overrides(
+        config,
+        {row["key"]: row for row in runtime_config_rows},
+    )
     watchlist_service = WatchlistService(config, database)
     seed_stats = await watchlist_service.sync_seed(force_brand_refresh=False)
     startup_branding_refresh_companies = seed_stats.get("branding_updated_companies", [])
@@ -629,6 +745,60 @@ async def run_bot() -> None:
     intents.message_content = True
     bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
     publisher.bind_bot(bot)
+
+    async def _runtime_config_by_key() -> dict[str, Any]:
+        return {row["key"]: row for row in await database.list_runtime_config()}
+
+    async def _resolve_configurable_channel(channel_id: int) -> Any:
+        channel = bot.get_channel(channel_id)
+        if channel is None:
+            with contextlib.suppress(discord.HTTPException, discord.Forbidden, discord.NotFound):
+                channel = await bot.fetch_channel(channel_id)
+        if channel is None:
+            raise ValueError("Channel not found.")
+
+        guild = getattr(channel, "guild", None)
+        if guild is None:
+            raise ValueError("Channel must belong to a server.")
+
+        bot_member = guild.me
+        if bot_member is None and bot.user is not None:
+            bot_member = guild.get_member(bot.user.id)
+        if bot_member is None and bot.user is not None:
+            with contextlib.suppress(discord.HTTPException, discord.Forbidden, discord.NotFound):
+                bot_member = await guild.fetch_member(bot.user.id)
+        if bot_member is None:
+            raise ValueError("I couldn't verify my permissions for that channel.")
+
+        permission_error = validate_configurable_channel(channel, bot_member)
+        if permission_error:
+            raise ValueError(permission_error)
+        return channel
+
+    async def _set_channel_override(
+        *,
+        key: str,
+        channel_id: Optional[int],
+        updated_by_user_id: str,
+    ) -> dict[str, Any]:
+        row = await database.set_runtime_config_value(
+            key=key,
+            value=str(channel_id) if channel_id is not None else None,
+            updated_by_user_id=updated_by_user_id,
+        )
+        apply_runtime_channel_overrides(config, {row["key"]: row})
+        return row
+
+    async def _send_channel_configuration(ctx: commands.Context) -> None:
+        runtime_config = await _runtime_config_by_key()
+        await ctx.send(
+            build_channel_configuration_message(
+                config=config,
+                runtime_config=runtime_config,
+                startup_channel_defaults=startup_channel_defaults,
+                startup_new_grad_collection_enabled=startup_new_grad_collection_enabled,
+            )
+        )
 
     async def _refresh_branding_posts(normalized_companies: Sequence[str]) -> int:
         jobs = await database.get_posted_canonical_jobs_for_companies(normalized_companies)
@@ -1694,6 +1864,72 @@ async def run_bot() -> None:
             inline=False,
         )
         await ctx.send(embed=embed)
+
+    @bot.command(name="showchannels")
+    @restricted_command
+    async def showchannels_command(ctx: commands.Context) -> None:
+        await _send_channel_configuration(ctx)
+
+    @bot.command(name="setinternchannel")
+    @restricted_command
+    async def setinternchannel_command(ctx: commands.Context, channel_id: str) -> None:
+        try:
+            parsed_channel_id = parse_channel_command_value(channel_id)
+            channel = await _resolve_configurable_channel(parsed_channel_id)
+        except ValueError as exc:
+            await ctx.send(str(exc))
+            return
+
+        await _set_channel_override(
+            key=RUNTIME_CONFIG_INTERNSHIP_CHANNEL_KEY,
+            channel_id=parsed_channel_id,
+            updated_by_user_id=str(ctx.author.id),
+        )
+        await ctx.send(
+            f"Internship posting channel updated to `{channel.id}` ({channel.guild.name} / #{channel.name})."
+        )
+        await _send_channel_configuration(ctx)
+
+    @bot.command(name="setnewgradchannel")
+    @restricted_command
+    async def setnewgradchannel_command(ctx: commands.Context, channel_id: str) -> None:
+        try:
+            parsed_channel_id = parse_channel_command_value(channel_id, allow_off=True)
+        except ValueError as exc:
+            await ctx.send(str(exc))
+            return
+
+        warning_message = ""
+        if parsed_channel_id is None:
+            await _set_channel_override(
+                key=RUNTIME_CONFIG_NEW_GRAD_CHANNEL_KEY,
+                channel_id=None,
+                updated_by_user_id=str(ctx.author.id),
+            )
+            await ctx.send("New-grad posting has been disabled for runtime routing.")
+        else:
+            try:
+                channel = await _resolve_configurable_channel(parsed_channel_id)
+            except ValueError as exc:
+                await ctx.send(str(exc))
+                return
+
+            await _set_channel_override(
+                key=RUNTIME_CONFIG_NEW_GRAD_CHANNEL_KEY,
+                channel_id=parsed_channel_id,
+                updated_by_user_id=str(ctx.author.id),
+            )
+            if not startup_new_grad_collection_enabled:
+                warning_message = (
+                    "\nWarning: new-grad collection is currently disabled at startup, "
+                    "so no new-grad jobs will post until that is enabled outside Discord."
+                )
+            await ctx.send(
+                f"New-grad posting channel updated to `{channel.id}` ({channel.guild.name} / #{channel.name})."
+                f"{warning_message}"
+            )
+
+        await _send_channel_configuration(ctx)
 
     async def _send_helpjobs(ctx: commands.Context) -> None:
         pages = build_help_page_definitions()

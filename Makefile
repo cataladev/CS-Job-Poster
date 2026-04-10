@@ -1,7 +1,11 @@
 -include .env
 
+export POSTGRES_BIND_HOST ?= 127.0.0.1
 export POSTGRES_HOST_PORT ?= 5432
-export DATABASE_URL ?= postgresql://jobbot:jobbot@localhost:$(POSTGRES_HOST_PORT)/jobbot
+export POSTGRES_DB ?= jobbot
+export POSTGRES_USER ?= jobbot
+export POSTGRES_PASSWORD ?= jobbot
+export DATABASE_URL ?= postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@localhost:$(POSTGRES_HOST_PORT)/$(POSTGRES_DB)
 export SQLITE_DB_PATH ?= job_bot.db
 
 PYTHON := .venv/bin/python

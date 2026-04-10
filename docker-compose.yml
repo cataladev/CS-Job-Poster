@@ -3,15 +3,15 @@ services:
     image: postgres:16
     container_name: job-bot-postgres
     environment:
-      POSTGRES_DB: jobbot
-      POSTGRES_USER: jobbot
-      POSTGRES_PASSWORD: jobbot
+      POSTGRES_DB: "${POSTGRES_DB:-jobbot}"
+      POSTGRES_USER: "${POSTGRES_USER:-jobbot}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-jobbot}"
     ports:
-      - "${POSTGRES_HOST_PORT:-5432}:5432"
+      - "${POSTGRES_BIND_HOST:-127.0.0.1}:${POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
       - job-bot-postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U jobbot -d jobbot"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-jobbot} -d ${POSTGRES_DB:-jobbot}"]
       interval: 5s
       timeout: 5s
       retries: 20
