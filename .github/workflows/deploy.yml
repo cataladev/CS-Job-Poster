@@ -73,4 +73,4 @@ jobs:
           ssh-keyscan -p "${DEPLOY_PORT}" -H "${DEPLOY_HOST}" >> ~/.ssh/known_hosts
 
           ssh -p "${DEPLOY_PORT}" "${DEPLOY_USER}@${DEPLOY_HOST}" \
-            "sudo systemctl start '${DEPLOY_AUTO_UPDATE_UNIT}' && sudo systemctl status '${DEPLOY_AUTO_UPDATE_UNIT}' --no-pager"
+            "sudo systemctl start '${DEPLOY_AUTO_UPDATE_UNIT}' && sudo systemctl show '${DEPLOY_AUTO_UPDATE_UNIT}' --property=Result,ExecMainStatus,ActiveState,SubState --no-pager && sudo journalctl -u '${DEPLOY_AUTO_UPDATE_UNIT}' -n 50 --no-pager"
