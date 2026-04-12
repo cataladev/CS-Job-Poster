@@ -375,6 +375,7 @@ The bot is intentionally strict:
 - rejects non-U.S. roles when `US_ONLY=true`
 - rejects unknown-age jobs
 - rejects anything older than the configured age window
+- trusts rows from the curated Simplify `README.md` files even when the title is broader than the usual software-role keyword checks
 
 Current practical default:
 
