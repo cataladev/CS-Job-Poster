@@ -20,7 +20,7 @@ Contribution docs live in [CONTRIBUTING.md](/Users/carlos/Development/Job%20Bot/
 - Posts new-grad roles to `DISCORD_NEW_GRAD_CHANNEL_ID` when that channel is configured and `ENABLE_NEW_GRAD_SOURCE=true`
 - Runs on a fixed schedule at `12:00 PM` and `8:00 PM` in `America/New_York`
 - Defaults to `US_ONLY=true`
-- Defaults to `MAX_JOB_AGE_HOURS=0`, which means only same-day roles are eligible to post
+- Defaults to `MAX_JOB_AGE_HOURS=72`, which means jobs up to 3 days old are eligible to post
 - Uses Postgres in production when `DATABASE_URL` is set, with SQLite fallback for local tests and throwaway runs
 - Uses a watchlist system so companies can be requested and approved over time
 - Uses embeds for job posts and command output
@@ -120,7 +120,7 @@ Current default behavior in [`.env.example`](.env.example):
 - `SCHEDULED_RUN_HOURS=12,20`
 - `SCHEDULE_TIMEZONE=America/New_York`
 - `US_ONLY=true`
-- `MAX_JOB_AGE_HOURS=0`
+- `MAX_JOB_AGE_HOURS=72`
 - `ENABLE_NEW_GRAD_SOURCE=false`
 
 Database behavior:
@@ -379,7 +379,7 @@ The bot is intentionally strict:
 Current practical default:
 
 - U.S.-only
-- same-day jobs only
+- jobs up to 3 days old
 - unknown-age jobs are rejected
 
 ## Deduplication

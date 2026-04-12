@@ -25,6 +25,7 @@ def test_load_config_defaults_to_fixed_daily_schedule(monkeypatch, tmp_path) -> 
     assert config.schedule_timezone == "America/New_York"
     assert config.database_url == ""
     assert config.database_dsn == "job_bot.db"
+    assert config.max_job_age_hours == 72
 
 
 def test_load_config_prefers_database_url_over_sqlite_path(monkeypatch, tmp_path) -> None:
