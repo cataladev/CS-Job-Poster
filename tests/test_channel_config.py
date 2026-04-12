@@ -10,6 +10,7 @@ from job_bot.bot import (
 )
 from job_bot.config import (
     RUNTIME_CONFIG_INTERNSHIP_CHANNEL_KEY,
+    RUNTIME_CONFIG_LOG_CHANNEL_KEY,
     RUNTIME_CONFIG_NEW_GRAD_CHANNEL_KEY,
     apply_runtime_channel_overrides,
 )
@@ -36,6 +37,7 @@ def test_apply_runtime_channel_overrides_leave_env_defaults_when_absent(config_f
 
     assert config.discord_channel_id == 111
     assert config.discord_new_grad_channel_id == 222
+    assert config.discord_log_channel_id is None
 
 
 def test_apply_runtime_channel_overrides_update_channel_routing(config_factory) -> None:
@@ -46,33 +48,39 @@ def test_apply_runtime_channel_overrides_update_channel_routing(config_factory) 
         {
             RUNTIME_CONFIG_INTERNSHIP_CHANNEL_KEY: {"value": "333"},
             RUNTIME_CONFIG_NEW_GRAD_CHANNEL_KEY: {"value": None},
+            RUNTIME_CONFIG_LOG_CHANNEL_KEY: {"value": "444"},
         },
     )
 
     assert config.discord_channel_id == 333
     assert config.discord_new_grad_channel_id is None
+    assert config.discord_log_channel_id == 444
 
 
 def test_build_channel_configuration_message_reports_effective_sources(config_factory) -> None:
     config = config_factory()
     config.discord_channel_id = 333
     config.discord_new_grad_channel_id = None
+    config.discord_log_channel_id = 444
 
     message = build_channel_configuration_message(
         config=config,
         runtime_config={
             RUNTIME_CONFIG_INTERNSHIP_CHANNEL_KEY: {"value": "333"},
             RUNTIME_CONFIG_NEW_GRAD_CHANNEL_KEY: {"value": None},
+            RUNTIME_CONFIG_LOG_CHANNEL_KEY: {"value": "444"},
         },
         startup_channel_defaults={
             RUNTIME_CONFIG_INTERNSHIP_CHANNEL_KEY: 111,
             RUNTIME_CONFIG_NEW_GRAD_CHANNEL_KEY: 222,
+            RUNTIME_CONFIG_LOG_CHANNEL_KEY: None,
         },
         startup_new_grad_collection_enabled=False,
     )
 
     assert "Internship: `333` (runtime override; startup default `111`)" in message
     assert "New grad: `disabled` (runtime override; startup default `222`)" in message
+    assert "Logs: `444` (runtime override; startup default `disabled`)" in message
     assert "New-grad collection at startup: `disabled`" in message
 
 
@@ -118,14 +126,21 @@ async def test_runtime_config_round_trip_in_sqlite(config_factory) -> None:
             None,
             "42",
         )
+        log_row = await database.set_runtime_config_value(
+            RUNTIME_CONFIG_LOG_CHANNEL_KEY,
+            "444",
+            "42",
+        )
 
         assert internship_row["value"] == "333"
         assert new_grad_row["value"] is None
+        assert log_row["value"] == "444"
 
         runtime_rows = await database.list_runtime_config()
         assert {row["key"]: row["value"] for row in runtime_rows} == {
             RUNTIME_CONFIG_INTERNSHIP_CHANNEL_KEY: "333",
             RUNTIME_CONFIG_NEW_GRAD_CHANNEL_KEY: None,
+            RUNTIME_CONFIG_LOG_CHANNEL_KEY: "444",
         }
     finally:
         await database.close()

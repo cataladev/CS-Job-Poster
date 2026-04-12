@@ -14,6 +14,7 @@ def config_factory(tmp_path):
             discord_token="token",
             discord_channel_id=111,
             discord_new_grad_channel_id=222,
+            discord_log_channel_id=None,
             scheduled_run_hours=[12, 20],
             schedule_timezone="America/New_York",
             database_url="",

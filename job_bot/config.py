@@ -13,6 +13,7 @@ from job_bot.utils.normalization import normalize_company_name
 
 RUNTIME_CONFIG_INTERNSHIP_CHANNEL_KEY = "discord_channel_id"
 RUNTIME_CONFIG_NEW_GRAD_CHANNEL_KEY = "discord_new_grad_channel_id"
+RUNTIME_CONFIG_LOG_CHANNEL_KEY = "discord_log_channel_id"
 
 
 def _parse_bool(value: Optional[str], default: bool = False) -> bool:
@@ -81,6 +82,11 @@ def load_config() -> AppConfig:
         discord_token=os.getenv("DISCORD_TOKEN", ""),
         discord_channel_id=int(os.getenv("DISCORD_CHANNEL_ID", "0")),
         discord_new_grad_channel_id=int(new_grad_channel_id) if new_grad_channel_id else None,
+        discord_log_channel_id=(
+            int(os.getenv("DISCORD_LOG_CHANNEL_ID", "0")) or None
+            if os.getenv("DISCORD_LOG_CHANNEL_ID")
+            else None
+        ),
         scheduled_run_hours=_parse_int_csv(os.getenv("SCHEDULED_RUN_HOURS"), [12, 20]),
         schedule_timezone=os.getenv("SCHEDULE_TIMEZONE", "America/New_York"),
         database_url=os.getenv("DATABASE_URL", ""),
@@ -139,6 +145,10 @@ def apply_runtime_channel_overrides(
     if RUNTIME_CONFIG_NEW_GRAD_CHANNEL_KEY in runtime_config:
         raw_value = runtime_config[RUNTIME_CONFIG_NEW_GRAD_CHANNEL_KEY].get("value")
         config.discord_new_grad_channel_id = int(raw_value) if raw_value else None
+
+    if RUNTIME_CONFIG_LOG_CHANNEL_KEY in runtime_config:
+        raw_value = runtime_config[RUNTIME_CONFIG_LOG_CHANNEL_KEY].get("value")
+        config.discord_log_channel_id = int(raw_value) if raw_value else None
 
 
 def is_new_grad_collection_enabled(config: AppConfig) -> bool:

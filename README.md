@@ -18,6 +18,7 @@ Contribution docs live in [CONTRIBUTING.md](/Users/carlos/Development/Job%20Bot/
 
 - Posts internships to `DISCORD_CHANNEL_ID`
 - Posts new-grad roles to `DISCORD_NEW_GRAD_CHANNEL_ID` when that channel is configured and `ENABLE_NEW_GRAD_SOURCE=true`
+- Sends optional embedded activity logs to `DISCORD_LOG_CHANNEL_ID` or a runtime override set with `!setlogs`
 - Runs on a fixed schedule at `12:00 PM` and `8:00 PM` in `America/New_York`
 - Defaults to `US_ONLY=true`
 - Defaults to `MAX_JOB_AGE_HOURS=72`, which means jobs up to 3 days old are eligible to post
@@ -103,6 +104,7 @@ Important env values:
 - `DISCORD_TOKEN`
 - `DISCORD_CHANNEL_ID`
 - `DISCORD_NEW_GRAD_CHANNEL_ID`
+- `DISCORD_LOG_CHANNEL_ID`
 - `ENABLE_NEW_GRAD_SOURCE`
 - `DATABASE_URL`
 - `SQLITE_DB_PATH`
@@ -331,13 +333,14 @@ Admin-only commands:
 - `!showchannels`
 - `!setinternchannel <channel_id>`
 - `!setnewgradchannel <channel_id|off>`
+- `!setlogs <channel_id|off>`
 - `!companyrequests [pending|approved|denied|all]`
 - `!approvecompany <request_id>`
 - `!denycompany <request_id> [reason]`
 - `!firecompany <company|id>`
 - `!synccompanies`
 
-Channel routing changes made through Discord persist in the database, apply live without restarting the bot, and only affect where jobs are posted. They do not change secret env vars or new-grad source enablement.
+Channel routing changes made through Discord persist in the database, apply live without restarting the bot, and affect internship posts, new-grad posts, and the optional activity log channel. They do not change secret env vars or new-grad source enablement.
 
 Admin-only commands require Discord `Administrator` permission in the server.
 

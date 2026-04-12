@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Dict, List, Set
+from collections.abc import Awaitable, Callable
+from typing import Any, Dict, List, Optional, Set
 
 from job_bot.branding import BrandingResolver
 from job_bot.database import Database
@@ -24,6 +25,7 @@ class JobPipeline:
         config: AppConfig,
         database: Database,
         publisher: DiscordPublisher,
+        activity_logger: Optional[Callable[[str, Dict[str, Any]], Awaitable[None]]] = None,
     ) -> None:
         self.config = config
         self.database = database
@@ -33,6 +35,7 @@ class JobPipeline:
         self.branding = BrandingResolver(config, database)
         self.logger = logging.getLogger(self.__class__.__name__)
         self._lock = asyncio.Lock()
+        self.activity_logger = activity_logger
 
     @property
     def running(self) -> bool:
@@ -59,19 +62,49 @@ class JobPipeline:
                     http_client=http_client,
                 )
                 source_manager = SourceManager(context)
+                enabled_sources = source_manager.list_enabled_sources()
+
+                await self._emit_activity(
+                    "run_started",
+                    trigger=trigger,
+                    phase="priority",
+                    source_count=len(enabled_sources),
+                )
+                await self._emit_activity(
+                    "phase_started",
+                    trigger=trigger,
+                    phase="priority",
+                    source_count=len([source for source in enabled_sources if source.phase == "priority"]),
+                )
 
                 # Priority sources run first so the bot can post high-signal GitHub results
                 # quickly, then enrich/merge them as slower ATS sources finish.
                 priority_results = await source_manager.run_priority_sources()
                 stats.sources_checked += len(priority_results)
-                new_candidate_ids, new_refresh_ids = await self._process_results(priority_results, stats, http_client)
+                new_candidate_ids, new_refresh_ids = await self._process_results(
+                    priority_results,
+                    stats,
+                    http_client,
+                    phase="priority",
+                )
                 candidate_post_ids.update(new_candidate_ids)
                 await self._publish_candidates(candidate_post_ids, stats)
                 await self._refresh_candidates(new_refresh_ids)
 
+                await self._emit_activity(
+                    "phase_started",
+                    trigger=trigger,
+                    phase="secondary",
+                    source_count=len([source for source in enabled_sources if source.phase != "priority"]),
+                )
                 async for result in source_manager.iter_secondary_sources():
                     stats.sources_checked += 1
-                    new_candidate_ids, new_refresh_ids = await self._process_results([result], stats, http_client)
+                    new_candidate_ids, new_refresh_ids = await self._process_results(
+                        [result],
+                        stats,
+                        http_client,
+                        phase="secondary",
+                    )
                     if not new_candidate_ids:
                         await self._refresh_candidates(new_refresh_ids)
                         continue
@@ -80,6 +113,17 @@ class JobPipeline:
                     await self._refresh_candidates(new_refresh_ids)
 
             stats.finished_at = utc_now()
+            await self._emit_activity(
+                "run_finished",
+                trigger=trigger,
+                sources_checked=stats.sources_checked,
+                jobs_fetched=stats.jobs_fetched,
+                jobs_filtered=stats.jobs_filtered,
+                jobs_new=stats.jobs_new,
+                jobs_posted=stats.jobs_posted,
+                duplicates_removed=stats.duplicates_removed,
+                errors=stats.errors,
+            )
             return stats
 
     async def _process_results(
@@ -87,6 +131,8 @@ class JobPipeline:
         results: List[SourceResult],
         stats: RunStats,
         http_client: AsyncHttpClient,
+        *,
+        phase: str,
     ) -> tuple[Set[int], Set[int]]:
         candidate_post_ids: Set[int] = set()
         refresh_post_ids: Set[int] = set()
@@ -146,6 +192,18 @@ class JobPipeline:
                 metadata=result.metadata,
                 error="; ".join(result.errors) if result.errors else None,
             )
+            await self._emit_activity(
+                "source_finished",
+                phase=phase,
+                source_name=result.source_name,
+                track=result.track,
+                status="error" if result.errors else "success",
+                jobs_fetched=len(result.jobs),
+                jobs_filtered=filtered_count,
+                jobs_new=new_count,
+                jobs_duplicates=duplicate_count,
+                errors=result.errors,
+            )
         return candidate_post_ids, refresh_post_ids
 
     async def _publish_candidates(self, canonical_ids: Set[int], stats: RunStats) -> None:
@@ -179,3 +237,11 @@ class JobPipeline:
                     seed.discovered_from,
                     metadata={"discovered_from_source": job.source_name},
                 )
+
+    async def _emit_activity(self, event_name: str, **payload: Any) -> None:
+        if self.activity_logger is None:
+            return
+        try:
+            await self.activity_logger(event_name, payload)
+        except Exception:  # pragma: no cover - activity logs should never break the run
+            self.logger.exception("Activity logging failed for event %s", event_name)

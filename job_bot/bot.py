@@ -17,6 +17,7 @@ from rapidfuzz import fuzz
 
 from job_bot.config import (
     RUNTIME_CONFIG_INTERNSHIP_CHANNEL_KEY,
+    RUNTIME_CONFIG_LOG_CHANNEL_KEY,
     RUNTIME_CONFIG_NEW_GRAD_CHANNEL_KEY,
     apply_runtime_channel_overrides,
     configure_logging,
@@ -169,27 +170,28 @@ def build_channel_configuration_message(
     new_grad_source = (
         "runtime override" if RUNTIME_CONFIG_NEW_GRAD_CHANNEL_KEY in runtime_config else "env default"
     )
+    log_source = (
+        "runtime override" if RUNTIME_CONFIG_LOG_CHANNEL_KEY in runtime_config else "env default"
+    )
     internship_default = startup_channel_defaults.get(RUNTIME_CONFIG_INTERNSHIP_CHANNEL_KEY)
     new_grad_default = startup_channel_defaults.get(RUNTIME_CONFIG_NEW_GRAD_CHANNEL_KEY)
+    log_default = startup_channel_defaults.get(RUNTIME_CONFIG_LOG_CHANNEL_KEY)
+
+    def _channel_line(label: str, value: Optional[int], source: str, startup_default: Optional[int]) -> str:
+        current_value = f"`{value}`" if value is not None else f"`{CHANNEL_STATUS_DISABLED}`"
+        default_value = (
+            f"`{startup_default}`"
+            if startup_default is not None
+            else f"`{CHANNEL_STATUS_DISABLED}`"
+        )
+        return f"{label}: {current_value} ({source}; startup default {default_value})"
 
     return "\n".join(
         [
             "Channel routing:",
-            (
-                f"Internship: `{config.discord_channel_id}` "
-                f"({internship_source}; startup default `{internship_default}`)"
-            ),
-            (
-                f"New grad: "
-                f"`{config.discord_new_grad_channel_id}`"
-                if config.discord_new_grad_channel_id is not None
-                else f"New grad: `{CHANNEL_STATUS_DISABLED}`"
-            )
-            + (
-                f" ({new_grad_source}; startup default `{new_grad_default}`)"
-                if new_grad_default is not None
-                else f" ({new_grad_source}; startup default `{CHANNEL_STATUS_DISABLED}`)"
-            ),
+            _channel_line("Internship", config.discord_channel_id, internship_source, internship_default),
+            _channel_line("New grad", config.discord_new_grad_channel_id, new_grad_source, new_grad_default),
+            _channel_line("Logs", config.discord_log_channel_id, log_source, log_default),
             (
                 "New-grad collection at startup: "
                 f"`{'enabled' if startup_new_grad_collection_enabled else 'disabled'}`"
@@ -720,6 +722,7 @@ def build_help_page_definitions() -> List[tuple[str, List[tuple[str, List[str]]]
                         "`!showchannels` - show effective posting channel routing [admin only]",
                         "`!setinternchannel <channel_id>` - update the internship posting channel [admin only]",
                         "`!setnewgradchannel <channel_id|off>` - update or disable the new-grad posting channel [admin only]",
+                        "`!setlogs <channel_id|off>` - update or disable the bot activity log channel [admin only]",
                         "`!firecompany <company|id>` - mark a watchlist company as hot [admin only]",
                         "`!synccompanies` - reimport the company watchlist seed [admin only]",
                     ],
@@ -759,6 +762,7 @@ async def run_bot() -> None:
     startup_channel_defaults = {
         RUNTIME_CONFIG_INTERNSHIP_CHANNEL_KEY: config.discord_channel_id,
         RUNTIME_CONFIG_NEW_GRAD_CHANNEL_KEY: config.discord_new_grad_channel_id,
+        RUNTIME_CONFIG_LOG_CHANNEL_KEY: config.discord_log_channel_id,
     }
     startup_new_grad_collection_enabled = is_new_grad_collection_enabled(config)
 
@@ -869,6 +873,143 @@ async def run_bot() -> None:
             )
         )
 
+    async def _resolve_log_channel() -> Optional[Any]:
+        channel_id = config.discord_log_channel_id
+        if channel_id is None:
+            return None
+        channel = bot.get_channel(channel_id)
+        if channel is None:
+            with contextlib.suppress(discord.HTTPException, discord.Forbidden, discord.NotFound):
+                channel = await bot.fetch_channel(channel_id)
+        return channel
+
+    def _build_activity_log_embed(
+        *,
+        title: str,
+        description: str,
+        color: discord.Color,
+        fields: Sequence[tuple[str, str]],
+    ) -> discord.Embed:
+        embed = discord.Embed(
+            title=title,
+            description=description,
+            color=color,
+            timestamp=datetime.now(timezone.utc),
+        )
+        for name, value in fields:
+            embed.add_field(name=name, value=value or "n/a", inline=False)
+        embed.set_footer(text="Bot Activity Log")
+        return embed
+
+    async def _send_activity_log_embed(embed: discord.Embed) -> None:
+        channel = await _resolve_log_channel()
+        if channel is None:
+            return
+        with contextlib.suppress(discord.HTTPException):
+            await channel.send(embed=embed)
+
+    async def _log_command_event_to_discord(
+        action: str,
+        payload: Optional[dict[str, Optional[str]]],
+        *,
+        error_name: Optional[str] = None,
+    ) -> None:
+        if payload is None:
+            return
+        color = {
+            "claimed": discord.Color.blurple(),
+            "completed": discord.Color.green(),
+            "duplicate-skip": discord.Color.orange(),
+        }.get(action, discord.Color.red() if action.startswith("failed") else discord.Color.blurple())
+        description = f"`!{payload['command_name']}`"
+        if error_name:
+            description += f" failed with `{error_name}`."
+        else:
+            description += f" {action.replace('-', ' ')}."
+        embed = _build_activity_log_embed(
+            title=f"Command {action.title()}",
+            description=description,
+            color=color,
+            fields=[
+                ("User", f"<@{payload['author_user_id']}>"),
+                ("Channel", f"<#{payload['channel_id']}>"),
+                ("Guild", payload["guild_id"] or "DM"),
+                ("Message ID", payload["message_id"] or "unknown"),
+            ],
+        )
+        await _send_activity_log_embed(embed)
+
+    async def _log_pipeline_event_to_discord(event_name: str, payload: dict[str, Any]) -> None:
+        if event_name == "run_started":
+            embed = _build_activity_log_embed(
+                title="Job Run Started",
+                description=f"Starting a `{payload['trigger']}` discovery run.",
+                color=discord.Color.blurple(),
+                fields=[
+                    ("Phase", payload["phase"]),
+                    ("Enabled sources", str(payload["source_count"])),
+                ],
+            )
+        elif event_name == "phase_started":
+            embed = _build_activity_log_embed(
+                title="Run Phase Started",
+                description=f"Now processing the `{payload['phase']}` phase.",
+                color=discord.Color.dark_blue(),
+                fields=[
+                    ("Sources", str(payload["source_count"])),
+                    ("Trigger", payload["trigger"]),
+                ],
+            )
+        elif event_name == "source_finished":
+            embed = _build_activity_log_embed(
+                title="Source Finished",
+                description=f"`{payload['source_name']}` finished scraping.",
+                color=discord.Color.red() if payload["status"] == "error" else discord.Color.gold(),
+                fields=[
+                    ("Track / Phase", f"`{payload['track']}` • `{payload['phase']}`"),
+                    (
+                        "Counts",
+                        " • ".join(
+                            [
+                                f"fetched `{payload['jobs_fetched']}`",
+                                f"filtered `{payload['jobs_filtered']}`",
+                                f"new `{payload['jobs_new']}`",
+                                f"dupes `{payload['jobs_duplicates']}`",
+                            ]
+                        ),
+                    ),
+                    ("Status", payload["status"]),
+                    ("Errors", "; ".join(payload["errors"]) if payload["errors"] else "none"),
+                ],
+            )
+        elif event_name == "run_finished":
+            embed = _build_activity_log_embed(
+                title="Job Run Complete",
+                description=f"Finished the `{payload['trigger']}` discovery run.",
+                color=discord.Color.green() if not payload["errors"] else discord.Color.orange(),
+                fields=[
+                    ("Sources checked", str(payload["sources_checked"])),
+                    (
+                        "Counts",
+                        " • ".join(
+                            [
+                                f"fetched `{payload['jobs_fetched']}`",
+                                f"filtered `{payload['jobs_filtered']}`",
+                                f"new `{payload['jobs_new']}`",
+                                f"posted `{payload['jobs_posted']}`",
+                                f"dupes `{payload['duplicates_removed']}`",
+                            ]
+                        ),
+                    ),
+                    ("Errors", "; ".join(payload["errors"]) if payload["errors"] else "none"),
+                ],
+            )
+        else:
+            return
+        await _send_activity_log_embed(embed)
+
+    pipeline.activity_logger = _log_pipeline_event_to_discord
+
     async def _refresh_branding_posts(normalized_companies: Sequence[str]) -> int:
         jobs = await database.get_posted_canonical_jobs_for_companies(normalized_companies)
         if not jobs:
@@ -896,9 +1037,11 @@ async def run_bot() -> None:
         )
         if not claimed:
             _log_command_event(logging.WARNING, "duplicate-skip", payload)
+            await _log_command_event_to_discord("duplicate-skip", payload)
             return
 
         _log_command_event(logging.INFO, "claimed", payload)
+        await _log_command_event_to_discord("claimed", payload)
         await bot.invoke(ctx)
 
     @bot.event
@@ -1013,6 +1156,11 @@ async def run_bot() -> None:
         if isinstance(error, commands.CommandNotFound):
             return
         _log_command_event(logging.ERROR, f"failed: {type(error).__name__}", payload)
+        await _log_command_event_to_discord(
+            f"failed: {type(error).__name__}",
+            payload,
+            error_name=type(error).__name__,
+        )
         if isinstance(error, commands.CheckFailure):
             await ctx.send(str(error))
             return
@@ -1020,7 +1168,9 @@ async def run_bot() -> None:
 
     @bot.event
     async def on_command_completion(ctx: commands.Context) -> None:
-        _log_command_event(logging.INFO, "completed", build_command_receipt_payload(ctx))
+        payload = build_command_receipt_payload(ctx)
+        _log_command_event(logging.INFO, "completed", payload)
+        await _log_command_event_to_discord("completed", payload)
 
     async def _require_job_community_profile(
         ctx: commands.Context,
@@ -2005,6 +2155,52 @@ async def run_bot() -> None:
                 f"{warning_message}"
             )
 
+        await _send_channel_configuration(ctx)
+
+    @bot.command(name="setlogs", aliases=["SetLogs"])
+    @restricted_command
+    async def setlogs_command(ctx: commands.Context, channel_id: str) -> None:
+        try:
+            parsed_channel_id = parse_channel_command_value(channel_id, allow_off=True)
+        except ValueError as exc:
+            await ctx.send(str(exc))
+            return
+
+        if parsed_channel_id is None:
+            await _set_channel_override(
+                key=RUNTIME_CONFIG_LOG_CHANNEL_KEY,
+                channel_id=None,
+                updated_by_user_id=str(ctx.author.id),
+            )
+            await ctx.send("Bot activity logs have been disabled.")
+            await _send_channel_configuration(ctx)
+            return
+
+        try:
+            channel = await _resolve_configurable_channel(parsed_channel_id)
+        except ValueError as exc:
+            await ctx.send(str(exc))
+            return
+
+        await _set_channel_override(
+            key=RUNTIME_CONFIG_LOG_CHANNEL_KEY,
+            channel_id=parsed_channel_id,
+            updated_by_user_id=str(ctx.author.id),
+        )
+        await ctx.send(
+            f"Bot activity log channel updated to `{channel.id}` ({channel.guild.name} / #{channel.name})."
+        )
+        await _send_activity_log_embed(
+            _build_activity_log_embed(
+                title="Bot Logs Enabled",
+                description="Bot activity logs will be sent here.",
+                color=discord.Color.green(),
+                fields=[
+                    ("Configured by", f"<@{ctx.author.id}>"),
+                    ("Channel", f"<#{channel.id}>"),
+                ],
+            )
+        )
         await _send_channel_configuration(ctx)
 
     async def _send_helpjobs(ctx: commands.Context) -> None:
