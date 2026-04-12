@@ -173,6 +173,7 @@ class AppConfig:
     discord_token: str
     discord_channel_id: int
     discord_new_grad_channel_id: Optional[int]
+    discord_log_channel_id: Optional[int]
     scheduled_run_hours: List[int]
     schedule_timezone: str
     database_url: str

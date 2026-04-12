@@ -19,17 +19,37 @@ class StubPublisher:
         return [job.id for job in jobs if job.id is not None]
 
 
+class StubActivityLogger:
+    def __init__(self):
+        self.events = []
+
+    async def __call__(self, event_name, payload):
+        self.events.append((event_name, payload))
+
+
 @pytest.mark.asyncio
 async def test_pipeline_posts_one_canonical_job_for_duplicates(config_factory, monkeypatch) -> None:
     config = config_factory()
     database = Database(config.sqlite_db_path)
     await database.initialize()
     publisher = StubPublisher()
-    pipeline = JobPipeline(config, database, publisher)  # type: ignore[arg-type]
+    activity_logger = StubActivityLogger()
+    pipeline = JobPipeline(config, database, publisher, activity_logger=activity_logger)  # type: ignore[arg-type]
 
     class FakeSourceManager:
         def __init__(self, context):
             pass
+
+        def list_enabled_sources(self):
+            class Source:
+                def __init__(self, name, phase):
+                    self.name = name
+                    self.phase = phase
+
+            return [
+                Source("github_simplify_internships", "priority"),
+                Source("greenhouse", "secondary"),
+            ]
 
         async def run_priority_sources(self):
             return [
@@ -85,6 +105,14 @@ async def test_pipeline_posts_one_canonical_job_for_duplicates(config_factory, m
     assert len(publisher.refreshed_jobs) == 1
     assert set(publisher.refreshed_jobs[0].source_names) == {"github_simplify_internships", "greenhouse"}
     assert persisted["total_canonical_jobs"] == 1
+    assert [event for event, _ in activity_logger.events] == [
+        "run_started",
+        "phase_started",
+        "source_finished",
+        "phase_started",
+        "source_finished",
+        "run_finished",
+    ]
 
 
 def test_track_channel_routing(config_factory) -> None:

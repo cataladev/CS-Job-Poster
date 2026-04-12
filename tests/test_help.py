@@ -61,6 +61,7 @@ def test_help_pages_mark_admin_commands_clearly() -> None:
         "`!setnewgradchannel <channel_id|off>` - update or disable the new-grad posting channel [admin only]"
         in flattened
     )
+    assert "`!setlogs <channel_id|off>` - update or disable the bot activity log channel [admin only]" in flattened
     assert "`!companyrequests [pending|approved|denied|all]` - request queue [admin only]" in flattened
     assert "`!approvecompany <request_id>` - approve a company request [admin only]" in flattened
     assert "`!denycompany <request_id> [reason]` - deny a company request [admin only]" in flattened
