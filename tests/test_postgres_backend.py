@@ -42,6 +42,7 @@ async def test_postgres_backend_can_initialize_and_persist() -> None:
 
     try:
         assert database.backend == "postgres"
+        assert await database.acquire_primary_runtime_lock() is True
 
         company_id = await database.upsert_watchlist_company(
             company="Stripe",
@@ -106,5 +107,29 @@ async def test_postgres_backend_can_initialize_and_persist() -> None:
             "discord_channel_id": "333",
             "discord_new_grad_channel_id": None,
         }
+
+        assert await database.claim_command_receipt(
+            message_id="9001",
+            command_name="help",
+            author_user_id="42",
+            channel_id="99",
+            guild_id="77",
+            instance_id="instance-a",
+        )
+        assert not await database.claim_command_receipt(
+            message_id="9001",
+            command_name="help",
+            author_user_id="42",
+            channel_id="99",
+            guild_id="77",
+            instance_id="instance-b",
+        )
+
+        second_database = Database(TEST_DATABASE_URL)
+        await second_database.initialize()
+        try:
+            assert await second_database.acquire_primary_runtime_lock() is False
+        finally:
+            await second_database.close()
     finally:
         await database.close()

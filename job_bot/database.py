@@ -20,6 +20,7 @@ except ImportError:  # pragma: no cover - SQLite tests do not install postgres d
 
 
 DbRow = Mapping[str, Any]
+POSTGRES_PRIMARY_RUNTIME_LOCK_ID = 5_942_248_014_240_001_17
 
 
 def _utc_now() -> str:
@@ -322,6 +323,16 @@ CREATE TABLE IF NOT EXISTS runtime_config (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS discord_command_receipts (
+    message_id TEXT PRIMARY KEY,
+    command_name TEXT NOT NULL,
+    author_user_id TEXT NOT NULL,
+    channel_id TEXT NOT NULL,
+    guild_id TEXT,
+    claimed_at TEXT NOT NULL,
+    instance_id TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_process_role_scopes_company
     ON process_role_scopes(normalized_company, track, season_term, updated_at DESC);
 
@@ -443,6 +454,7 @@ class Database:
         self._lock = asyncio.Lock()
         self._connection = self._build_connection(dsn_or_path)
         self.backend = self._connection.backend
+        self._primary_runtime_lock_acquired = False
 
     async def initialize(self) -> None:
         async with self._lock:
@@ -462,6 +474,20 @@ class Database:
     async def close(self) -> None:
         async with self._lock:
             self._connection.close()
+
+    async def acquire_primary_runtime_lock(self) -> bool:
+        if self.backend != "postgres":
+            return True
+        async with self._lock:
+            if self._primary_runtime_lock_acquired:
+                return True
+            row = self._connection.execute(
+                "SELECT pg_try_advisory_lock(?) AS acquired",
+                (POSTGRES_PRIMARY_RUNTIME_LOCK_ID,),
+            ).fetchone()
+            acquired = bool(row and row["acquired"])
+            self._primary_runtime_lock_acquired = acquired
+            return acquired
 
     def _ensure_column(self, table_name: str, column_name: str, column_sql: str) -> None:
         columns = self._connection.column_names(table_name)
@@ -812,6 +838,44 @@ class Database:
                 ORDER BY key ASC
                 """
             ).fetchall()
+
+    async def claim_command_receipt(
+        self,
+        *,
+        message_id: str,
+        command_name: str,
+        author_user_id: str,
+        channel_id: str,
+        guild_id: Optional[str],
+        instance_id: str,
+    ) -> bool:
+        async with self._lock:
+            claimed_at = _utc_now()
+            cursor = self._connection.execute(
+                """
+                INSERT INTO discord_command_receipts (
+                    message_id,
+                    command_name,
+                    author_user_id,
+                    channel_id,
+                    guild_id,
+                    claimed_at,
+                    instance_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(message_id) DO NOTHING
+                """,
+                (
+                    message_id,
+                    command_name,
+                    author_user_id,
+                    channel_id,
+                    guild_id,
+                    claimed_at,
+                    instance_id,
+                ),
+            )
+            self._connection.commit()
+            return bool(getattr(cursor, "rowcount", 0))
 
     async def get_github_state(self, repository: str, path: str) -> Optional[DbRow]:
         async with self._lock:

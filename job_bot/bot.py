@@ -4,6 +4,8 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
+import socket
 from collections import Counter
 from datetime import datetime, timezone
 from math import ceil
@@ -194,6 +196,36 @@ def build_channel_configuration_message(
             ),
         ]
     )
+
+
+def build_runtime_instance_id(*, hostname: Optional[str] = None, pid: Optional[int] = None) -> str:
+    return f"{hostname or socket.gethostname()}:{pid or os.getpid()}"
+
+
+def build_command_receipt_payload(ctx: Any) -> Optional[dict[str, Optional[str]]]:
+    message = getattr(ctx, "message", None)
+    command = getattr(ctx, "command", None)
+    author = getattr(ctx, "author", None)
+    channel = getattr(ctx, "channel", None)
+    if message is None or command is None or author is None or channel is None:
+        return None
+
+    message_id = getattr(message, "id", None)
+    author_id = getattr(author, "id", None)
+    channel_id = getattr(channel, "id", None)
+    if message_id is None or author_id is None or channel_id is None:
+        return None
+
+    guild = getattr(ctx, "guild", None)
+    guild_id = getattr(guild, "id", None) if guild is not None else None
+    command_name = getattr(command, "qualified_name", None) or getattr(command, "name", None) or "unknown"
+    return {
+        "message_id": str(message_id),
+        "command_name": str(command_name),
+        "author_user_id": str(author_id),
+        "channel_id": str(channel_id),
+        "guild_id": str(guild_id) if guild_id is not None else None,
+    }
 
 
 def build_paginated_embed(
@@ -723,6 +755,7 @@ async def run_bot() -> None:
     config = load_config()
     configure_logging(config.log_level)
     logger = logging.getLogger("bot")
+    instance_id = build_runtime_instance_id()
     startup_channel_defaults = {
         RUNTIME_CONFIG_INTERNSHIP_CHANNEL_KEY: config.discord_channel_id,
         RUNTIME_CONFIG_NEW_GRAD_CHANNEL_KEY: config.discord_new_grad_channel_id,
@@ -736,6 +769,13 @@ async def run_bot() -> None:
 
     database = Database(config.database_dsn)
     await database.initialize()
+    if not await database.acquire_primary_runtime_lock():
+        logger.critical(
+            "Another primary runtime already holds the database lock; refusing to start command processing (instance=%s).",
+            instance_id,
+        )
+        await database.close()
+        return
     runtime_config_rows = await database.list_runtime_config()
     apply_runtime_channel_overrides(
         config,
@@ -759,6 +799,21 @@ async def run_bot() -> None:
     intents.message_content = True
     bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
     publisher.bind_bot(bot)
+
+    def _log_command_event(level: int, action: str, payload: Optional[dict[str, Optional[str]]]) -> None:
+        if payload is None:
+            return
+        logger.log(
+            level,
+            "Command %s (instance=%s, message_id=%s, command=%s, author_id=%s, channel_id=%s, guild_id=%s)",
+            action,
+            instance_id,
+            payload["message_id"],
+            payload["command_name"],
+            payload["author_user_id"],
+            payload["channel_id"],
+            payload["guild_id"],
+        )
 
     async def _runtime_config_by_key() -> dict[str, Any]:
         return {row["key"]: row for row in await database.list_runtime_config()}
@@ -822,6 +877,31 @@ async def run_bot() -> None:
         return len(refreshed)
 
     @bot.event
+    async def on_message(message: discord.Message) -> None:
+        if message.author.bot:
+            return
+
+        ctx = await bot.get_context(message)
+        if ctx.command is None:
+            return
+
+        payload = build_command_receipt_payload(ctx)
+        if payload is None:
+            logger.warning("Skipping command with incomplete receipt payload (instance=%s).", instance_id)
+            return
+
+        claimed = await database.claim_command_receipt(
+            **payload,
+            instance_id=instance_id,
+        )
+        if not claimed:
+            _log_command_event(logging.WARNING, "duplicate-skip", payload)
+            return
+
+        _log_command_event(logging.INFO, "claimed", payload)
+        await bot.invoke(ctx)
+
+    @bot.event
     async def on_ready() -> None:
         await bot.change_presence(
             status=discord.Status.online,
@@ -830,7 +910,7 @@ async def run_bot() -> None:
                 name="Maintained by KH",
             ),
         )
-        logger.info("Bot ready as %s", bot.user)
+        logger.info("Bot ready as %s (instance=%s)", bot.user, instance_id)
         scheduler.start()
         if startup_branding_refresh_companies:
             refreshed_count = await _refresh_branding_posts(startup_branding_refresh_companies)
@@ -929,12 +1009,18 @@ async def run_bot() -> None:
 
     @bot.event
     async def on_command_error(ctx: commands.Context, error: Exception) -> None:
+        payload = build_command_receipt_payload(ctx)
+        if isinstance(error, commands.CommandNotFound):
+            return
+        _log_command_event(logging.ERROR, f"failed: {type(error).__name__}", payload)
         if isinstance(error, commands.CheckFailure):
             await ctx.send(str(error))
             return
-        if isinstance(error, commands.CommandNotFound):
-            return
         raise error
+
+    @bot.event
+    async def on_command_completion(ctx: commands.Context) -> None:
+        _log_command_event(logging.INFO, "completed", build_command_receipt_payload(ctx))
 
     async def _require_job_community_profile(
         ctx: commands.Context,
