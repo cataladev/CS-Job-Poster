@@ -201,6 +201,48 @@ def test_filter_rejects_generic_ai_intern_titles(config_factory) -> None:
     assert decision.reason == "non_engineering"
 
 
+def test_filter_accepts_curated_github_main_readme_roles_even_without_software_keywords(config_factory) -> None:
+    config = config_factory()
+    job_filter = JobFilter(config)
+    job = normalize_job_posting(
+        JobPosting(
+            title="Product Manager Intern",
+            company="Example",
+            locations=["Remote in USA"],
+            source_name="github_simplify_internships",
+            track="internship",
+            url="https://example.com/job/7b",
+            summary="Listed in Product Management Internship Roles",
+            raw_data={"age": "0d", "path": "README.md", "heading": "Product Management Internship Roles"},
+        )
+    )
+
+    decision = job_filter.evaluate(job)
+
+    assert decision.accepted is True
+
+
+def test_filter_accepts_curated_github_main_readme_new_grad_roles_without_new_grad_title_signal(config_factory) -> None:
+    config = config_factory()
+    job_filter = JobFilter(config)
+    job = normalize_job_posting(
+        JobPosting(
+            title="Hardware Engineer",
+            company="Example",
+            locations=["Austin, TX"],
+            source_name="github_simplify_new_grad",
+            track="new_grad",
+            url="https://example.com/job/7c",
+            summary="Listed in Hardware Engineering New Grad Roles",
+            raw_data={"age": "1d", "path": "README.md", "heading": "Hardware Engineering New Grad Roles"},
+        )
+    )
+
+    decision = job_filter.evaluate(job)
+
+    assert decision.accepted is True
+
+
 def test_filter_rejects_non_us_roles_when_us_only_enabled(config_factory) -> None:
     config = config_factory()
     config.us_only = True

@@ -193,22 +193,28 @@ class JobFilter:
         location_text = " ".join(job.locations).lower()
         season_text = (job.season_term or "").lower()
         text = " ".join([title_text, summary_text, location_text, employment_text, season_text])
+        trusted_github_main_readme = self._is_trusted_github_main_readme_role(job)
 
-        if self._has_any_phrase(title_text, SENIORITY_DENY_TOKENS):
+        if not trusted_github_main_readme and self._has_any_phrase(title_text, SENIORITY_DENY_TOKENS):
             return FilterDecision(False, "seniority_filtered")
 
-        if not self._is_software_role(title_text, employment_text, summary_text):
+        # The curated Simplify main README is treated as an explicit allowlist
+        # for role type, track, and category wording. We still apply age,
+        # location, blacklist, and keyword filters below, but we do not require
+        # the title to independently prove that it is software/new-grad/
+        # internship flavored.
+        if not trusted_github_main_readme and not self._is_software_role(title_text, employment_text, summary_text):
             return FilterDecision(False, "non_engineering")
 
         if job.track == "internship":
-            if not self._has_internship_signal(text):
+            if not trusted_github_main_readme and not self._has_internship_signal(text):
                 return FilterDecision(False, "not_internship")
             if self._has_any_phrase(text, NEW_GRAD_TOKENS):
                 return FilterDecision(False, "new_grad_role")
             if not self.config.include_coops and self._has_any_phrase(text, {"coop", "co-op", "co op"}):
                 return FilterDecision(False, "coops_disabled")
         elif job.track == "new_grad":
-            if not self._has_new_grad_signal(text):
+            if not trusted_github_main_readme and not self._has_new_grad_signal(text):
                 return FilterDecision(False, "not_new_grad")
 
         if job.normalized_company in self.config.company_blacklist:
@@ -287,6 +293,15 @@ class JobFilter:
             if re.search(pattern, text):
                 return True
         return False
+
+    def _is_trusted_github_main_readme_role(self, job: JobPosting) -> bool:
+        if not job.source_name.startswith("github_simplify"):
+            return False
+        path = str(job.raw_data.get("path", "")).strip().lower()
+        if path != "readme.md":
+            return False
+        heading = str(job.raw_data.get("heading", "")).strip().lower()
+        return bool(heading and heading != "unknown section")
 
     def _is_us_role(self, job: JobPosting) -> bool:
         if not job.normalized_locations:
