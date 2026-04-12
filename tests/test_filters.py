@@ -63,7 +63,7 @@ def test_filter_accepts_new_grad_track(config_factory) -> None:
     assert decision.accepted is True
 
 
-def test_filter_rejects_old_jobs(config_factory) -> None:
+def test_filter_accepts_jobs_within_three_day_window(config_factory) -> None:
     config = config_factory()
     job_filter = JobFilter(config)
     job = normalize_job_posting(
@@ -79,12 +79,51 @@ def test_filter_rejects_old_jobs(config_factory) -> None:
         )
     )
     decision = job_filter.evaluate(job)
+    assert decision.accepted is True
+
+
+def test_filter_accepts_jobs_at_three_day_limit(config_factory) -> None:
+    config = config_factory()
+    job_filter = JobFilter(config)
+    job = normalize_job_posting(
+        JobPosting(
+            title="Software Engineer Intern",
+            company="Stripe",
+            locations=["Remote in USA"],
+            source_name="github",
+            track="internship",
+            url="https://example.com/job/4b",
+            summary="Backend intern role",
+            raw_data={"age": "3d"},
+        )
+    )
+    decision = job_filter.evaluate(job)
+    assert decision.accepted is True
+
+
+def test_filter_rejects_jobs_older_than_three_day_window(config_factory) -> None:
+    config = config_factory()
+    job_filter = JobFilter(config)
+    job = normalize_job_posting(
+        JobPosting(
+            title="Software Engineer Intern",
+            company="Stripe",
+            locations=["Remote in USA"],
+            source_name="github",
+            track="internship",
+            url="https://example.com/job/4c",
+            summary="Backend intern role",
+            raw_data={"age": "4d"},
+        )
+    )
+    decision = job_filter.evaluate(job)
     assert decision.accepted is False
     assert decision.reason == "age_filter"
 
 
 def test_filter_rejects_one_day_old_jobs_when_zero_day_only(config_factory) -> None:
     config = config_factory()
+    config.max_job_age_hours = 0
     job_filter = JobFilter(config)
     job = normalize_job_posting(
         JobPosting(
