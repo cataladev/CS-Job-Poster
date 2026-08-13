@@ -64,6 +64,14 @@ def test_feed_outbox_migration_preserves_and_seeds_existing_posts(monkeypatch) -
                 """,
                 (canonical_id,),
             )
+            cursor.execute(
+                """
+                INSERT INTO discord_posts (
+                    canonical_id, track, channel_id, message_id, posted_at
+                ) VALUES (%s, 'internship', '222', '789', '2026-08-12T01:00:00+00:00')
+                """,
+                (canonical_id,),
+            )
         connection.commit()
 
     command.upgrade(alembic_config, "head")
@@ -76,7 +84,9 @@ def test_feed_outbox_migration_preserves_and_seeds_existing_posts(monkeypatch) -
                 FROM discord_deliveries
                 """
             )
-            delivery = cursor.fetchone()
+            deliveries = cursor.fetchall()
+            assert len(deliveries) == 1
+            delivery = deliveries[0]
             assert delivery is not None
             assert delivery[0] == canonical_id
             assert delivery[1:] == (

@@ -1,16 +1,16 @@
 # Deferred work
 
-The MVP is intentionally a one-channel publisher. The items below must remain outside
-the posting runtime until they are designed as maintainable modules with explicit
-permissions, tests, and operational ownership.
+The MVP is intentionally a two-channel publisher with one narrowly scoped admin
+command. The items below must remain outside the posting runtime until they are
+designed as maintainable modules with explicit permissions, tests, and operational
+ownership.
 
 ## Commands and administration
 
-- Reintroduce commands through a small command service rather than coupling them to
-  feed collection or delivery.
-- Start with high-quality admin-only health, manual-run, and runtime-configuration
-  commands. Include audit logging, cooldowns, authorization tests, and clear failure
-  states.
+- Keep `/set-job-channel` isolated in its small command service and retain its
+  administrator check, permission validation, persistence, and tests.
+- Add high-quality admin-only health and manual-run commands. Include audit logging,
+  cooldowns, authorization tests, and clear failure states.
 - Add source-health views for stale feeds, schema failures, rejected-row spikes, and
   incomplete baselines.
 - Decide whether text commands are worth supporting; prefer an interaction model that

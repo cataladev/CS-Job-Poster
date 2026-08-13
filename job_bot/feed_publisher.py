@@ -16,7 +16,7 @@ def _truncate(value: object, limit: int) -> str:
     return text if len(text) <= limit else f"{text[: limit - 1]}…"
 
 
-class SingleChannelPublisher:
+class TrackChannelPublisher:
     def __init__(self, config: AppConfig, database: Database) -> None:
         self.config = config
         self.database = database
@@ -29,12 +29,30 @@ class SingleChannelPublisher:
     async def publish_pending(self) -> tuple[int, int]:
         if self.client is None or self.client.user is None:
             return 0, 0
-        deliveries = await self.database.list_deliveries_for_send(self.config.discord_channel_id)
+        sent = 0
+        reconciled = 0
+        channel_ids = await self.database.list_delivery_channel_ids_for_send()
+        for channel_id in channel_ids:
+            try:
+                channel_sent, channel_reconciled = await self._publish_channel(channel_id)
+            except (RuntimeError, discord.HTTPException) as exc:
+                self.logger.error(
+                    "delivery_channel_blocked channel=%s error=%s",
+                    channel_id,
+                    exc,
+                )
+                continue
+            sent += channel_sent
+            reconciled += channel_reconciled
+        return sent, reconciled
+
+    async def _publish_channel(self, channel_id: int) -> tuple[int, int]:
+        deliveries = await self.database.list_deliveries_for_send(channel_id)
         if not deliveries:
             return 0, 0
 
-        channel = await self._resolve_channel()
-        self._validate_permissions(channel)
+        channel = await self._resolve_channel(channel_id)
+        self.validate_channel_permissions(channel)
         existing_markers = await self._load_existing_markers(channel, deliveries)
         sent = 0
         reconciled = 0
@@ -52,7 +70,7 @@ class SingleChannelPublisher:
                     delivery_id=int(delivery["id"]),
                     canonical_id=canonical_id,
                     track=job.track,
-                    channel_id=self.config.discord_channel_id,
+                    channel_id=channel_id,
                     message_id=existing_message_id,
                 )
                 reconciled += 1
@@ -84,7 +102,7 @@ class SingleChannelPublisher:
                 delivery_id=int(delivery["id"]),
                 canonical_id=canonical_id,
                 track=job.track,
-                channel_id=self.config.discord_channel_id,
+                channel_id=channel_id,
                 message_id=int(message.id),
             )
             existing_markers[marker] = int(message.id)
@@ -137,19 +155,19 @@ class SingleChannelPublisher:
         embed.set_footer(text=f"Job Bot • {marker}")
         return embed
 
-    async def _resolve_channel(self) -> Any:
+    async def _resolve_channel(self, channel_id: int) -> Any:
         if self.client is None:
             raise RuntimeError("Discord client is not bound")
-        channel = self.client.get_channel(self.config.discord_channel_id)
+        channel = self.client.get_channel(channel_id)
         if channel is None:
-            channel = await self.client.fetch_channel(self.config.discord_channel_id)
+            channel = await self.client.fetch_channel(channel_id)
         if not hasattr(channel, "send") or not hasattr(channel, "history"):
-            raise RuntimeError("DISCORD_CHANNEL_ID must identify a message channel")
+            raise RuntimeError(f"Configured channel {channel_id} is not a message channel")
         return channel
 
-    def _validate_permissions(self, channel: Any) -> None:
+    def validate_channel_permissions(self, channel: Any, member: Any = None) -> None:
         guild = getattr(channel, "guild", None)
-        member = getattr(guild, "me", None) if guild is not None else None
+        member = member or (getattr(guild, "me", None) if guild is not None else None)
         if member is None:
             raise RuntimeError("Unable to resolve the bot member for channel permission checks")
         permissions = channel.permissions_for(member)

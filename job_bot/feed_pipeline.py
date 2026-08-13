@@ -8,7 +8,11 @@ from typing import Callable, Iterable, Protocol
 from job_bot.database import Database
 from job_bot.github_feeds import FEEDS, FeedDefinition, FeedFetchResult, GitHubFeedFetcher
 from job_bot.models import AppConfig
-from job_bot.utils.feed_normalization import external_identity_keys, role_signature
+from job_bot.utils.feed_normalization import (
+    external_identity_keys,
+    location_scoped_identity_keys,
+    role_signature,
+)
 from job_bot.utils.http import AsyncHttpClient
 from job_bot.utils.normalization import normalize_job_posting
 
@@ -121,12 +125,16 @@ class FeedPipeline:
 
                 for observation in result.observations:
                     job = normalize_job_posting(observation.to_job_posting())
-                    canonical_keys = {f"url:{job.canonical_url}"}
-                    canonical_keys.update(
+                    exact_identity_keys = {f"url:{job.canonical_url}"}
+                    exact_identity_keys.update(
                         external_identity_keys(
                             job.canonical_url or job.url,
                             company=job.normalized_company,
                         )
+                    )
+                    canonical_keys = location_scoped_identity_keys(
+                        exact_identity_keys,
+                        normalized_locations=job.normalized_locations,
                     )
                     canonical_keys.add(
                         role_signature(
@@ -137,6 +145,13 @@ class FeedPipeline:
                             normalized_locations=job.normalized_locations,
                         )
                     )
+                    channel_id = self.config.channel_id_for_track(job.track)
+                    if (
+                        job.track == "new_grad"
+                        and channel_id == self.config.discord_channel_id
+                    ):
+                        channel_id = None
+                    delivery_suppressed = suppress_delivery or channel_id is None
                     ingest = await self.database.ingest_feed_job(
                         job=job,
                         source_id=observation.source_id,
@@ -147,8 +162,8 @@ class FeedPipeline:
                         posted_date=observation.posted_date,
                         payload=asdict(observation),
                         canonical_keys=canonical_keys,
-                        channel_id=self.config.discord_channel_id,
-                        suppress_delivery=suppress_delivery,
+                        channel_id=channel_id,
+                        suppress_delivery=delivery_suppressed,
                     )
                     if ingest.created:
                         source_created += 1

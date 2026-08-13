@@ -264,6 +264,27 @@ def external_identity_keys(url: str, *, company: str = "") -> set[str]:
     return keys
 
 
+def location_scoped_identity_keys(
+    identity_keys: set[str],
+    *,
+    normalized_locations: list[str],
+) -> set[str]:
+    """Bind URL and requisition identities to the locations they describe.
+
+    The same upstream requisition can legitimately be published once per disjoint
+    location. Overlapping location sets are still merged by the role matcher.
+    """
+    location_payload = json.dumps(
+        sorted(set(normalized_locations)) or ["unknown"],
+        separators=(",", ":"),
+    )
+    location_digest = hashlib.sha256(location_payload.encode("utf-8")).hexdigest()[:20]
+    return {
+        f"{identity_key}:location:{location_digest}"
+        for identity_key in identity_keys
+    }
+
+
 def role_signature(
     *,
     track: str,

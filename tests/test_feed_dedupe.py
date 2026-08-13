@@ -8,6 +8,7 @@ from job_bot.database import Database
 from job_bot.github_feeds import JobObservation
 from job_bot.utils.feed_normalization import (
     external_identity_keys,
+    location_scoped_identity_keys,
     role_signature,
     sanitize_application_url,
 )
@@ -19,6 +20,7 @@ async def _ingest(
     observation: JobObservation,
     *,
     suppress: bool = False,
+    channel_id: int = 111,
 ):
     safe_url = sanitize_application_url(observation.application_url).url
     normalized_observation = JobObservation(
@@ -36,12 +38,16 @@ async def _ingest(
         source_ref=observation.source_ref,
     )
     job = normalize_job_posting(normalized_observation.to_job_posting())
-    keys = {f"url:{job.canonical_url}"}
-    keys.update(
+    exact_identity_keys = {f"url:{job.canonical_url}"}
+    exact_identity_keys.update(
         external_identity_keys(
             job.canonical_url or job.url,
             company=job.normalized_company,
         )
+    )
+    keys = location_scoped_identity_keys(
+        exact_identity_keys,
+        normalized_locations=job.normalized_locations,
     )
     keys.add(
         role_signature(
@@ -62,7 +68,7 @@ async def _ingest(
         posted_date=normalized_observation.posted_date,
         payload=asdict(normalized_observation),
         canonical_keys=keys,
-        channel_id=111,
+        channel_id=channel_id,
         suppress_delivery=suppress,
     )
 
@@ -113,6 +119,31 @@ async def test_cross_source_same_location_is_one_delivery(config_factory) -> Non
             "total_posted": 0,
             "total_deduplicated": 0,
         }
+        assert await database.get_delivery_counts() == {"pending": 1}
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_channel_change_cannot_queue_a_second_delivery(config_factory) -> None:
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    try:
+        first = await _ingest(
+            database,
+            _observation("source-a", "a-1", "https://careers.example.com/jobs/123"),
+            channel_id=111,
+        )
+        duplicate = await _ingest(
+            database,
+            _observation("source-b", "b-1", "https://apply.example.com/openings/987"),
+            channel_id=222,
+        )
+
+        assert first.canonical_id == duplicate.canonical_id
+        assert len(await database.list_deliveries_for_send(111)) == 1
+        assert await database.list_deliveries_for_send(222) == []
         assert await database.get_delivery_counts() == {"pending": 1}
     finally:
         await database.close()
@@ -281,7 +312,7 @@ async def test_source_edit_and_tracking_variants_do_not_requeue(config_factory) 
 
 
 @pytest.mark.asyncio
-async def test_new_identity_evidence_transactionally_merges_existing_canonicals(
+async def test_identity_evidence_does_not_merge_disjoint_locations(
     config_factory,
 ) -> None:
     config = config_factory()
@@ -313,9 +344,10 @@ async def test_new_identity_evidence_transactionally_merges_existing_canonicals(
         )
 
         assert not bridge.created
-        assert len(bridge.merged_canonical_ids) == 1
-        assert (await database.get_stats())["total_canonical_jobs"] == 1
-        assert await database.get_delivery_counts() == {"pending": 1}
+        assert bridge.canonical_id == austin.canonical_id
+        assert bridge.merged_canonical_ids == []
+        assert (await database.get_stats())["total_canonical_jobs"] == 2
+        assert await database.get_delivery_counts() == {"pending": 2}
     finally:
         await database.close()
 
@@ -365,7 +397,6 @@ async def test_alternate_greenhouse_urls_share_one_requisition(config_factory) -
                 "source-b",
                 "careers-copy",
                 "https://careers.example.com/openings/software?gh_jid=12345",
-                location="Remote, United States",
             ),
         )
 
@@ -373,6 +404,39 @@ async def test_alternate_greenhouse_urls_share_one_requisition(config_factory) -
         assert not careers_copy.created
         assert (await database.get_stats())["total_canonical_jobs"] == 1
         assert await database.get_delivery_counts() == {"pending": 1}
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_same_requisition_in_disjoint_locations_remains_distinct(
+    config_factory,
+) -> None:
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    try:
+        austin = await _ingest(
+            database,
+            _observation(
+                "source-a",
+                "austin-copy",
+                "https://job-boards.greenhouse.io/example/jobs/12345",
+            ),
+        )
+        boston = await _ingest(
+            database,
+            _observation(
+                "source-b",
+                "boston-copy",
+                "https://careers.example.com/openings/software?gh_jid=12345",
+                location="Boston, MA",
+            ),
+        )
+
+        assert austin.created and boston.created
+        assert austin.canonical_id != boston.canonical_id
+        assert await database.get_delivery_counts() == {"pending": 2}
     finally:
         await database.close()
 

@@ -8,7 +8,7 @@ import discord
 import pytest
 
 from job_bot.database import Database
-from job_bot.feed_publisher import SingleChannelPublisher
+from job_bot.feed_publisher import TrackChannelPublisher
 from job_bot.github_feeds import JobObservation
 from job_bot.utils.feed_normalization import role_signature, sanitize_application_url
 from job_bot.utils.normalization import normalize_job_posting
@@ -48,26 +48,35 @@ class FakeChannel:
 class FakeClient:
     def __init__(self, channel):
         self.user = SimpleNamespace(id=42)
-        self.channel = channel
+        self.channels = channel if isinstance(channel, dict) else {111: channel}
 
-    def get_channel(self, _channel_id):
-        return self.channel
+    def get_channel(self, channel_id):
+        return self.channels.get(channel_id)
 
-    async def fetch_channel(self, _channel_id):
-        return self.channel
+    async def fetch_channel(self, channel_id):
+        return self.channels.get(channel_id)
 
 
-async def _create_pending_delivery(database: Database) -> None:
+async def _create_pending_delivery(
+    database: Database,
+    *,
+    track: str = "internship",
+    channel_id: int = 111,
+    external_id: str = "job-1",
+) -> None:
+    title = "Software Engineer Intern" if track == "internship" else "Software Engineer"
     observation = JobObservation(
         source_id="source",
         source_label="Source",
         source_url="https://github.com/owner/source",
-        external_id="job-1",
+        external_id=external_id,
         company="Example Corp",
-        title="Software Engineer Intern",
+        title=title,
         locations=["Austin, TX"],
-        application_url=sanitize_application_url("https://jobs.example.com/1").url,
-        track="internship",
+        application_url=sanitize_application_url(
+            f"https://jobs.example.com/{external_id}"
+        ).url,
+        track=track,
         cycle="Summer 2027",
     )
     job = normalize_job_posting(observation.to_job_posting())
@@ -88,7 +97,7 @@ async def _create_pending_delivery(database: Database) -> None:
         posted_date=None,
         payload=asdict(observation),
         canonical_keys={f"url:{job.canonical_url}", key},
-        channel_id=111,
+        channel_id=channel_id,
         suppress_delivery=False,
     )
 
@@ -111,7 +120,7 @@ async def test_crash_window_reconciles_marker_without_second_send(config_factory
             embeds=[embed],
         )
         channel = FakeChannel([existing_message])
-        publisher = SingleChannelPublisher(config, database)
+        publisher = TrackChannelPublisher(config, database)
         publisher.bind_client(FakeClient(channel))  # type: ignore[arg-type]
 
         sent, reconciled = await publisher.publish_pending()
@@ -126,16 +135,40 @@ async def test_crash_window_reconciles_marker_without_second_send(config_factory
 
 
 @pytest.mark.asyncio
-async def test_both_tracks_use_the_single_configured_channel(config_factory) -> None:
+async def test_tracks_publish_to_their_separate_configured_channels(config_factory) -> None:
     config = config_factory()
     database = Database(config.sqlite_db_path)
     await database.initialize()
     try:
-        publisher = SingleChannelPublisher(config, database)
-        assert publisher.config.discord_channel_id == 111
-        assert publisher.config.discord_new_grad_channel_id == 222
-        # The MVP publisher has no track router; every outbox query uses the one channel.
-        assert await database.list_deliveries_for_send(publisher.config.discord_channel_id) == []
+        await _create_pending_delivery(database, track="internship", channel_id=111)
+        await _create_pending_delivery(
+            database,
+            track="new_grad",
+            channel_id=222,
+            external_id="new-grad-1",
+        )
+        internship_channel = FakeChannel([])
+        new_grad_channel = FakeChannel([])
+        publisher = TrackChannelPublisher(config, database)
+        publisher.bind_client(  # type: ignore[arg-type]
+            FakeClient({111: internship_channel, 222: new_grad_channel})
+        )
+
+        sent, reconciled = await publisher.publish_pending()
+
+        assert (sent, reconciled) == (2, 0)
+        assert len(internship_channel.sent) == 1
+        assert len(new_grad_channel.sent) == 1
+        assert next(
+            field.value
+            for field in internship_channel.sent[0].fields
+            if field.name == "Track"
+        ) == "Internship"
+        assert next(
+            field.value
+            for field in new_grad_channel.sent[0].fields
+            if field.name == "Track"
+        ) == "New Grad"
     finally:
         await database.close()
 
@@ -154,11 +187,10 @@ async def test_missing_history_permission_fails_closed(config_factory) -> None:
             read_message_history=False,
         )
         channel = FakeChannel([], permissions=permissions)
-        publisher = SingleChannelPublisher(config, database)
+        publisher = TrackChannelPublisher(config, database)
         publisher.bind_client(FakeClient(channel))  # type: ignore[arg-type]
 
-        with pytest.raises(RuntimeError, match="read_message_history"):
-            await publisher.publish_pending()
+        assert await publisher.publish_pending() == (0, 0)
 
         assert channel.sent == []
         assert await database.get_delivery_counts() == {"pending": 1}
@@ -174,7 +206,7 @@ async def test_ambiguous_send_stays_uncertain_until_marker_reconciliation(config
     try:
         await _create_pending_delivery(database)
         channel = FakeChannel([], send_error=asyncio.TimeoutError("unknown outcome"))
-        publisher = SingleChannelPublisher(config, database)
+        publisher = TrackChannelPublisher(config, database)
         publisher.bind_client(FakeClient(channel))  # type: ignore[arg-type]
 
         sent, reconciled = await publisher.publish_pending()
@@ -208,12 +240,12 @@ async def test_embed_omits_feed_credit_and_contains_safe_apply_link(config_facto
         job = (await database.get_canonical_jobs([int(delivery["canonical_id"])]))[0]
         metadata = await database.get_feed_observation_metadata(int(delivery["canonical_id"]))
         metadata["posted_date"] = "2026-08-13"
-        publisher = SingleChannelPublisher(config, database)
+        publisher = TrackChannelPublisher(config, database)
 
         embed = publisher.build_embed(job, marker=delivery["marker"], metadata=metadata)
 
-        assert embed.url == "https://jobs.example.com/1"
-        assert embed.description == "[Apply here](https://jobs.example.com/1)"
+        assert embed.url == "https://jobs.example.com/job-1"
+        assert embed.description == "[Apply here](https://jobs.example.com/job-1)"
         assert {field.name for field in embed.fields} == {
             "Company",
             "Location",

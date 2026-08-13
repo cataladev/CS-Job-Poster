@@ -419,6 +419,9 @@ CREATE INDEX IF NOT EXISTS idx_feed_keys_canonical
 
 CREATE INDEX IF NOT EXISTS idx_discord_deliveries_state
     ON discord_deliveries(channel_id, state, created_at);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_discord_deliveries_canonical
+    ON discord_deliveries(canonical_id);
 """
 
 POSTGRES_SCHEMA = SQLITE_SCHEMA.replace(
@@ -1038,7 +1041,7 @@ class Database:
         posted_date: Optional[str],
         payload: Mapping[str, Any],
         canonical_keys: Iterable[str],
-        channel_id: int,
+        channel_id: Optional[int],
         suppress_delivery: bool,
     ) -> FeedIngestResult:
         keys = sorted(set(canonical_keys))
@@ -1073,12 +1076,20 @@ class Database:
                 if job.canonical_url:
                     rows = self._connection.execute(
                         """
-                        SELECT DISTINCT canonical_id FROM fingerprints
-                        WHERE fingerprint_key = ?
+                        SELECT DISTINCT c.id, c.normalized_locations
+                        FROM fingerprints f
+                        JOIN canonical_jobs c ON c.id = f.canonical_id
+                        WHERE f.fingerprint_key = ?
                         """,
                         (f"url:{job.canonical_url}",),
                     ).fetchall()
-                    candidate_ids.update(int(row["canonical_id"]) for row in rows)
+                    job_locations = set(job.normalized_locations)
+                    for row in rows:
+                        candidate_locations = set(
+                            json.loads(row["normalized_locations"] or "[]")
+                        )
+                        if job_locations.intersection(candidate_locations):
+                            candidate_ids.add(int(row["id"]))
 
                 job_locations = set(job.normalized_locations)
                 rows = self._connection.execute(
@@ -1245,13 +1256,13 @@ class Database:
                     )
 
                 delivery_state: Optional[str] = None
-                channel = str(channel_id)
+                channel = str(channel_id or 0)
                 existing_delivery = self._connection.execute(
                     """
                     SELECT id FROM discord_deliveries
-                    WHERE canonical_id = ? AND channel_id = ?
+                    WHERE canonical_id = ?
                     """,
-                    (canonical_id, channel),
+                    (canonical_id,),
                 ).fetchone()
                 if not existing_delivery:
                     delivery_state = "suppressed" if suppress_delivery else "pending"
@@ -1314,11 +1325,8 @@ class Database:
             ).fetchall()
             for duplicate_delivery in duplicate_deliveries:
                 survivor_delivery = self._connection.execute(
-                    """
-                    SELECT * FROM discord_deliveries
-                    WHERE canonical_id = ? AND channel_id = ?
-                    """,
-                    (survivor, duplicate_delivery["channel_id"]),
+                    "SELECT * FROM discord_deliveries WHERE canonical_id = ?",
+                    (survivor,),
                 ).fetchone()
                 if not survivor_delivery:
                     self._connection.execute(
@@ -1396,6 +1404,63 @@ class Database:
                 """,
                 (str(channel_id),),
             ).fetchall()
+
+    async def list_delivery_channel_ids_for_send(self) -> List[int]:
+        async with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT DISTINCT channel_id
+                FROM discord_deliveries
+                WHERE state IN ('pending', 'sending', 'uncertain')
+                  AND channel_id <> '0'
+                ORDER BY channel_id ASC
+                """
+            ).fetchall()
+        return [int(row["channel_id"]) for row in rows]
+
+    async def reassign_unsent_deliveries_for_track(
+        self,
+        *,
+        track: str,
+        channel_id: int,
+    ) -> int:
+        """Move safe-to-reroute deliveries without replaying sent/uncertain jobs."""
+        async with self._lock:
+            try:
+                rows = self._connection.execute(
+                    """
+                    SELECT d.id, d.canonical_id, d.channel_id
+                    FROM discord_deliveries d
+                    JOIN canonical_jobs c ON c.id = d.canonical_id
+                    WHERE c.track = ? AND d.state IN ('suppressed', 'pending')
+                    """,
+                    (track,),
+                ).fetchall()
+                moved = 0
+                target_channel = str(channel_id)
+                for row in rows:
+                    if str(row["channel_id"]) == target_channel:
+                        continue
+                    canonical_id = int(row["canonical_id"])
+                    self._connection.execute(
+                        """
+                        UPDATE discord_deliveries
+                        SET channel_id = ?, marker = ?, updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            target_channel,
+                            self._delivery_marker(canonical_id, target_channel),
+                            _utc_now(),
+                            row["id"],
+                        ),
+                    )
+                    moved += 1
+                self._connection.commit()
+                return moved
+            except Exception:
+                self._connection.rollback()
+                raise
 
     async def get_delivery_counts(self) -> Dict[str, int]:
         async with self._lock:
