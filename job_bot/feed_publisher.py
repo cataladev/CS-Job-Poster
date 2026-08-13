@@ -132,28 +132,8 @@ class SingleChannelPublisher:
             value=_truncate(job.season_term or "Not stated", 1_024),
             inline=True,
         )
-        source_links: list[str] = []
-        seen_sources: set[tuple[str, str]] = set()
-        for source in metadata.get("sources") or []:
-            label = str(source.get("label") or "Source")
-            url = str(source.get("url") or "")
-            source_ref = str(source.get("ref") or "")
-            display = f"{label} — {source_ref}" if source_ref else label
-            identity = (display, url)
-            if identity in seen_sources:
-                continue
-            seen_sources.add(identity)
-            source_links.append(
-                f"[{display}]({url})" if url.startswith("https://") else display
-            )
-        sources = source_links or metadata.get("source_labels") or job.source_names or ["Unknown"]
-        embed.add_field(
-            name="Source(s)",
-            value=_truncate(", ".join(sources), 1_024),
-            inline=False,
-        )
         if metadata.get("posted_date"):
-            embed.add_field(name="Source date", value=metadata["posted_date"], inline=True)
+            embed.add_field(name="Posted", value=metadata["posted_date"], inline=True)
         embed.set_footer(text=f"Job Bot • {marker}")
         return embed
 

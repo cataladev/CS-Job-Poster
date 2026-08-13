@@ -198,7 +198,7 @@ async def test_ambiguous_send_stays_uncertain_until_marker_reconciliation(config
 
 
 @pytest.mark.asyncio
-async def test_embed_contains_lean_role_provenance_and_safe_apply_link(config_factory) -> None:
+async def test_embed_omits_feed_credit_and_contains_safe_apply_link(config_factory) -> None:
     config = config_factory()
     database = Database(config.sqlite_db_path)
     await database.initialize()
@@ -207,6 +207,7 @@ async def test_embed_contains_lean_role_provenance_and_safe_apply_link(config_fa
         delivery = (await database.list_deliveries_for_send(111))[0]
         job = (await database.get_canonical_jobs([int(delivery["canonical_id"])]))[0]
         metadata = await database.get_feed_observation_metadata(int(delivery["canonical_id"]))
+        metadata["posted_date"] = "2026-08-13"
         publisher = SingleChannelPublisher(config, database)
 
         embed = publisher.build_embed(job, marker=delivery["marker"], metadata=metadata)
@@ -218,10 +219,10 @@ async def test_embed_contains_lean_role_provenance_and_safe_apply_link(config_fa
             "Location",
             "Track",
             "Cycle",
-            "Source(s)",
+            "Posted",
         }
-        sources = next(field.value for field in embed.fields if field.name == "Source(s)")
-        assert sources == "[Source](https://github.com/owner/source)"
+        assert all(field.name != "Source(s)" for field in embed.fields)
+        assert "github.com/owner/source" not in str(embed.to_dict())
         assert delivery["marker"] in embed.footer.text
     finally:
         await database.close()
