@@ -128,7 +128,9 @@ async def test_postgres_backend_can_initialize_and_persist() -> None:
 
         stats = await database.get_stats()
         assert stats["total_canonical_jobs"] == 1
-        assert stats["total_jobs_found"] == 1
+        # The legacy row and the feed observation are separate provenance variants,
+        # even though deduplication keeps them under one canonical job.
+        assert stats["total_jobs_found"] == 2
 
         runtime_row = await database.set_runtime_config_value(
             "discord_channel_id",
