@@ -54,13 +54,17 @@ class AsyncHttpClient:
                 if response.status in expected_status:
                     return response
                 if response.status in {429, 500, 502, 503, 504}:
-                    await response.release()
+                    response.release()
+                    last_error = RuntimeError(f"{method} {url} returned {response.status}")
+                    if attempt >= self._retries:
+                        break
                     await asyncio.sleep(min(2 ** attempt, 8))
                     attempt += 1
                     continue
                 text = await response.text()
+                response.release()
                 raise RuntimeError(f"{method} {url} returned {response.status}: {text[:200]}")
-            except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError) as exc:
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
                 last_error = exc
                 if attempt >= self._retries:
                     break

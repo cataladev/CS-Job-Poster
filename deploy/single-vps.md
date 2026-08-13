@@ -18,9 +18,8 @@ To do the first deploy directly from your machine, I need:
 - the production env values:
   - `DISCORD_TOKEN`
   - `DISCORD_CHANNEL_ID`
-  - `DISCORD_NEW_GRAD_CHANNEL_ID` if you use it
-  - `ENABLE_NEW_GRAD_SOURCE`
-  - any non-default source filters you actually want in production
+  - `DATABASE_URL`
+  - `POSTGRES_PASSWORD`
 - whether admin SSH stays on `22` or already moved to another port
 
 The important operational constraint is that the SSH auth must already work non-interactively from this Mac. If your key needs a passphrase prompt, load it into `ssh-agent` first.
@@ -115,13 +114,19 @@ POSTGRES_DB=jobbot
 POSTGRES_USER=jobbot
 POSTGRES_PASSWORD=<long-random-password>
 DATABASE_URL=postgresql://jobbot:<long-random-password>@localhost:5432/jobbot
-SCHEDULED_RUN_HOURS=12,20
-SCHEDULE_TIMEZONE=America/New_York
-US_ONLY=true
-MAX_JOB_AGE_HOURS=0
+POLL_INTERVAL_SECONDS=300
+REQUEST_TIMEOUT_SECONDS=20
+REQUEST_RETRIES=2
+SOURCE_CONCURRENCY=6
+PUBLISH_DELAY_SECONDS=1.0
 ```
 
 Do not open port `5432` in the firewall. The compose file now binds Postgres to loopback only.
+
+The Discord bot role must have **View Channel**, **Send Messages**, **Embed Links**,
+and **Read Message History** in the configured channel. History access is mandatory:
+the service refuses to publish without it because delivery reconciliation would not
+be safe.
 
 ## 4. Verify the service
 
@@ -187,6 +192,8 @@ Workflow behavior:
 4. trigger `job-bot-auto-update.service`
 
 This means both deploy paths reuse the same server-side update logic.
+GitHub Actions is a test-and-deploy gate only; do not add an Actions-based publisher
+alongside the long-running service.
 
 ## 7. Firewall and operational checks
 

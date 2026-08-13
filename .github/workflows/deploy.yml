@@ -1,6 +1,9 @@
 name: Deploy
 
 on:
+  pull_request:
+    branches:
+      - main
   push:
     branches:
       - main
@@ -40,6 +43,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install -e .
+
+      - name: Verify Postgres migrations
+        run: alembic upgrade head
 
       - name: Run test suite
         run: pytest tests -q

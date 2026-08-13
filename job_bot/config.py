@@ -106,15 +106,16 @@ def load_config() -> AppConfig:
         enable_new_grad_source=enable_new_grad_source,
         request_timeout_seconds=int(os.getenv("REQUEST_TIMEOUT_SECONDS", "20")),
         request_retries=int(os.getenv("REQUEST_RETRIES", "2")),
-        source_concurrency=int(os.getenv("SOURCE_CONCURRENCY", "6")),
+        source_concurrency=max(1, int(os.getenv("SOURCE_CONCURRENCY", "6"))),
         publish_delay_seconds=float(os.getenv("PUBLISH_DELAY_SECONDS", "1.0")),
         max_job_age_hours=int(os.getenv("MAX_JOB_AGE_HOURS", "72")),
         user_agent=os.getenv(
             "USER_AGENT",
-            "internship-aggregator-bot/1.0 (+https://github.com/SimplifyJobs)",
+            "cs-job-poster/2.0",
         ),
         company_seed_path=os.getenv("COMPANY_SEED_PATH", "data/company_watchlist_seed.csv"),
         source_settings=source_settings,
+        poll_interval_seconds=max(30, int(os.getenv("POLL_INTERVAL_SECONDS", "300"))),
     )
 
     _apply_source_overrides(config)

@@ -1,27 +1,53 @@
-# TODO
+# Deferred work
 
-This file tracks follow-up work that is useful, but intentionally not required for the current stable runtime.
+The MVP is intentionally a one-channel publisher. The items below must remain outside
+the posting runtime until they are designed as maintainable modules with explicit
+permissions, tests, and operational ownership.
 
-## Process Tracking
+## Commands and administration
 
-- Add a lightweight admin review queue for notes that were auto-hidden after reports.
-- Add Discord command tests that exercise the DM-first process flow end to end.
-- Add slash-command parity for the main process commands once the text-command UX is stable.
-- Decide when it is safe to remove the legacy company-only process tables after enough migrations have happened.
+- Reintroduce commands through a small command service rather than coupling them to
+  feed collection or delivery.
+- Start with high-quality admin-only health, manual-run, and runtime-configuration
+  commands. Include audit logging, cooldowns, authorization tests, and clear failure
+  states.
+- Add source-health views for stale feeds, schema failures, rejected-row spikes, and
+  incomplete baselines.
+- Decide whether text commands are worth supporting; prefer an interaction model that
+  does not require Message Content Intent.
 
-## Jobs / Sources
+## Process tracking and watchlists
 
-- Keep improving non-GitHub source freshness so the bot is less dependent on the Simplify repos.
-- Harden noisy Workday and Wellfound adapters or disable them per-source when they regress.
-- Add more source fixtures for format drift in ATS/company-page parsing.
+- Reintroduce private application-process tracking as a separate feature boundary.
+- Reintroduce watchlist discovery, requests, approvals, and staff moderation only
+  after the publishing path has production evidence behind it.
+- Design migrations away from the preserved legacy process/watchlist tables when
+  their compatibility window ends.
 
-## Database / Ops
+## Source expansion and scraping
 
-- Expand Postgres coverage beyond the current smoke path into more of the process-tracking tables.
-- Add a CI job that runs the Postgres-backed integration path automatically.
-- Move more schema evolution into Alembic over time so runtime bootstrap stays thin.
+- Add direct ATS and company-careers-page ingestion inspired by Keryx's resilient
+  structured-source approach.
+- Prefer Greenhouse, Lever, Ashby, Workday, and other machine-readable endpoints over
+  rendered-page scraping.
+- Give each new feed an explicit schema, health policy, provenance, fixtures, and
+  silent first baseline.
+- Add guarded browser scraping only where no stable structured source exists.
 
-## Discord UX
+## Job lifecycle and presentation
 
-- Add richer per-role filters to `!recent` and watchlist browsing.
-- Consider a staff-only moderation summary command for hidden/deleted process notes.
+- Add confirmed closure and reopen handling using repeated evidence rather than one
+  missing or failed snapshot.
+- Support post edits only with idempotent delivery state and Discord receipt repair.
+- Add verified company branding, logos, compensation normalization, and richer role
+  enrichment without guessed domains.
+- Add source-health alerts and an operator dashboard.
+
+## Reliability and cleanup
+
+- Add production metrics for fetch latency, feed freshness, canonical merge reasons,
+  outbox age, uncertain deliveries, and history-reconciliation duration.
+- Exercise crash-after-send and concurrent-worker scenarios against a real Discord
+  test channel in a controlled integration environment.
+- Remove disconnected legacy command, scraping, branding, and watchlist runtime code
+  after its data migration and rollback window are complete.
