@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import sqlite3
@@ -8,7 +9,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
-from job_bot.models import CanonicalJob, JobPosting
+from job_bot.models import CanonicalJob, FeedIngestResult, JobPosting
+from job_bot.utils.feed_normalization import role_signature, role_title_key
 from job_bot.utils.normalization import normalize_company_name
 
 try:
@@ -333,6 +335,61 @@ CREATE TABLE IF NOT EXISTS discord_command_receipts (
     instance_id TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS feed_state (
+    source_id TEXT PRIMARY KEY,
+    repository TEXT NOT NULL,
+    path TEXT NOT NULL,
+    etag TEXT,
+    content_sha TEXT,
+    last_modified TEXT,
+    baseline_complete INTEGER NOT NULL DEFAULT 0,
+    last_checked_at TEXT NOT NULL,
+    last_success_at TEXT,
+    last_error TEXT
+);
+
+CREATE TABLE IF NOT EXISTS app_state (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS feed_observations (
+    source_id TEXT NOT NULL,
+    external_id TEXT NOT NULL,
+    canonical_id INTEGER NOT NULL REFERENCES canonical_jobs(id) ON DELETE CASCADE,
+    source_label TEXT NOT NULL,
+    source_url TEXT NOT NULL,
+    source_ref TEXT NOT NULL DEFAULT '',
+    posted_date TEXT,
+    payload TEXT NOT NULL,
+    first_seen TEXT NOT NULL,
+    last_seen TEXT NOT NULL,
+    PRIMARY KEY(source_id, external_id)
+);
+
+CREATE TABLE IF NOT EXISTS feed_canonical_keys (
+    canonical_key TEXT PRIMARY KEY,
+    canonical_id INTEGER NOT NULL REFERENCES canonical_jobs(id) ON DELETE CASCADE,
+    key_type TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS discord_deliveries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    canonical_id INTEGER NOT NULL REFERENCES canonical_jobs(id) ON DELETE CASCADE,
+    channel_id TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('suppressed', 'pending', 'sending', 'uncertain', 'sent')),
+    marker TEXT NOT NULL UNIQUE,
+    message_id TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    sent_at TEXT,
+    UNIQUE(canonical_id, channel_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_process_role_scopes_company
     ON process_role_scopes(normalized_company, track, season_term, updated_at DESC);
 
@@ -350,6 +407,18 @@ CREATE INDEX IF NOT EXISTS idx_process_role_notes_status
 
 CREATE INDEX IF NOT EXISTS idx_process_activity_events_user_type
     ON process_activity_events(user_id, event_type, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_feed_observations_canonical
+    ON feed_observations(canonical_id, source_id);
+
+CREATE INDEX IF NOT EXISTS idx_feed_canonical_match
+    ON canonical_jobs(track, normalized_company, season_term);
+
+CREATE INDEX IF NOT EXISTS idx_feed_keys_canonical
+    ON feed_canonical_keys(canonical_id);
+
+CREATE INDEX IF NOT EXISTS idx_discord_deliveries_state
+    ON discord_deliveries(channel_id, state, created_at);
 """
 
 POSTGRES_SCHEMA = SQLITE_SCHEMA.replace(
@@ -385,6 +454,9 @@ class _SQLiteConnectionAdapter:
     def commit(self) -> None:
         self._connection.commit()
 
+    def rollback(self) -> None:
+        self._connection.rollback()
+
     def close(self) -> None:
         self._connection.close()
 
@@ -418,6 +490,9 @@ class _PostgresConnectionAdapter:
 
     def commit(self) -> None:
         self._connection.commit()
+
+    def rollback(self) -> None:
+        self._connection.rollback()
 
     def close(self) -> None:
         self._connection.close()
@@ -467,8 +542,10 @@ class Database:
             self._ensure_column("company_watchlist", "logo_verified_at", "TEXT")
             self._ensure_column("company_requests", "homepage_url", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column("job_application_statuses", "notes", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column("feed_observations", "source_ref", "TEXT NOT NULL DEFAULT ''")
             self._migrate_legacy_process_notes()
             self._migrate_legacy_process_roles()
+            self._seed_legacy_deliveries()
             self._connection.commit()
 
     async def close(self) -> None:
@@ -729,6 +806,40 @@ class Database:
                 ),
             )
 
+    def _seed_legacy_deliveries(self) -> None:
+        rows = self._connection.execute(
+            """
+            SELECT canonical_id, channel_id, message_id, posted_at
+            FROM discord_posts
+            """
+        ).fetchall()
+        for row in rows:
+            canonical_id = int(row["canonical_id"])
+            channel_id = str(row["channel_id"])
+            marker = self._delivery_marker(canonical_id, channel_id)
+            self._connection.execute(
+                """
+                INSERT OR IGNORE INTO discord_deliveries (
+                    canonical_id, channel_id, state, marker, message_id, attempts,
+                    last_error, created_at, updated_at, sent_at
+                ) VALUES (?, ?, 'sent', ?, ?, 1, NULL, ?, ?, ?)
+                """,
+                (
+                    canonical_id,
+                    channel_id,
+                    marker,
+                    str(row["message_id"]),
+                    row["posted_at"],
+                    row["posted_at"],
+                    row["posted_at"],
+                ),
+            )
+
+    @staticmethod
+    def _delivery_marker(canonical_id: int, channel_id: str) -> str:
+        digest = hashlib.sha256(f"{canonical_id}:{channel_id}".encode("utf-8")).hexdigest()[:20]
+        return f"jobbot:{digest}"
+
     def _latest_process_note_join_sql(self) -> str:
         return """
             LEFT JOIN (
@@ -788,6 +899,609 @@ class Database:
             "SELECT * FROM process_notes WHERE id = ?",
             (note_id,),
         ).fetchone()
+
+    async def get_feed_state(self, source_id: str) -> Optional[DbRow]:
+        async with self._lock:
+            return self._connection.execute(
+                "SELECT * FROM feed_state WHERE source_id = ?",
+                (source_id,),
+            ).fetchone()
+
+    async def record_feed_success(
+        self,
+        *,
+        source_id: str,
+        repository: str,
+        path: str,
+        etag: Optional[str],
+        content_sha: Optional[str],
+        last_modified: Optional[str],
+        baseline_complete: bool = True,
+    ) -> None:
+        async with self._lock:
+            now = _utc_now()
+            self._connection.execute(
+                """
+                INSERT INTO feed_state (
+                    source_id, repository, path, etag, content_sha, last_modified,
+                    baseline_complete, last_checked_at, last_success_at, last_error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                ON CONFLICT(source_id) DO UPDATE SET
+                    repository = excluded.repository,
+                    path = excluded.path,
+                    etag = excluded.etag,
+                    content_sha = COALESCE(excluded.content_sha, feed_state.content_sha),
+                    last_modified = excluded.last_modified,
+                    baseline_complete = CASE
+                        WHEN feed_state.baseline_complete = 1 THEN 1
+                        ELSE excluded.baseline_complete
+                    END,
+                    last_checked_at = excluded.last_checked_at,
+                    last_success_at = excluded.last_success_at,
+                    last_error = NULL
+                """,
+                (
+                    source_id,
+                    repository,
+                    path,
+                    etag,
+                    content_sha,
+                    last_modified,
+                    1 if baseline_complete else 0,
+                    now,
+                    now,
+                ),
+            )
+            self._connection.commit()
+
+    async def record_feed_not_modified(self, source_id: str) -> None:
+        async with self._lock:
+            now = _utc_now()
+            self._connection.execute(
+                """
+                UPDATE feed_state
+                SET last_checked_at = ?, last_success_at = ?, last_error = NULL
+                WHERE source_id = ?
+                """,
+                (now, now, source_id),
+            )
+            self._connection.commit()
+
+    async def record_feed_error(
+        self,
+        *,
+        source_id: str,
+        repository: str,
+        path: str,
+        error: str,
+    ) -> None:
+        async with self._lock:
+            now = _utc_now()
+            self._connection.execute(
+                """
+                INSERT INTO feed_state (
+                    source_id, repository, path, etag, content_sha, last_modified,
+                    baseline_complete, last_checked_at, last_success_at, last_error
+                ) VALUES (?, ?, ?, NULL, NULL, NULL, 0, ?, NULL, ?)
+                ON CONFLICT(source_id) DO UPDATE SET
+                    last_checked_at = excluded.last_checked_at,
+                    last_error = excluded.last_error
+                """,
+                (source_id, repository, path, now, error[:2_000]),
+            )
+            self._connection.commit()
+
+    async def is_initial_feed_baseline_complete(self) -> bool:
+        async with self._lock:
+            row = self._connection.execute(
+                "SELECT value FROM app_state WHERE key = 'initial_feed_baseline_complete'"
+            ).fetchone()
+            return bool(row and row["value"] == "true")
+
+    async def complete_initial_feed_baseline_if_ready(self, source_ids: Iterable[str]) -> bool:
+        values = sorted(set(source_ids))
+        if not values:
+            return False
+        placeholders = ", ".join("?" for _ in values)
+        async with self._lock:
+            row = self._connection.execute(
+                f"""
+                SELECT COUNT(*) AS count
+                FROM feed_state
+                WHERE source_id IN ({placeholders}) AND baseline_complete = 1
+                """,
+                values,
+            ).fetchone()
+            if not row or int(row["count"]) != len(values):
+                return False
+            now = _utc_now()
+            self._connection.execute(
+                """
+                INSERT INTO app_state (key, value, updated_at)
+                VALUES ('initial_feed_baseline_complete', 'true', ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+                """,
+                (now,),
+            )
+            self._connection.commit()
+            return True
+
+    async def ingest_feed_job(
+        self,
+        *,
+        job: JobPosting,
+        source_id: str,
+        external_id: str,
+        source_label: str,
+        source_url: str,
+        source_ref: str,
+        posted_date: Optional[str],
+        payload: Mapping[str, Any],
+        canonical_keys: Iterable[str],
+        channel_id: int,
+        suppress_delivery: bool,
+    ) -> FeedIngestResult:
+        keys = sorted(set(canonical_keys))
+        feed_dedupe_fingerprint = role_signature(
+            track=job.track,
+            company=job.normalized_company,
+            title=job.normalized_title,
+            cycle=job.season_term,
+            normalized_locations=job.normalized_locations,
+        )
+        async with self._lock:
+            try:
+                candidate_ids: set[int] = set()
+                observation = self._connection.execute(
+                    """
+                    SELECT canonical_id FROM feed_observations
+                    WHERE source_id = ? AND external_id = ?
+                    """,
+                    (source_id, external_id),
+                ).fetchone()
+                if observation:
+                    candidate_ids.add(int(observation["canonical_id"]))
+
+                if keys:
+                    placeholders = ", ".join("?" for _ in keys)
+                    rows = self._connection.execute(
+                        f"SELECT DISTINCT canonical_id FROM feed_canonical_keys WHERE canonical_key IN ({placeholders})",
+                        keys,
+                    ).fetchall()
+                    candidate_ids.update(int(row["canonical_id"]) for row in rows)
+
+                if job.canonical_url:
+                    rows = self._connection.execute(
+                        """
+                        SELECT DISTINCT canonical_id FROM fingerprints
+                        WHERE fingerprint_key = ?
+                        """,
+                        (f"url:{job.canonical_url}",),
+                    ).fetchall()
+                    candidate_ids.update(int(row["canonical_id"]) for row in rows)
+
+                job_locations = set(job.normalized_locations)
+                rows = self._connection.execute(
+                    """
+                    SELECT id, normalized_title, normalized_locations, season_term
+                    FROM canonical_jobs
+                    WHERE track = ? AND normalized_company = ?
+                    """,
+                    (job.track, job.normalized_company),
+                ).fetchall()
+                for row in rows:
+                    candidate_locations = set(json.loads(row["normalized_locations"] or "[]"))
+                    same_cycle = (row["season_term"] or "").casefold() == (
+                        job.season_term or ""
+                    ).casefold()
+                    same_title = role_title_key(
+                        row["normalized_title"], row["season_term"]
+                    ) == role_title_key(job.normalized_title, job.season_term)
+                    if same_cycle and same_title and job_locations.intersection(candidate_locations):
+                        candidate_ids.add(int(row["id"]))
+
+                merged_ids: List[int] = []
+                if candidate_ids:
+                    canonical_id, merged_ids = self._merge_feed_canonicals_locked(candidate_ids)
+                    created = False
+                else:
+                    now = _utc_now()
+                    canonical_id = self._insert_and_get_id(
+                        """
+                        INSERT INTO canonical_jobs (
+                            track, title, company, location, summary, canonical_url,
+                            season_term, employment_type, remote_status, status,
+                            normalized_company, normalized_title, normalized_locations,
+                            dedupe_fingerprint, source_names, provenance_tags, first_seen, last_seen
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            job.track,
+                            job.title,
+                            job.company,
+                            job.location_display,
+                            job.summary,
+                            job.canonical_url or job.url,
+                            job.season_term,
+                            job.employment_type,
+                            job.remote_status,
+                            "active",
+                            job.normalized_company,
+                            job.normalized_title,
+                            _json_dump(job.normalized_locations),
+                            feed_dedupe_fingerprint,
+                            _json_dump([source_id]),
+                            _json_dump(job.provenance_tags),
+                            now,
+                            now,
+                        ),
+                    )
+                    created = True
+
+                canonical_row = self._connection.execute(
+                    "SELECT source_names, provenance_tags, summary FROM canonical_jobs WHERE id = ?",
+                    (canonical_id,),
+                ).fetchone()
+                existing_sources = json.loads(canonical_row["source_names"] or "[]")
+                existing_provenance = json.loads(canonical_row["provenance_tags"] or "[]")
+                merged_sources = sorted(set(existing_sources + [source_id]))
+                merged_provenance = sorted(set(existing_provenance + list(job.provenance_tags)))
+                self._connection.execute(
+                    """
+                    UPDATE canonical_jobs
+                    SET last_seen = ?, source_names = ?, provenance_tags = ?,
+                        summary = COALESCE(NULLIF(summary, ''), ?),
+                        canonical_url = ?, status = 'active'
+                    WHERE id = ?
+                    """,
+                    (
+                        _utc_now(),
+                        _json_dump(merged_sources),
+                        _json_dump(merged_provenance),
+                        job.summary,
+                        job.canonical_url or job.url,
+                        canonical_id,
+                    ),
+                )
+
+                variant_key = self._variant_key(job)
+                self._connection.execute(
+                    """
+                    INSERT OR IGNORE INTO job_variants (
+                        canonical_id, track, source_name, source_job_id, url, canonical_url,
+                        title, company, location, summary, posted_date, date_found, season_term,
+                        employment_type, remote_status, status, normalized_company,
+                        normalized_title, normalized_locations, external_ids, alternate_urls,
+                        provenance_tags, raw_data, row_hash, variant_key
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        canonical_id,
+                        job.track,
+                        source_id,
+                        external_id,
+                        job.url,
+                        job.canonical_url or job.url,
+                        job.title,
+                        job.company,
+                        job.location_display,
+                        job.summary,
+                        posted_date,
+                        job.date_found.isoformat(),
+                        job.season_term,
+                        job.employment_type,
+                        job.remote_status,
+                        "active",
+                        job.normalized_company,
+                        job.normalized_title,
+                        _json_dump(job.normalized_locations),
+                        _json_dump(job.external_ids),
+                        _json_dump(job.alternate_urls),
+                        _json_dump(job.provenance_tags),
+                        _json_dump(job.raw_data),
+                        job.row_hash,
+                        variant_key,
+                    ),
+                )
+                self._store_fingerprints(canonical_id, job)
+
+                now = _utc_now()
+                self._connection.execute(
+                    """
+                    INSERT INTO feed_observations (
+                        source_id, external_id, canonical_id, source_label, source_url, source_ref,
+                        posted_date, payload, first_seen, last_seen
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(source_id, external_id) DO UPDATE SET
+                        canonical_id = excluded.canonical_id,
+                        source_label = excluded.source_label,
+                        source_url = excluded.source_url,
+                        source_ref = excluded.source_ref,
+                        posted_date = COALESCE(excluded.posted_date, feed_observations.posted_date),
+                        payload = excluded.payload,
+                        last_seen = excluded.last_seen
+                    """,
+                    (
+                        source_id,
+                        external_id,
+                        canonical_id,
+                        source_label,
+                        source_url,
+                        source_ref,
+                        posted_date,
+                        _json_dump(payload),
+                        now,
+                        now,
+                    ),
+                )
+                for canonical_key in keys:
+                    self._connection.execute(
+                        """
+                        INSERT OR IGNORE INTO feed_canonical_keys (
+                            canonical_key, canonical_id, key_type, created_at
+                        ) VALUES (?, ?, ?, ?)
+                        """,
+                        (canonical_key, canonical_id, canonical_key.split(":", 1)[0], now),
+                    )
+
+                delivery_state: Optional[str] = None
+                channel = str(channel_id)
+                existing_delivery = self._connection.execute(
+                    """
+                    SELECT id FROM discord_deliveries
+                    WHERE canonical_id = ? AND channel_id = ?
+                    """,
+                    (canonical_id, channel),
+                ).fetchone()
+                if not existing_delivery:
+                    delivery_state = "suppressed" if suppress_delivery else "pending"
+                    self._connection.execute(
+                        """
+                        INSERT OR IGNORE INTO discord_deliveries (
+                            canonical_id, channel_id, state, marker, message_id, attempts,
+                            last_error, created_at, updated_at, sent_at
+                        ) VALUES (?, ?, ?, ?, NULL, 0, NULL, ?, ?, NULL)
+                        """,
+                        (
+                            canonical_id,
+                            channel,
+                            delivery_state,
+                            self._delivery_marker(canonical_id, channel),
+                            now,
+                            now,
+                        ),
+                    )
+
+                self._connection.commit()
+                return FeedIngestResult(
+                    canonical_id=canonical_id,
+                    created=created,
+                    duplicate=not created,
+                    merged_canonical_ids=merged_ids,
+                    delivery_state=delivery_state,
+                )
+            except Exception:
+                self._connection.rollback()
+                raise
+
+    def _merge_feed_canonicals_locked(self, canonical_ids: Iterable[int]) -> tuple[int, List[int]]:
+        values = sorted(set(int(value) for value in canonical_ids))
+        if not values:
+            raise ValueError("canonical_ids cannot be empty")
+        survivor = values[0]
+        duplicates = values[1:]
+        if not duplicates:
+            return survivor, []
+
+        placeholders = ", ".join("?" for _ in values)
+        canonical_rows = self._connection.execute(
+            f"SELECT id, source_names, provenance_tags, last_seen FROM canonical_jobs WHERE id IN ({placeholders})",
+            values,
+        ).fetchall()
+        source_names: set[str] = set()
+        provenance_tags: set[str] = set()
+        last_seen = ""
+        for row in canonical_rows:
+            source_names.update(json.loads(row["source_names"] or "[]"))
+            provenance_tags.update(json.loads(row["provenance_tags"] or "[]"))
+            last_seen = max(last_seen, str(row["last_seen"] or ""))
+
+        delivery_rank = {"suppressed": 0, "pending": 1, "sending": 2, "uncertain": 3, "sent": 4}
+        for duplicate in duplicates:
+            duplicate_deliveries = self._connection.execute(
+                "SELECT * FROM discord_deliveries WHERE canonical_id = ?",
+                (duplicate,),
+            ).fetchall()
+            for duplicate_delivery in duplicate_deliveries:
+                survivor_delivery = self._connection.execute(
+                    """
+                    SELECT * FROM discord_deliveries
+                    WHERE canonical_id = ? AND channel_id = ?
+                    """,
+                    (survivor, duplicate_delivery["channel_id"]),
+                ).fetchone()
+                if not survivor_delivery:
+                    self._connection.execute(
+                        "UPDATE discord_deliveries SET canonical_id = ? WHERE id = ?",
+                        (survivor, duplicate_delivery["id"]),
+                    )
+                elif delivery_rank.get(duplicate_delivery["state"], -1) > delivery_rank.get(
+                    survivor_delivery["state"], -1
+                ):
+                    self._connection.execute(
+                        "DELETE FROM discord_deliveries WHERE id = ?",
+                        (survivor_delivery["id"],),
+                    )
+                    self._connection.execute(
+                        "UPDATE discord_deliveries SET canonical_id = ? WHERE id = ?",
+                        (survivor, duplicate_delivery["id"]),
+                    )
+                else:
+                    self._connection.execute(
+                        "DELETE FROM discord_deliveries WHERE id = ?",
+                        (duplicate_delivery["id"],),
+                    )
+
+            duplicate_posts = self._connection.execute(
+                "SELECT id, channel_id FROM discord_posts WHERE canonical_id = ?",
+                (duplicate,),
+            ).fetchall()
+            for post in duplicate_posts:
+                existing = self._connection.execute(
+                    "SELECT id FROM discord_posts WHERE canonical_id = ? AND channel_id = ?",
+                    (survivor, post["channel_id"]),
+                ).fetchone()
+                if existing:
+                    self._connection.execute("DELETE FROM discord_posts WHERE id = ?", (post["id"],))
+                else:
+                    self._connection.execute(
+                        "UPDATE discord_posts SET canonical_id = ? WHERE id = ?",
+                        (survivor, post["id"]),
+                    )
+
+            for table in (
+                "job_variants",
+                "fingerprints",
+                "dedupe_matches",
+                "feed_observations",
+                "feed_canonical_keys",
+            ):
+                self._connection.execute(
+                    f"UPDATE {table} SET canonical_id = ? WHERE canonical_id = ?",
+                    (survivor, duplicate),
+                )
+            self._connection.execute(
+                "UPDATE process_role_scopes SET canonical_job_id = ? WHERE canonical_job_id = ?",
+                (survivor, duplicate),
+            )
+            self._connection.execute("DELETE FROM canonical_jobs WHERE id = ?", (duplicate,))
+
+        self._connection.execute(
+            """
+            UPDATE canonical_jobs
+            SET source_names = ?, provenance_tags = ?, last_seen = ?
+            WHERE id = ?
+            """,
+            (_json_dump(sorted(source_names)), _json_dump(sorted(provenance_tags)), last_seen, survivor),
+        )
+        return survivor, duplicates
+
+    async def list_deliveries_for_send(self, channel_id: int) -> List[DbRow]:
+        async with self._lock:
+            return self._connection.execute(
+                """
+                SELECT * FROM discord_deliveries
+                WHERE channel_id = ? AND state IN ('pending', 'sending', 'uncertain')
+                ORDER BY created_at ASC, id ASC
+                """,
+                (str(channel_id),),
+            ).fetchall()
+
+    async def get_delivery_counts(self) -> Dict[str, int]:
+        async with self._lock:
+            rows = self._connection.execute(
+                "SELECT state, COUNT(*) AS count FROM discord_deliveries GROUP BY state"
+            ).fetchall()
+        return {str(row["state"]): int(row["count"]) for row in rows}
+
+    async def mark_delivery_sending(self, delivery_id: int) -> None:
+        async with self._lock:
+            try:
+                self._connection.execute(
+                    """
+                    UPDATE discord_deliveries
+                    SET state = 'sending', attempts = attempts + 1, last_error = NULL, updated_at = ?
+                    WHERE id = ? AND state IN ('pending', 'sending', 'uncertain')
+                    """,
+                    (_utc_now(), delivery_id),
+                )
+                self._connection.commit()
+            except Exception:
+                self._connection.rollback()
+                raise
+
+    async def mark_delivery_uncertain(self, delivery_id: int, error: str) -> None:
+        async with self._lock:
+            try:
+                self._connection.execute(
+                    """
+                    UPDATE discord_deliveries
+                    SET state = 'uncertain', last_error = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (error[:2_000], _utc_now(), delivery_id),
+                )
+                self._connection.commit()
+            except Exception:
+                self._connection.rollback()
+                raise
+
+    async def mark_delivery_sent(
+        self,
+        *,
+        delivery_id: int,
+        canonical_id: int,
+        track: str,
+        channel_id: int,
+        message_id: int,
+    ) -> None:
+        async with self._lock:
+            try:
+                now = _utc_now()
+                self._connection.execute(
+                    """
+                    UPDATE discord_deliveries
+                    SET state = 'sent', message_id = ?, last_error = NULL, updated_at = ?, sent_at = ?
+                    WHERE id = ?
+                    """,
+                    (str(message_id), now, now, delivery_id),
+                )
+                self._connection.execute(
+                    """
+                    INSERT OR IGNORE INTO discord_posts (
+                        canonical_id, track, channel_id, message_id, posted_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (canonical_id, track, str(channel_id), str(message_id), now),
+                )
+                self._connection.commit()
+            except Exception:
+                self._connection.rollback()
+                raise
+
+    async def get_feed_observation_metadata(self, canonical_id: int) -> Dict[str, Any]:
+        async with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT source_id, source_label, source_url, source_ref, posted_date
+                FROM feed_observations
+                WHERE canonical_id = ?
+                ORDER BY source_label ASC, source_id ASC
+                """,
+                (canonical_id,),
+            ).fetchall()
+        labels = []
+        seen = set()
+        dates = []
+        for row in rows:
+            if row["source_label"] not in seen:
+                seen.add(row["source_label"])
+                labels.append(row["source_label"])
+            if row["posted_date"]:
+                dates.append(row["posted_date"])
+        return {
+            "source_labels": labels,
+            "sources": [
+                {
+                    "label": row["source_label"],
+                    "url": row["source_url"],
+                    "ref": row["source_ref"],
+                }
+                for row in rows
+                if row["source_label"] and row["source_url"]
+            ],
+            "posted_date": min(dates) if dates else None,
+        }
 
     async def get_runtime_config_value(self, key: str) -> Optional[DbRow]:
         async with self._lock:

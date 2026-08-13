@@ -158,6 +158,15 @@ class RunStats:
 
 
 @dataclass
+class FeedIngestResult:
+    canonical_id: int
+    created: bool
+    duplicate: bool
+    merged_canonical_ids: List[int] = field(default_factory=list)
+    delivery_state: Optional[str] = None
+
+
+@dataclass
 class SourceSettings:
     name: str
     source_type: str
@@ -197,6 +206,7 @@ class AppConfig:
     user_agent: str
     company_seed_path: str
     source_settings: Dict[str, SourceSettings]
+    poll_interval_seconds: int = 300
 
     def channel_id_for_track(self, track: str) -> Optional[int]:
         if track == "new_grad":

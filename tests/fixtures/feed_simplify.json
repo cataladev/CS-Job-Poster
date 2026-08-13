@@ -1,0 +1,32 @@
+[
+  {
+    "company_name": "Example Corp",
+    "id": "us-1",
+    "title": "Software Engineer Intern",
+    "active": true,
+    "is_visible": true,
+    "terms": ["Summer 2027"],
+    "date_posted": 1782864000,
+    "url": "https://jobs.example.com/roles/1?utm_source=github",
+    "locations": ["Austin, TX"]
+  },
+  {
+    "company_name": "Canada Corp",
+    "id": "ca-1",
+    "title": "Software Engineer Intern",
+    "active": true,
+    "is_visible": true,
+    "terms": ["Summer 2027"],
+    "url": "https://jobs.canadacorp.com/roles/1",
+    "locations": ["Toronto, ON, Canada"]
+  },
+  {
+    "company_name": "Closed Corp",
+    "id": "closed-1",
+    "title": "Software Engineer Intern",
+    "active": false,
+    "is_visible": true,
+    "url": "https://jobs.closedcorp.com/roles/1",
+    "locations": ["Austin, TX"]
+  }
+]

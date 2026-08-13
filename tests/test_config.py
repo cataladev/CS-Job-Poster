@@ -3,7 +3,7 @@ from pathlib import Path
 from job_bot.config import load_config
 
 
-def test_load_config_defaults_to_fixed_daily_schedule(monkeypatch, tmp_path) -> None:
+def test_load_config_defaults_to_five_minute_poll(monkeypatch, tmp_path) -> None:
     monkeypatch.chdir(tmp_path)
     Path("config").mkdir()
     for key in [
@@ -16,6 +16,7 @@ def test_load_config_defaults_to_fixed_daily_schedule(monkeypatch, tmp_path) -> 
         "DATABASE_URL",
         "SQLITE_DB_PATH",
         "SOURCE_CONFIG_PATH",
+        "POLL_INTERVAL_SECONDS",
     ]:
         monkeypatch.delenv(key, raising=False)
 
@@ -26,6 +27,17 @@ def test_load_config_defaults_to_fixed_daily_schedule(monkeypatch, tmp_path) -> 
     assert config.database_url == ""
     assert config.database_dsn == "job_bot.db"
     assert config.max_job_age_hours == 72
+    assert config.poll_interval_seconds == 300
+
+
+def test_poll_interval_has_safe_minimum(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    Path("config").mkdir()
+    monkeypatch.setenv("POLL_INTERVAL_SECONDS", "5")
+
+    config = load_config()
+
+    assert config.poll_interval_seconds == 30
 
 
 def test_load_config_prefers_database_url_over_sqlite_path(monkeypatch, tmp_path) -> None:

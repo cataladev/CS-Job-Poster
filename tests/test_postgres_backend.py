@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import os
+from dataclasses import asdict
 
 import psycopg
 import pytest
 
 from job_bot.database import Database
+from job_bot.github_feeds import JobObservation
 from job_bot.models import JobPosting
+from job_bot.utils.feed_normalization import role_signature
+from job_bot.utils.normalization import normalize_job_posting
 
 
 TEST_DATABASE_URL = os.getenv(
@@ -83,6 +87,44 @@ async def test_postgres_backend_can_initialize_and_persist() -> None:
         assert canonical_id > 0
         assert created is True
         assert refresh_required is False
+
+        observation = JobObservation(
+            source_id="simplify_internships",
+            source_label="Simplify",
+            source_url="https://github.com/SimplifyJobs/Summer2027-Internships",
+            external_id="stripe-123",
+            company="Stripe",
+            title="Software Engineer Intern",
+            locations=["New York, NY"],
+            application_url="https://stripe.com/jobs/123",
+            track="internship",
+        )
+        normalized = normalize_job_posting(observation.to_job_posting())
+        ingest = await database.ingest_feed_job(
+            job=normalized,
+            source_id=observation.source_id,
+            external_id=observation.external_id,
+            source_label=observation.source_label,
+            source_url=observation.source_url,
+            source_ref=observation.source_ref,
+            posted_date=None,
+            payload=asdict(observation),
+            canonical_keys={
+                f"url:{normalized.canonical_url}",
+                role_signature(
+                    track=normalized.track,
+                    company=normalized.normalized_company,
+                    title=normalized.normalized_title,
+                    cycle=normalized.season_term,
+                    normalized_locations=normalized.normalized_locations,
+                ),
+            },
+            channel_id=111,
+            suppress_delivery=True,
+        )
+        assert ingest.canonical_id == canonical_id
+        assert ingest.delivery_state == "suppressed"
+        assert await database.get_delivery_counts() == {"suppressed": 1}
 
         stats = await database.get_stats()
         assert stats["total_canonical_jobs"] == 1

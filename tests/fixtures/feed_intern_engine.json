@@ -1,0 +1,17 @@
+{
+  "generated_at": "2026-08-13T00:00:00Z",
+  "jobs": [
+    {
+      "id": "greenhouse:example:123",
+      "company": "Example Corp",
+      "title": "Software Engineer Intern",
+      "season": "Summer 2027",
+      "location": "Austin, TX, United States",
+      "url": "https://job-boards.greenhouse.io/example/jobs/123?gh_jid=123&utm_source=feed",
+      "posted_at": "2026-08-12T15:00:00Z",
+      "program": "Internship",
+      "category": "Software",
+      "source": "greenhouse"
+    }
+  ]
+}
