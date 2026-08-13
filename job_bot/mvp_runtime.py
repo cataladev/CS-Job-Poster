@@ -5,16 +5,28 @@ import logging
 import time
 
 import discord
+from discord import app_commands
 
-from job_bot.config import configure_logging, load_config
+from job_bot.config import apply_runtime_channel_overrides, configure_logging, load_config
 from job_bot.database import Database
 from job_bot.feed_pipeline import FeedPipeline
-from job_bot.feed_publisher import SingleChannelPublisher
+from job_bot.feed_publisher import TrackChannelPublisher
+from job_bot.job_channel_commands import (
+    JobChannelConfigurator,
+    register_job_channel_commands,
+)
 from job_bot.models import AppConfig
 
 
 class FeedDiscordClient(discord.Client):
-    def __init__(self, *, config: AppConfig, pipeline: FeedPipeline) -> None:
+    def __init__(
+        self,
+        *,
+        config: AppConfig,
+        database: Database,
+        pipeline: FeedPipeline,
+        publisher: TrackChannelPublisher,
+    ) -> None:
         intents = discord.Intents.default()
         intents.message_content = False
         intents.members = False
@@ -22,16 +34,33 @@ class FeedDiscordClient(discord.Client):
         self.config = config
         self.pipeline = pipeline
         self.logger = logging.getLogger(self.__class__.__name__)
+        self.tree = app_commands.CommandTree(self)
+        self.channel_configurator = JobChannelConfigurator(config, database)
+        register_job_channel_commands(
+            self.tree,
+            configurator=self.channel_configurator,
+            publisher=publisher,
+        )
         self._poll_task: asyncio.Task[None] | None = None
         self._shutdown = asyncio.Event()
+        self._guild_commands_synced = False
+
+    async def setup_hook(self) -> None:
+        await self.tree.sync()
 
     async def on_ready(self) -> None:
         self.logger.info(
-            "posting_runtime_ready user=%s channel=%s poll_interval_seconds=%s",
+            "posting_runtime_ready user=%s internship_channel=%s new_grad_channel=%s poll_interval_seconds=%s",
             self.user,
             self.config.discord_channel_id,
+            self.config.discord_new_grad_channel_id,
             self.config.poll_interval_seconds,
         )
+        if not self._guild_commands_synced:
+            for guild in self.guilds:
+                self.tree.copy_global_to(guild=guild)
+                await self.tree.sync(guild=guild)
+            self._guild_commands_synced = True
         await self.change_presence(
             status=discord.Status.online,
             activity=discord.Activity(
@@ -89,10 +118,29 @@ async def run_bot() -> None:
         await database.close()
         return
 
-    publisher = SingleChannelPublisher(config, database)
+    runtime_config_rows = await database.list_runtime_config()
+    apply_runtime_channel_overrides(
+        config,
+        {str(row["key"]): row for row in runtime_config_rows},
+    )
+    if (
+        config.discord_new_grad_channel_id is None
+        or config.discord_new_grad_channel_id == config.discord_channel_id
+    ):
+        logger.warning(
+            "new_grad_channel_unconfigured new-grad deliveries will be suppressed until "
+            "/set-job-channel configures a separate channel"
+        )
+
+    publisher = TrackChannelPublisher(config, database)
     client: FeedDiscordClient
     pipeline = FeedPipeline(config=config, database=database, publisher=publisher)
-    client = FeedDiscordClient(config=config, pipeline=pipeline)
+    client = FeedDiscordClient(
+        config=config,
+        database=database,
+        pipeline=pipeline,
+        publisher=publisher,
+    )
     publisher.bind_client(client)
     try:
         await client.start(config.discord_token)

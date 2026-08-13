@@ -41,30 +41,36 @@ class StubFetcher:
         )
 
 
-def _feed(source_id: str) -> FeedDefinition:
+def _feed(source_id: str, *, track: str = "internship") -> FeedDefinition:
     return FeedDefinition(
         source_id,
         source_id,
         f"owner/{source_id}",
         "main",
         "README.md",
-        "internship",
+        track,
         parse_markdown_table,
         trusted_us=True,
     )
 
 
-def _job(source_id: str, external_id: str, *, location: str = "Austin, TX") -> JobObservation:
+def _job(
+    source_id: str,
+    external_id: str,
+    *,
+    location: str = "Austin, TX",
+    track: str = "internship",
+) -> JobObservation:
     return JobObservation(
         source_id=source_id,
         source_label=source_id,
         source_url=f"https://github.com/owner/{source_id}",
         external_id=external_id,
         company=f"Example {external_id} Corp",
-        title="Software Engineer Intern",
+        title="Software Engineer Intern" if track == "internship" else "Software Engineer",
         locations=[location],
         application_url=f"https://jobs.example.com/{external_id}",
-        track="internship",
+        track=track,
         cycle="Summer 2027",
     )
 
@@ -233,3 +239,75 @@ async def test_restart_preserves_baseline_and_pending_identity(config_factory) -
         }
     finally:
         await third_database.close()
+
+
+@pytest.mark.asyncio
+async def test_internship_and_new_grad_jobs_queue_to_separate_channels(config_factory) -> None:
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    feeds = (
+        _feed("internships", track="internship"),
+        _feed("new-grads", track="new_grad"),
+    )
+    fetcher = StubFetcher(
+        {
+            "internships": [_job("internships", "intern-1")],
+            "new-grads": [_job("new-grads", "grad-1", track="new_grad")],
+        }
+    )
+    pipeline = FeedPipeline(
+        config=config,
+        database=database,
+        publisher=StubPublisher(),
+        feeds=feeds,
+        fetcher=fetcher,
+    )
+    try:
+        assert (await pipeline.run()).baseline_completed
+
+        fetcher.snapshots["internships"].append(_job("internships", "intern-2"))
+        fetcher.snapshots["new-grads"].append(
+            _job("new-grads", "grad-2", track="new_grad")
+        )
+        update = await pipeline.run()
+
+        assert update.deliveries_queued == 2
+        assert len(await database.list_deliveries_for_send(111)) == 1
+        assert len(await database.list_deliveries_for_send(222)) == 1
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_new_grad_jobs_are_suppressed_when_channel_is_not_separate(
+    config_factory,
+) -> None:
+    config = config_factory()
+    config.discord_new_grad_channel_id = config.discord_channel_id
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    feed = _feed("new-grads", track="new_grad")
+    fetcher = StubFetcher(
+        {"new-grads": [_job("new-grads", "grad-1", track="new_grad")]}
+    )
+    pipeline = FeedPipeline(
+        config=config,
+        database=database,
+        publisher=StubPublisher(),
+        feeds=(feed,),
+        fetcher=fetcher,
+    )
+    try:
+        assert (await pipeline.run()).baseline_completed
+        fetcher.snapshots["new-grads"].append(
+            _job("new-grads", "grad-2", track="new_grad")
+        )
+
+        update = await pipeline.run()
+
+        assert update.deliveries_queued == 0
+        assert await database.list_delivery_channel_ids_for_send() == []
+        assert await database.get_delivery_counts() == {"suppressed": 2}
+    finally:
+        await database.close()

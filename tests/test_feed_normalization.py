@@ -1,6 +1,7 @@
 from job_bot.utils.feed_normalization import (
     external_identity_keys,
     is_us_location,
+    location_scoped_identity_keys,
     sanitize_application_url,
 )
 
@@ -41,3 +42,23 @@ def test_us_location_requires_evidence_unless_feed_is_trusted() -> None:
     assert not is_us_location("Remote in Canada", trusted_us=True)
     assert is_us_location("Remote", trusted_us=True)
     assert not is_us_location("Remote", trusted_us=False)
+
+
+def test_exact_identity_keys_are_scoped_to_location() -> None:
+    identity = {"ats:greenhouse:123", "url:https://jobs.example.com/123"}
+
+    austin = location_scoped_identity_keys(
+        identity,
+        normalized_locations=["austin tx"],
+    )
+    austin_reordered = location_scoped_identity_keys(
+        identity,
+        normalized_locations=["austin tx", "austin tx"],
+    )
+    boston = location_scoped_identity_keys(
+        identity,
+        normalized_locations=["boston ma"],
+    )
+
+    assert austin == austin_reordered
+    assert austin.isdisjoint(boston)

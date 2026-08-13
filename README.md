@@ -3,8 +3,9 @@
 A focused Discord publisher for curated U.S. internships and new-grad roles.
 
 The bot polls six feeds from five GitHub repositories, combines every successful
-snapshot, removes duplicates across sources, and publishes newly added roles to one
-Discord channel. It does not scrape company sites or expose bot commands in the MVP.
+snapshot, removes duplicates across sources, and publishes newly added roles to
+separate internship and new-grad Discord channels. It does not scrape company sites;
+its only MVP command configures those posting channels.
 
 ## Runtime behavior
 
@@ -16,12 +17,16 @@ Discord channel. It does not scrape company sites or expose bot commands in the 
 - Requires explicit U.S. evidence in Simplify's mixed-location data. Files explicitly
   scoped to U.S. roles are trusted unless a row clearly names a foreign location.
 - Applies no title, category, seniority, season, or job-age filter.
-- Sends internships and new-grad roles to the same `DISCORD_CHANNEL_ID`.
+- Sends internships to `DISCORD_CHANNEL_ID` and new-grad roles to
+  `DISCORD_NEW_GRAD_CHANNEL_ID`.
+- Suppresses new-grad delivery when its channel is unset or matches the internship
+  channel; it never falls back to posting new-grad roles with internships.
 - Never treats an upstream edit to an existing source row as a new job.
 
 The executable entrypoint is `bot.py`. It starts a minimal `discord.Client` without
-Message Content Intent; the legacy command modules are retained only for data
-compatibility and are not connected to the runtime.
+Message Content Intent and exposes one admin-only slash command. The legacy text
+command modules are retained only for data compatibility and are not connected to
+the runtime.
 
 ## Feeds
 
@@ -43,11 +48,13 @@ Duplicate prevention is persistent and happens before Discord delivery:
 
 1. Every upstream row is recorded by `(source_id, external_id)`.
 2. Canonical keys cover sanitized application URLs, stable ATS requisition IDs, and a
-   normalized company/title/cycle/location signature.
-3. Cross-source copies with the same requisition are merged. Matching
-   company/title/cycle roles merge when their locations overlap; distinct
-   requisitions with disjoint locations remain distinct.
-4. A transactional outbox permits only one delivery per canonical job and channel.
+   normalized company/title/cycle/location signature. URL and requisition identities
+   are location-scoped.
+3. Matching company/title/cycle roles merge whenever their normalized locations
+   overlap. Disjoint locations remain distinct, even when repositories reuse the same
+   application URL or requisition ID.
+4. A transactional outbox permits only one delivery globally per canonical
+   role/location, so a channel change cannot replay an already known job.
 5. Every embed contains a stable delivery marker. Before a send or retry, the bot
    searches channel history for that marker and repairs the receipt when Discord
    accepted an earlier request whose database commit was interrupted.
@@ -67,6 +74,17 @@ Create a bot and grant it these channel permissions:
 
 Read Message History is required for duplicate reconciliation. The bot fails closed
 before publishing if any permission is missing. Message Content Intent is not needed.
+Invite the bot with application-command support so the slash command is available.
+
+Server administrators can configure either posting channel without restarting:
+
+```text
+/set-job-channel track:<Internships|New grad> channel:<channel>
+```
+
+The command verifies all four posting permissions, refuses to assign both tracks to
+the same channel, persists the setting in Postgres, and safely moves only suppressed
+or pending deliveries. Sent or uncertain deliveries are never replayed.
 
 ## Configuration
 
@@ -75,6 +93,7 @@ Copy `.env.example` to `.env`. These values are required for production:
 ```dotenv
 DISCORD_TOKEN=replace-me
 DISCORD_CHANNEL_ID=123456789012345678
+DISCORD_NEW_GRAD_CHANNEL_ID=234567890123456789
 DATABASE_URL=postgresql://jobbot:jobbot@localhost:5432/jobbot
 ```
 
@@ -143,4 +162,5 @@ post editing, branding, and enrichment.
 - `job_bot/feed_pipeline.py` — concurrent collection, silent baselines, ingestion.
 - `job_bot/database.py` — observations, canonical merging, delivery outbox.
 - `job_bot/feed_publisher.py` — Discord embeds and marker reconciliation.
-- `job_bot/mvp_runtime.py` — one-client scheduler and process lock.
+- `job_bot/job_channel_commands.py` — persisted admin-only channel configuration.
+- `job_bot/mvp_runtime.py` — one-client scheduler, slash commands, and process lock.

@@ -18,6 +18,7 @@ To do the first deploy directly from your machine, I need:
 - the production env values:
   - `DISCORD_TOKEN`
   - `DISCORD_CHANNEL_ID`
+  - `DISCORD_NEW_GRAD_CHANNEL_ID`
   - `DATABASE_URL`
   - `POSTGRES_PASSWORD`
 - whether admin SSH stays on `22` or already moved to another port
@@ -102,6 +103,7 @@ The required values are:
 
 - `DISCORD_TOKEN`
 - `DISCORD_CHANNEL_ID`
+- `DISCORD_NEW_GRAD_CHANNEL_ID`
 - `DATABASE_URL`
 - `POSTGRES_PASSWORD`
 
@@ -114,6 +116,8 @@ POSTGRES_DB=jobbot
 POSTGRES_USER=jobbot
 POSTGRES_PASSWORD=<long-random-password>
 DATABASE_URL=postgresql://jobbot:<long-random-password>@localhost:5432/jobbot
+DISCORD_CHANNEL_ID=<internship-channel-id>
+DISCORD_NEW_GRAD_CHANNEL_ID=<new-grad-channel-id>
 POLL_INTERVAL_SECONDS=300
 REQUEST_TIMEOUT_SECONDS=20
 REQUEST_RETRIES=2
@@ -124,9 +128,10 @@ PUBLISH_DELAY_SECONDS=1.0
 Do not open port `5432` in the firewall. The compose file now binds Postgres to loopback only.
 
 The Discord bot role must have **View Channel**, **Send Messages**, **Embed Links**,
-and **Read Message History** in the configured channel. History access is mandatory:
-the service refuses to publish without it because delivery reconciliation would not
-be safe.
+and **Read Message History** in both configured channels. History access is mandatory:
+the service refuses to publish to a channel without it because delivery reconciliation
+would not be safe. Administrators can later change either destination with
+`/set-job-channel`; the database override survives restarts and deployments.
 
 ## 4. Verify the service
 
