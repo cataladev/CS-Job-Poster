@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -68,6 +69,26 @@ class JobObservation:
 Parser = Callable[[str, "FeedDefinition"], tuple[list[JobObservation], int]]
 
 
+# Jobright's public visitor endpoint supports larger windows than its HTML listing,
+# but its pagination becomes unreliable at deeper offsets. Two complementary first
+# windows provide fresh coverage without turning every poll into a bulk crawl.
+JOBRIGHT_PUBLIC_WINDOW_SIZE = 100
+JOBRIGHT_PUBLIC_SORT_CONDITIONS = (0, 1)
+JOBRIGHT_NEW_GRAD_SIGNALS = (
+    "new grad",
+    "new graduate",
+    "entry level",
+    "early career",
+    "university graduate",
+    "university grad",
+    "software engineer i",
+    "software engineer 1",
+    "software developer i",
+    "software developer 1",
+    "associate software engineer",
+)
+
+
 @dataclass(frozen=True)
 class FeedDefinition:
     source_id: str
@@ -80,6 +101,10 @@ class FeedDefinition:
     trusted_us: bool = False
     cycle_hint: str | None = None
     fetch_url: str | None = None
+    provider: str | None = None
+    company_name: str | None = None
+    poll_interval_seconds: int = 0
+    required_for_baseline: bool = True
 
     @property
     def source_url(self) -> str:
@@ -103,6 +128,7 @@ class FeedFetchResult:
     last_modified: str | None
     content_sha: str | None
     not_modified: bool = False
+    skipped: bool = False
 
 
 def _sequence(value: object) -> Sequence[object]:
@@ -443,12 +469,16 @@ def parse_jobright_next_data(text: str, definition: FeedDefinition) -> tuple[lis
     except json.JSONDecodeError as exc:
         raise ValueError(f"{definition.source_id} returned invalid Next.js JSON") from exc
 
-    if not isinstance(payload, Mapping):
-        raise ValueError(f"{definition.source_id} returned an invalid Next.js payload")
-    props = payload.get("props")
-    page_props = props.get("pageProps") if isinstance(props, Mapping) else None
-    job_list = page_props.get("jobList") if isinstance(page_props, Mapping) else None
-    if not isinstance(job_list, list) or not job_list:
+    page_props = _jobright_page_props(payload, definition)
+    return parse_jobright_public_cards(page_props["jobList"], definition)
+
+
+def parse_jobright_public_cards(
+    job_list: Sequence[object],
+    definition: FeedDefinition,
+) -> tuple[list[JobObservation], int]:
+    """Normalize cards from Jobright's public visitor-list endpoint."""
+    if not job_list:
         raise ValueError(f"{definition.source_id} produced no public job cards")
 
     observations: list[JobObservation] = []
@@ -473,11 +503,14 @@ def parse_jobright_next_data(text: str, definition: FeedDefinition) -> tuple[lis
         )
         seniority = clean_feed_text(job.get("jobSeniority")).casefold()
         employment_type = clean_feed_text(job.get("employmentType")).casefold()
-        is_expected_track = (
-            "intern" in seniority or "intern" in employment_type
-            if definition.track == "internship"
-            else "new grad" in seniority
-        )
+        if definition.track == "internship":
+            is_expected_track = "intern" in seniority or "intern" in employment_type
+        else:
+            new_grad_context = f"{title} {seniority}".casefold()
+            is_expected_track = any(
+                re.search(r"\b" + re.escape(signal) + r"\b", new_grad_context)
+                for signal in JOBRIGHT_NEW_GRAD_SIGNALS
+            )
         if not title or not company or not application_url or not locations or not is_expected_track:
             rejected += 1
             continue
@@ -519,6 +552,19 @@ def parse_jobright_next_data(text: str, definition: FeedDefinition) -> tuple[lis
     if not observations:
         raise ValueError(f"{definition.source_id} produced no active U.S. observations")
     return observations, rejected
+
+
+def _jobright_page_props(
+    payload: object,
+    definition: FeedDefinition,
+) -> Mapping[str, object]:
+    if not isinstance(payload, Mapping):
+        raise ValueError(f"{definition.source_id} returned an invalid Next.js payload")
+    props = payload.get("props")
+    page_props = props.get("pageProps") if isinstance(props, Mapping) else None
+    if not isinstance(page_props, Mapping) or not isinstance(page_props.get("jobList"), list):
+        raise ValueError(f"{definition.source_id} produced no public job cards")
+    return page_props
 
 
 FEEDS: tuple[FeedDefinition, ...] = (
@@ -607,6 +653,7 @@ FEEDS: tuple[FeedDefinition, ...] = (
         "internship",
         parse_jobright_next_data,
         fetch_url="https://jobright.ai/jobs/software-engineer-intern-jobs-in-united-states",
+        provider="jobright",
     ),
     FeedDefinition(
         "jobright_new_grad",
@@ -617,6 +664,7 @@ FEEDS: tuple[FeedDefinition, ...] = (
         "new_grad",
         parse_jobright_next_data,
         fetch_url="https://jobright.ai/jobs/software-engineer-new-graduate-jobs-in-united-states",
+        provider="jobright",
     ),
 )
 
@@ -632,6 +680,15 @@ class GitHubFeedFetcher:
         etag: str | None = None,
         last_modified: str | None = None,
     ) -> FeedFetchResult:
+        if definition.provider == "smartrecruiters":
+            return await self._fetch_smartrecruiters_board(definition, http_client)
+        if definition.provider == "jobright":
+            return await self._fetch_jobright_public_windows(
+                definition,
+                http_client,
+                etag=etag,
+                last_modified=last_modified,
+            )
         headers: dict[str, str] = {}
         if etag:
             headers["If-None-Match"] = etag
@@ -651,6 +708,158 @@ class GitHubFeedFetcher:
                 content_sha=None,
                 not_modified=True,
             )
+        observations, rejected = definition.parser(text, definition)
+        return FeedFetchResult(
+            definition=definition,
+            observations=observations,
+            rejected=rejected,
+            etag=response_headers.get("ETag"),
+            last_modified=response_headers.get("Last-Modified"),
+            content_sha=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        )
+
+    async def _fetch_jobright_public_windows(
+        self,
+        definition: FeedDefinition,
+        http_client: AsyncHttpClient,
+        *,
+        etag: str | None,
+        last_modified: str | None,
+    ) -> FeedFetchResult:
+        """Expand Jobright's small SSR snapshot with bounded public visitor windows.
+
+        The SEO pages render only 16--20 cards despite listing far more results. The
+        same anonymous visitor endpoint used by the page accepts a larger bounded
+        result window. We merge its relevance and recency windows (100 cards each),
+        avoiding an unbounded crawl while catching fresh postings within the poll
+        interval. If Jobright's visitor API is temporarily unavailable, the validated
+        SSR snapshot remains a safe fallback.
+        """
+        # The HTML snapshot can be unchanged even when roles beyond its tiny
+        # first page have changed. Do not let its cache validators suppress the
+        # dynamic visitor windows that make this source useful.
+        headers: dict[str, str] = {}
+        text, response_headers, status = await http_client.get_text(
+            definition.raw_url,
+            headers=headers,
+        )
+        soup = BeautifulSoup(text, "html.parser")
+        data_node = soup.find("script", id="__NEXT_DATA__")
+        if data_node is None or not data_node.string:
+            raise ValueError(f"{definition.source_id} is missing its Next.js payload")
+        try:
+            payload = json.loads(data_node.string)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"{definition.source_id} returned invalid Next.js JSON") from exc
+        page_props = _jobright_page_props(payload, definition)
+        job_list = list(page_props["jobList"])
+        query = page_props.get("query")
+        if not isinstance(query, Mapping):
+            observations, rejected = parse_jobright_public_cards(job_list, definition)
+            return FeedFetchResult(
+                definition=definition,
+                observations=observations,
+                rejected=rejected,
+                etag=response_headers.get("ETag"),
+                last_modified=response_headers.get("Last-Modified"),
+                content_sha=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            )
+
+        for sort_condition in JOBRIGHT_PUBLIC_SORT_CONDITIONS:
+            url = (
+                "https://jobright.ai/swan/recommend/visitor-list/jobs"
+                f"?sortCondition={sort_condition}&count={JOBRIGHT_PUBLIC_WINDOW_SIZE}"
+                "&position=0&useLegacySearch=true"
+            )
+            try:
+                response, _, _ = await http_client.post_json(url, json=dict(query))
+            except RuntimeError as exc:
+                self._log_jobright_window_failure(definition, sort_condition, exc)
+                continue
+            result = response.get("result") if isinstance(response, Mapping) else None
+            cards = result.get("jobList") if isinstance(result, Mapping) else None
+            if not isinstance(response, Mapping) or not response.get("success") or not isinstance(cards, list):
+                self._log_jobright_window_failure(
+                    definition,
+                    sort_condition,
+                    ValueError("visitor API returned an invalid payload"),
+                )
+                continue
+            job_list.extend(cards)
+
+        unique_cards: list[object] = []
+        seen_ids: set[str] = set()
+        for card in job_list:
+            job = card.get("jobResult") if isinstance(card, Mapping) else None
+            job_id = clean_feed_text(job.get("jobId")) if isinstance(job, Mapping) else ""
+            key = job_id or hashlib.sha256(
+                json.dumps(card, sort_keys=True, default=str).encode("utf-8")
+            ).hexdigest()
+            if key in seen_ids:
+                continue
+            seen_ids.add(key)
+            unique_cards.append(card)
+        observations, rejected = parse_jobright_public_cards(unique_cards, definition)
+        combined_payload = json.dumps({"jobList": unique_cards}, sort_keys=True, default=str)
+        return FeedFetchResult(
+            definition=definition,
+            observations=observations,
+            rejected=rejected,
+            etag=response_headers.get("ETag"),
+            last_modified=response_headers.get("Last-Modified"),
+            content_sha=hashlib.sha256(combined_payload.encode("utf-8")).hexdigest(),
+        )
+
+    def _log_jobright_window_failure(
+        self,
+        definition: FeedDefinition,
+        sort_condition: int,
+        error: Exception,
+    ) -> None:
+        logging.getLogger(self.__class__.__name__).warning(
+            "jobright_public_window_failed source=%s sort=%s error=%s",
+            definition.source_id,
+            sort_condition,
+            error,
+        )
+
+    async def _fetch_smartrecruiters_board(
+        self,
+        definition: FeedDefinition,
+        http_client: AsyncHttpClient,
+    ) -> FeedFetchResult:
+        """Fetch every page because early-career roles need not fall in page one."""
+        if not definition.fetch_url:
+            raise ValueError(f"{definition.source_id} has no SmartRecruiters URL")
+        offset = 0
+        limit = 100
+        all_items: list[object] = []
+        headers: dict[str, str] = {}
+        while True:
+            separator = "&" if "?" in definition.fetch_url else "?"
+            url = re.sub(r"([?&])offset=\d+", r"\g<1>offset=" + str(offset), definition.fetch_url)
+            if "offset=" not in url:
+                url = f"{url}{separator}offset={offset}"
+            data, response_headers, status = await http_client.get_json(url, headers=headers)
+            if status == 304:
+                return FeedFetchResult(
+                    definition=definition,
+                    observations=[],
+                    rejected=0,
+                    etag=None,
+                    last_modified=None,
+                    content_sha=None,
+                    not_modified=True,
+                )
+            if not isinstance(data, Mapping) or not isinstance(data.get("content"), list):
+                raise ValueError(f"{definition.source_id} returned invalid SmartRecruiters data")
+            all_items.extend(data["content"])
+            total = data.get("totalFound")
+            offset += limit
+            if not isinstance(total, int) or offset >= total or not data["content"]:
+                break
+
+        text = json.dumps({"content": all_items}, sort_keys=True)
         observations, rejected = definition.parser(text, definition)
         return FeedFetchResult(
             definition=definition,

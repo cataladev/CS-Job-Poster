@@ -42,7 +42,13 @@ class StubFetcher:
         )
 
 
-def _feed(source_id: str, *, track: str = "internship") -> FeedDefinition:
+def _feed(
+    source_id: str,
+    *,
+    track: str = "internship",
+    poll_interval_seconds: int = 0,
+    required_for_baseline: bool = True,
+) -> FeedDefinition:
     return FeedDefinition(
         source_id,
         source_id,
@@ -52,6 +58,8 @@ def _feed(source_id: str, *, track: str = "internship") -> FeedDefinition:
         track,
         parse_markdown_table,
         trusted_us=True,
+        poll_interval_seconds=poll_interval_seconds,
+        required_for_baseline=required_for_baseline,
     )
 
 
@@ -111,6 +119,73 @@ async def test_first_complete_snapshot_is_silent_then_new_job_queues(config_fact
         repeated = await pipeline.run()
         assert repeated.deliveries_queued == 0
         assert await database.get_delivery_counts() == {"pending": 1, "suppressed": 2}
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_direct_ats_feeds_wait_for_their_own_poll_interval(config_factory) -> None:
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    feed = _feed("direct_greenhouse_example", poll_interval_seconds=900)
+    fetcher = StubFetcher({feed.source_id: [_job(feed.source_id, "first")]})
+    pipeline = FeedPipeline(
+        config=config,
+        database=database,
+        publisher=StubPublisher(),
+        feeds=(feed,),
+        fetcher=fetcher,
+    )
+    fetch_calls = 0
+    original_fetch = fetcher.fetch
+
+    async def counted_fetch(*args, **kwargs):
+        nonlocal fetch_calls
+        fetch_calls += 1
+        return await original_fetch(*args, **kwargs)
+
+    fetcher.fetch = counted_fetch  # type: ignore[method-assign]
+    try:
+        first = await pipeline.run()
+        second = await pipeline.run()
+
+        assert first.baseline_completed
+        assert second.feeds_checked == 1
+        assert fetch_calls == 1
+        assert await database.get_delivery_counts() == {"suppressed": 1}
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_optional_direct_ats_failure_does_not_block_required_baseline(config_factory) -> None:
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    required_feed = _feed("required")
+    optional_direct_feed = _feed(
+        "direct_ashby_unavailable",
+        required_for_baseline=False,
+    )
+    pipeline = FeedPipeline(
+        config=config,
+        database=database,
+        publisher=StubPublisher(),
+        feeds=(required_feed, optional_direct_feed),
+        fetcher=StubFetcher(
+            {
+                required_feed.source_id: [_job(required_feed.source_id, "first")],
+                optional_direct_feed.source_id: RuntimeError("board unavailable"),
+            }
+        ),
+    )
+    try:
+        result = await pipeline.run()
+
+        assert result.baseline_completed
+        assert result.errors == []
+        assert await database.is_initial_feed_baseline_complete()
     finally:
         await database.close()
 

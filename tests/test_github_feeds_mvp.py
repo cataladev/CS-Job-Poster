@@ -9,12 +9,44 @@ from job_bot.github_feeds import (
     GitHubFeedFetcher,
     parse_intern_engine_json,
     parse_jobright_next_data,
+    parse_jobright_public_cards,
     parse_markdown_table,
     parse_simplify_json,
 )
 
 
 FIXTURES = Path("tests/fixtures")
+
+
+def _jobright_card(
+    job_id: str,
+    *,
+    title: str = "Software Engineer Intern",
+    seniority: str = "Intern",
+    employment_type: str = "Internship",
+) -> dict[str, object]:
+    return {
+        "companyResult": {"companyName": "Example Corp"},
+        "jobResult": {
+            "jobId": job_id,
+            "jobTitle": title,
+            "jobSeniority": seniority,
+            "jobLocation": "Austin, TX",
+            "jobLocations": ["Austin, TX"],
+            "applyLink": f"https://jobright.ai/jobs/info/{job_id}",
+            "employmentType": employment_type,
+            "internHireDate": "Summer 2027",
+            "publishTime": "2026-08-14 13:39:51",
+        },
+    }
+
+
+def _jobright_html(query: dict[str, object], cards: list[dict[str, object]]) -> str:
+    return (
+        '<script id="__NEXT_DATA__" type="application/json">'
+        + json.dumps({"props": {"pageProps": {"query": query, "jobList": cards}}})
+        + "</script>"
+    )
 
 
 def test_simplify_parser_keeps_only_active_explicit_us_rows() -> None:
@@ -151,6 +183,7 @@ def test_runtime_feeds_cover_only_us_job_surfaces() -> None:
 
     assert all("INTL" not in feed.path for feed in FEEDS)
     assert all(not feed.trusted_us for feed in FEEDS)
+    assert {feed.provider for feed in FEEDS if feed.repository == "jobright.ai"} == {"jobright"}
 
 
 def test_jobright_parser_uses_public_us_listings_and_keeps_tracks_separate() -> None:
@@ -192,6 +225,120 @@ def test_jobright_parser_uses_public_us_listings_and_keeps_tracks_separate() -> 
     assert new_grads[0].external_id == "grad-us-1"
     assert new_grads[0].cycle == "2027"
     assert new_grads[0].locations == ["United States"]
+
+
+def test_jobright_new_grad_parser_keeps_explicit_entry_level_and_engineer_one_roles() -> None:
+    definition = FeedDefinition(
+        "jobright_new_grad",
+        "Jobright",
+        "jobright.ai",
+        "public",
+        "software-engineer-new-graduate-jobs-in-united-states",
+        "new_grad",
+        parse_jobright_next_data,
+        fetch_url="https://jobright.ai/jobs/software-engineer-new-graduate-jobs-in-united-states",
+        provider="jobright",
+    )
+    cards = [
+        _jobright_card(
+            "entry-level-1",
+            title="Entry Level Platform Engineer",
+            seniority="Entry Level",
+            employment_type="Full-time",
+        ),
+        _jobright_card(
+            "engineer-one-1",
+            title="Software Engineer 1 - Commerce Engineering",
+            seniority="Entry Level",
+            employment_type="Full-time",
+        ),
+    ]
+
+    jobs, rejected = parse_jobright_public_cards(cards, definition)
+
+    assert rejected == 0
+    assert [job.external_id for job in jobs] == ["entry-level-1", "engineer-one-1"]
+
+
+@pytest.mark.asyncio
+async def test_jobright_fetcher_merges_recommended_and_recent_public_windows() -> None:
+    definition = FeedDefinition(
+        "jobright_internships",
+        "Jobright",
+        "jobright.ai",
+        "public",
+        "software-engineer-intern-jobs-in-united-states",
+        "internship",
+        parse_jobright_next_data,
+        fetch_url="https://jobright.ai/jobs/software-engineer-intern-jobs-in-united-states",
+        provider="jobright",
+    )
+    query = {"country": "US", "value": "Software Engineer Intern"}
+
+    class FakeHttpClient:
+        headers = None
+        requests: list[str] = []
+
+        async def get_text(self, _url, *, headers):
+            self.headers = headers
+            return _jobright_html(query, [_jobright_card("intern-1")]), {"ETag": '"page"'}, 200
+
+        async def post_json(self, url, *, json):
+            self.requests.append(url)
+            assert json == query
+            if "sortCondition=0" in url:
+                cards = [_jobright_card("intern-1"), _jobright_card("intern-2")]
+            else:
+                cards = [_jobright_card("intern-2"), _jobright_card("intern-3")]
+            return {"success": True, "result": {"jobList": cards}}, {}, 200
+
+    client = FakeHttpClient()
+    result = await GitHubFeedFetcher().fetch(
+        definition,
+        client,  # type: ignore[arg-type]
+        etag='"old-page"',
+        last_modified="Wed, 12 Aug 2026 12:00:00 GMT",
+    )
+
+    assert client.headers == {}
+    assert len(client.requests) == 2
+    assert {"sortCondition=0", "sortCondition=1"} == {
+        "sortCondition=0" if "sortCondition=0" in url else "sortCondition=1"
+        for url in client.requests
+    }
+    assert [job.external_id for job in result.observations] == ["intern-1", "intern-2", "intern-3"]
+    assert result.rejected == 0
+
+
+@pytest.mark.asyncio
+async def test_jobright_fetcher_uses_ssr_snapshot_when_public_windows_fail() -> None:
+    definition = FeedDefinition(
+        "jobright_internships",
+        "Jobright",
+        "jobright.ai",
+        "public",
+        "software-engineer-intern-jobs-in-united-states",
+        "internship",
+        parse_jobright_next_data,
+        fetch_url="https://jobright.ai/jobs/software-engineer-intern-jobs-in-united-states",
+        provider="jobright",
+    )
+    query = {"country": "US", "value": "Software Engineer Intern"}
+
+    class FailingWindowHttpClient:
+        async def get_text(self, _url, *, headers):
+            return _jobright_html(query, [_jobright_card("intern-1")]), {}, 200
+
+        async def post_json(self, _url, *, json):
+            raise RuntimeError("temporary Jobright outage")
+
+    result = await GitHubFeedFetcher().fetch(
+        definition,
+        FailingWindowHttpClient(),  # type: ignore[arg-type]
+    )
+
+    assert [job.external_id for job in result.observations] == ["intern-1"]
+    assert result.rejected == 0
 
 
 def test_intern_engine_parser_accepts_structured_jobs_object() -> None:

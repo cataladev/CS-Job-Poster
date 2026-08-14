@@ -98,7 +98,8 @@ class FeedPipeline:
                 stats.feeds_checked += 1
                 if isinstance(result, BaseException):
                     error = f"{feed.source_id}: {result}"
-                    stats.errors.append(error)
+                    if feed.required_for_baseline:
+                        stats.errors.append(error)
                     await self.database.record_feed_error(
                         source_id=feed.source_id,
                         repository=feed.repository,
@@ -106,6 +107,10 @@ class FeedPipeline:
                         error=str(result),
                     )
                     self.logger.error("feed_failed source=%s error=%s", feed.source_id, result)
+                    continue
+
+                if result.skipped:
+                    self.logger.debug("feed_not_due source=%s", feed.source_id)
                     continue
 
                 if result.not_modified:
@@ -226,7 +231,7 @@ class FeedPipeline:
 
             if not initial_baseline_complete and not stats.errors:
                 stats.baseline_completed = await self.database.complete_initial_feed_baseline_if_ready(
-                    feed.source_id for feed in self.feeds
+                    feed.source_id for feed in self.feeds if feed.required_for_baseline
                 )
                 if stats.baseline_completed:
                     await self.database.mark_recent_suppressed_catchup_complete()
@@ -284,6 +289,26 @@ class FeedPipeline:
     ) -> FeedFetchResult:
         async with semaphore:
             state = await self.database.get_feed_state(feed.source_id)
+            if feed.poll_interval_seconds and state:
+                last_checked = state.get("last_checked_at")
+                try:
+                    last_checked_at = datetime.fromisoformat(str(last_checked))
+                    if last_checked_at.tzinfo is None:
+                        last_checked_at = last_checked_at.replace(tzinfo=UTC)
+                except (TypeError, ValueError):
+                    last_checked_at = None
+                if last_checked_at is not None and (
+                    datetime.now(UTC) - last_checked_at
+                ).total_seconds() < feed.poll_interval_seconds:
+                    return FeedFetchResult(
+                        definition=feed,
+                        observations=[],
+                        rejected=0,
+                        etag=state.get("etag"),
+                        last_modified=state.get("last_modified"),
+                        content_sha=None,
+                        skipped=True,
+                    )
             state_matches_feed = bool(
                 state
                 and state["repository"] == feed.repository

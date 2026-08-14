@@ -2,22 +2,31 @@
 
 A focused Discord publisher for curated U.S. internships and new-grad roles.
 
-The bot polls ten U.S. job surfaces: eight from five GitHub repositories and two public
-Jobright listings. It combines every successful
-snapshot, removes duplicates across sources, and publishes newly added roles to
-separate internship and new-grad Discord channels. It does not scrape company sites;
-its MVP commands configure posting channels and optional digest-alert roles.
+The bot polls ten U.S. aggregator surfaces (eight from five GitHub repositories and two
+public Jobright listings) plus direct, public employer ATS boards. It combines every
+successful snapshot, removes duplicates across sources, and publishes newly added roles
+to separate internship and new-grad Discord channels. Its MVP commands configure posting
+channels and optional digest-alert roles.
 
 ## Runtime behavior
 
 - Polls every five minutes by default.
-- Posts each newly discovered role immediately, without a role mention.
+- Runs the GitHub and Jobright core feeds in their own five-minute loop, so a slow
+  direct-employer sweep cannot delay new internship or new-grad Discord posts.
+- Derives 309 unique direct employer boards from the bundled company seed: Greenhouse,
+  Lever, Ashby, and SmartRecruiters. Those boards use their public structured endpoints
+  and are polled every 15 minutes by default, independently of the main poll cadence.
+- Direct boards are filtered to internship and new-grad signals before ingestion; a
+  board with no matching roles is a healthy empty result, not a failed source.
+- Posts each newly discovered role immediately to its configured track channel,
+  without a role mention.
 - Sends one digest per track every four hours by default. Each digest links back to
   the original Discord job posts and can optionally ping a track-specific role.
 - Records the first complete inventory silently and posts only later additions.
 - Fails closed when a feed is malformed, suspiciously empty, or unavailable.
 - Uses conditional GitHub requests (`ETag` and `Last-Modified`) to avoid reprocessing
-  unchanged feeds.
+  unchanged repository feeds; Jobright's dynamic public windows are intentionally
+  checked each main poll.
 - Requires row-level U.S. evidence. Mixed-location rows retain only their U.S.
   locations; foreign, ambiguous, archived, and inactive rows are not published.
 - Applies no title, category, seniority, season, or job-age filter.
@@ -44,16 +53,25 @@ the runtime.
 | sndsh internships | `sndsh404/summer-2027-internships` — `main/README.md` | Markdown table |
 | Internship Engine | `zshah101/Automated-List-Of-Summer-2027-and-Fall-2026-Tech-Internships` — `main/docs/api/jobs.json` | JSON |
 | Internship Engine README | `zshah101/Automated-List-Of-Summer-2027-and-Fall-2026-Tech-Internships` — `main/README.md` | Markdown/HTML table |
-| Jobright software-engineering internships | `jobright.ai/jobs/software-engineer-intern-jobs-in-united-states` | Server-rendered Next.js data |
-| Jobright software-engineering new grad | `jobright.ai/jobs/software-engineer-new-graduate-jobs-in-united-states` | Server-rendered Next.js data |
+| Jobright software-engineering internships | `jobright.ai/jobs/software-engineer-intern-jobs-in-united-states` | Public SSR query + anonymous visitor API |
+| Jobright software-engineering new grad | `jobright.ai/jobs/software-engineer-new-graduate-jobs-in-united-states` | Public SSR query + anonymous visitor API |
+
+In addition, the active runtime builds direct-employer feeds from every supported ATS
+URL in `data/company_watchlist_seed.csv`: currently 155 Greenhouse, 39 Lever, 82 Ashby,
+and 33 SmartRecruiters boards. These use the provider's public job-board API rather
+than HTML scraping, retain the direct employer application URL, and are optional during
+the initial aggregator baseline so an unavailable employer board cannot halt delivery.
 
 The fixed feed definitions live in `job_bot/github_feeds.py`. `config/sources.yaml`
-is deliberately not a runtime switchboard for the MVP. The Jobright integration reads
-its public, server-rendered U.S. role listings rather than personalized recommendations,
-which require a user account and preferences. Continuation rows inherit the preceding
-company, location cells are split and reduced to explicit U.S. locations, and every safe
-application link in a multi-apply row is observed before global deduplication. A second
-U.S.-only check runs immediately before Discord delivery.
+is deliberately not a runtime switchboard for the MVP. The Jobright integration derives
+its public U.S. search query from the server-rendered listing, then merges the first 100
+recommended and first 100 most-recent anonymous visitor results. This bounded scan is
+checked every main poll, avoids account-specific recommendations and unbounded scraping,
+and falls back to the public listing snapshot if the visitor API is temporarily down.
+Continuation rows inherit the preceding company, location cells are split and reduced to
+explicit U.S. locations, and every safe application link in a multi-apply row is observed
+before global deduplication. A second U.S.-only check runs immediately before Discord
+delivery.
 
 ## Duplicate guarantees
 
@@ -125,6 +143,7 @@ Optional runtime settings:
 
 ```dotenv
 POLL_INTERVAL_SECONDS=300
+DIRECT_ATS_POLL_INTERVAL_SECONDS=900
 DIGEST_INTERVAL_SECONDS=14400
 DISCORD_INTERNSHIP_ALERT_ROLE_ID=
 DISCORD_NEW_GRAD_ALERT_ROLE_ID=
@@ -137,11 +156,12 @@ LOG_LEVEL=INFO
 USER_AGENT=cs-job-poster/2.0
 ```
 
-`POLL_INTERVAL_SECONDS` has a minimum of 30 seconds; `DIGEST_INTERVAL_SECONDS` has a
-minimum of 15 minutes. The alert-role environment values are optional and can be
-overridden live with `/set-job-alert-role`. `RECENT_CATCHUP_HOURS` is a one-time
-upgrade bridge: an already-baselined deployment queues suppressed roles whose source
-date falls in that window, while a fresh installation keeps its first inventory silent. SQLite remains supported for
+`POLL_INTERVAL_SECONDS` has a minimum of 30 seconds; `DIRECT_ATS_POLL_INTERVAL_SECONDS`
+has a minimum of five minutes; `DIGEST_INTERVAL_SECONDS` has a minimum of 15 minutes.
+The alert-role environment values are optional and can be overridden live with
+`/set-job-alert-role`. `RECENT_CATCHUP_HOURS` is a one-time upgrade bridge: an
+already-baselined deployment queues suppressed roles whose source date falls in that
+window, while a fresh installation keeps its first inventory silent. SQLite remains supported for
 isolated tests and migration tooling, but the production publisher requires Postgres
 so a database advisory lock can prevent competing workers.
 
@@ -189,7 +209,8 @@ post editing, branding, and enrichment.
 
 ## Important modules
 
-- `job_bot/github_feeds.py` — feed definitions, conditional fetching, schema adapters.
+- `job_bot/github_feeds.py` — feed definitions, dynamic Jobright windows, conditional
+  repository fetching, and schema adapters.
 - `job_bot/utils/feed_normalization.py` — location handling, link safety, ATS keys.
 - `job_bot/feed_pipeline.py` — concurrent collection, silent baselines, ingestion.
 - `job_bot/database.py` — observations, canonical merging, delivery outbox.

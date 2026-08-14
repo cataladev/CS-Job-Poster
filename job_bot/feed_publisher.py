@@ -24,11 +24,19 @@ class TrackChannelPublisher:
         self.database = database
         self.client: discord.Client | None = None
         self.logger = logging.getLogger(self.__class__.__name__)
+        # The core feeds and the slower direct-ATS sweep run independently. Keep
+        # the stateful pending-delivery claim/send flow single-file so concurrent
+        # collectors cannot read the same pending delivery and post it twice.
+        self._publish_lock = asyncio.Lock()
 
     def bind_client(self, client: discord.Client) -> None:
         self.client = client
 
     async def publish_pending(self) -> tuple[int, int]:
+        async with self._publish_lock:
+            return await self._publish_pending()
+
+    async def _publish_pending(self) -> tuple[int, int]:
         if self.client is None or self.client.user is None:
             return 0, 0
         sent = 0

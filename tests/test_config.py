@@ -20,6 +20,7 @@ def test_load_config_defaults_to_five_minute_poll(monkeypatch, tmp_path) -> None
         "DIGEST_INTERVAL_SECONDS",
         "DISCORD_INTERNSHIP_ALERT_ROLE_ID",
         "DISCORD_NEW_GRAD_ALERT_ROLE_ID",
+        "DIRECT_ATS_POLL_INTERVAL_SECONDS",
     ]:
         monkeypatch.delenv(key, raising=False)
 
@@ -34,6 +35,7 @@ def test_load_config_defaults_to_five_minute_poll(monkeypatch, tmp_path) -> None
     assert config.digest_interval_seconds == 14_400
     assert config.discord_internship_alert_role_id is None
     assert config.discord_new_grad_alert_role_id is None
+    assert config.direct_ats_poll_interval_seconds == 900
 
 
 def test_poll_interval_has_safe_minimum(monkeypatch, tmp_path) -> None:
@@ -70,6 +72,14 @@ def test_blank_digest_role_environment_values_disable_role_pings(monkeypatch, tm
 
     assert config.discord_internship_alert_role_id is None
     assert config.discord_new_grad_alert_role_id is None
+
+
+def test_direct_ats_poll_interval_has_safe_minimum(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    Path("config").mkdir()
+    monkeypatch.setenv("DIRECT_ATS_POLL_INTERVAL_SECONDS", "5")
+
+    assert load_config().direct_ats_poll_interval_seconds == 300
 
 
 def test_load_config_prefers_database_url_over_sqlite_path(monkeypatch, tmp_path) -> None:

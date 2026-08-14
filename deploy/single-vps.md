@@ -119,6 +119,7 @@ DATABASE_URL=postgresql://jobbot:<long-random-password>@localhost:5432/jobbot
 DISCORD_CHANNEL_ID=<internship-channel-id>
 DISCORD_NEW_GRAD_CHANNEL_ID=<new-grad-channel-id>
 POLL_INTERVAL_SECONDS=300
+DIRECT_ATS_POLL_INTERVAL_SECONDS=900
 DIGEST_INTERVAL_SECONDS=14400
 # Optional: mentioned only once per track digest; requires Mention Everyone.
 DISCORD_INTERNSHIP_ALERT_ROLE_ID=
