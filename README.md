@@ -2,7 +2,8 @@
 
 A focused Discord publisher for curated U.S. internships and new-grad roles.
 
-The bot polls eight U.S. job surfaces from five GitHub repositories, combines every successful
+The bot polls ten U.S. job surfaces: eight from five GitHub repositories and two public
+Jobright listings. It combines every successful
 snapshot, removes duplicates across sources, and publishes newly added roles to
 separate internship and new-grad Discord channels. It does not scrape company sites;
 its only MVP command configures those posting channels.
@@ -40,12 +41,16 @@ the runtime.
 | sndsh internships | `sndsh404/summer-2027-internships` — `main/README.md` | Markdown table |
 | Internship Engine | `zshah101/Automated-List-Of-Summer-2027-and-Fall-2026-Tech-Internships` — `main/docs/api/jobs.json` | JSON |
 | Internship Engine README | `zshah101/Automated-List-Of-Summer-2027-and-Fall-2026-Tech-Internships` — `main/README.md` | Markdown/HTML table |
+| Jobright software-engineering internships | `jobright.ai/jobs/software-engineer-intern-jobs-in-united-states` | Server-rendered Next.js data |
+| Jobright software-engineering new grad | `jobright.ai/jobs/software-engineer-new-graduate-jobs-in-united-states` | Server-rendered Next.js data |
 
 The fixed feed definitions live in `job_bot/github_feeds.py`. `config/sources.yaml`
-is deliberately not a runtime switchboard for the MVP. Continuation rows inherit the
-preceding company, location cells are split and reduced to explicit U.S. locations,
-and every safe direct application link in a multi-apply row is observed before global
-deduplication. A second U.S.-only check runs immediately before Discord delivery.
+is deliberately not a runtime switchboard for the MVP. The Jobright integration reads
+its public, server-rendered U.S. role listings rather than personalized recommendations,
+which require a user account and preferences. Continuation rows inherit the preceding
+company, location cells are split and reduced to explicit U.S. locations, and every safe
+application link in a multi-apply row is observed before global deduplication. A second
+U.S.-only check runs immediately before Discord delivery.
 
 ## Duplicate guarantees
 
@@ -136,7 +141,7 @@ make db-migrate
 make run-postgres
 ```
 
-On the first successful run, all eight current inventories are saved with suppressed
+On the first successful run, all ten current inventories are saved with suppressed
 deliveries and nothing is posted. A partial first run cannot complete that baseline.
 Each feed added later also gets its own silent first snapshot.
 

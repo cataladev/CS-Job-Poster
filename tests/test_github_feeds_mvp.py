@@ -8,6 +8,7 @@ from job_bot.github_feeds import (
     FeedDefinition,
     GitHubFeedFetcher,
     parse_intern_engine_json,
+    parse_jobright_next_data,
     parse_markdown_table,
     parse_simplify_json,
 )
@@ -144,10 +145,53 @@ def test_runtime_feeds_cover_only_us_job_surfaces() -> None:
             "main",
             "docs/api/jobs.json",
         ),
+        ("jobright.ai", "public", "software-engineer-intern-jobs-in-united-states"),
+        ("jobright.ai", "public", "software-engineer-new-graduate-jobs-in-united-states"),
     }
 
     assert all("INTL" not in feed.path for feed in FEEDS)
     assert all(not feed.trusted_us for feed in FEEDS)
+
+
+def test_jobright_parser_uses_public_us_listings_and_keeps_tracks_separate() -> None:
+    internship_definition = FeedDefinition(
+        "jobright_internships",
+        "Jobright",
+        "jobright.ai",
+        "public",
+        "software-engineer-intern-jobs-in-united-states",
+        "internship",
+        parse_jobright_next_data,
+        fetch_url="https://jobright.ai/jobs/software-engineer-intern-jobs-in-united-states",
+    )
+    new_grad_definition = FeedDefinition(
+        "jobright_new_grad",
+        "Jobright",
+        "jobright.ai",
+        "public",
+        "software-engineer-new-graduate-jobs-in-united-states",
+        "new_grad",
+        parse_jobright_next_data,
+        fetch_url="https://jobright.ai/jobs/software-engineer-new-graduate-jobs-in-united-states",
+    )
+    payload = (FIXTURES / "feed_jobright.html").read_text()
+
+    internships, internship_rejected = parse_jobright_next_data(payload, internship_definition)
+    new_grads, new_grad_rejected = parse_jobright_next_data(payload, new_grad_definition)
+
+    assert internship_rejected == 2
+    assert len(internships) == 1
+    assert internships[0].external_id == "intern-us-1"
+    assert internships[0].locations == ["Austin, TX"]
+    assert internships[0].cycle == "fall 2026"
+    assert internships[0].posted_date == "2026-08-14"
+    assert internships[0].application_url == "https://jobright.ai/jobs/info/intern-us-1"
+
+    assert new_grad_rejected == 2
+    assert len(new_grads) == 1
+    assert new_grads[0].external_id == "grad-us-1"
+    assert new_grads[0].cycle == "2027"
+    assert new_grads[0].locations == ["United States"]
 
 
 def test_intern_engine_parser_accepts_structured_jobs_object() -> None:

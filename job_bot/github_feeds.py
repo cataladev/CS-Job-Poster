@@ -79,13 +79,18 @@ class FeedDefinition:
     parser: Parser
     trusted_us: bool = False
     cycle_hint: str | None = None
+    fetch_url: str | None = None
 
     @property
     def source_url(self) -> str:
+        if self.fetch_url:
+            return self.fetch_url
         return f"https://github.com/{self.repository}/blob/{self.branch}/{self.path}"
 
     @property
     def raw_url(self) -> str:
+        if self.fetch_url:
+            return self.fetch_url
         return f"https://raw.githubusercontent.com/{self.repository}/{self.branch}/{self.path}"
 
 
@@ -422,6 +427,100 @@ def parse_intern_engine_json(text: str, definition: FeedDefinition) -> tuple[lis
     return observations, rejected
 
 
+def parse_jobright_next_data(text: str, definition: FeedDefinition) -> tuple[list[JobObservation], int]:
+    """Parse Jobright's public, server-rendered U.S. role listings.
+
+    These listing pages expose the displayed job cards in Next.js' ``__NEXT_DATA__``
+    payload. The personalized ``/jobs/recommend`` view is deliberately not used:
+    it depends on a user's account preferences and is not a stable shared feed.
+    """
+    soup = BeautifulSoup(text, "html.parser")
+    data_node = soup.find("script", id="__NEXT_DATA__")
+    if data_node is None or not data_node.string:
+        raise ValueError(f"{definition.source_id} is missing its Next.js payload")
+    try:
+        payload = json.loads(data_node.string)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{definition.source_id} returned invalid Next.js JSON") from exc
+
+    if not isinstance(payload, Mapping):
+        raise ValueError(f"{definition.source_id} returned an invalid Next.js payload")
+    props = payload.get("props")
+    page_props = props.get("pageProps") if isinstance(props, Mapping) else None
+    job_list = page_props.get("jobList") if isinstance(page_props, Mapping) else None
+    if not isinstance(job_list, list) or not job_list:
+        raise ValueError(f"{definition.source_id} produced no public job cards")
+
+    observations: list[JobObservation] = []
+    rejected = 0
+    for item in job_list:
+        if not isinstance(item, Mapping):
+            rejected += 1
+            continue
+        job = item.get("jobResult")
+        company_data = item.get("companyResult")
+        if not isinstance(job, Mapping) or not isinstance(company_data, Mapping):
+            rejected += 1
+            continue
+
+        title = clean_feed_text(job.get("jobTitle"))
+        company = clean_feed_text(company_data.get("companyName"))
+        application_url = _safe_url(job.get("applyLink") or job.get("url"))
+        locations = _feed_locations(
+            _sequence(job.get("jobLocations")) or (job.get("jobLocation"),),
+            definition=definition,
+            context=f"{title} {application_url}",
+        )
+        seniority = clean_feed_text(job.get("jobSeniority")).casefold()
+        employment_type = clean_feed_text(job.get("employmentType")).casefold()
+        is_expected_track = (
+            "intern" in seniority or "intern" in employment_type
+            if definition.track == "internship"
+            else "new grad" in seniority
+        )
+        if not title or not company or not application_url or not locations or not is_expected_track:
+            rejected += 1
+            continue
+
+        cycle: str | None = None
+        if definition.track == "internship":
+            cycle = detect_season_term(
+                title,
+                clean_feed_text(job.get("internHireDate")),
+            )
+        else:
+            year = re.search(r"\b20(?:26|27|28|29)\b", title)
+            cycle = year.group(0) if year else definition.cycle_hint
+
+        external_id = clean_feed_text(job.get("jobId")) or application_url
+        observations.append(
+            JobObservation(
+                source_id=definition.source_id,
+                source_label=definition.source_label,
+                source_url=definition.source_url,
+                source_ref=f"{definition.branch}/{definition.path}",
+                external_id=external_id,
+                company=company,
+                title=title,
+                locations=locations,
+                application_url=application_url,
+                track=definition.track,
+                cycle=cycle,
+                posted_date=_iso_date(job.get("publishTime")),
+                raw_data={
+                    "jobright_seniority": seniority,
+                    "employment_type": employment_type,
+                    "work_model": clean_feed_text(job.get("workModel")),
+                    "salary": clean_feed_text(job.get("salaryDesc")),
+                },
+            )
+        )
+
+    if not observations:
+        raise ValueError(f"{definition.source_id} produced no active U.S. observations")
+    return observations, rejected
+
+
 FEEDS: tuple[FeedDefinition, ...] = (
     FeedDefinition(
         "simplify_internships",
@@ -498,6 +597,26 @@ FEEDS: tuple[FeedDefinition, ...] = (
         "README.md",
         "internship",
         parse_markdown_table,
+    ),
+    FeedDefinition(
+        "jobright_internships",
+        "Jobright",
+        "jobright.ai",
+        "public",
+        "software-engineer-intern-jobs-in-united-states",
+        "internship",
+        parse_jobright_next_data,
+        fetch_url="https://jobright.ai/jobs/software-engineer-intern-jobs-in-united-states",
+    ),
+    FeedDefinition(
+        "jobright_new_grad",
+        "Jobright",
+        "jobright.ai",
+        "public",
+        "software-engineer-new-graduate-jobs-in-united-states",
+        "new_grad",
+        parse_jobright_next_data,
+        fetch_url="https://jobright.ai/jobs/software-engineer-new-graduate-jobs-in-united-states",
     ),
 )
 
