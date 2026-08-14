@@ -14,6 +14,8 @@ from job_bot.utils.normalization import normalize_company_name
 RUNTIME_CONFIG_INTERNSHIP_CHANNEL_KEY = "discord_channel_id"
 RUNTIME_CONFIG_NEW_GRAD_CHANNEL_KEY = "discord_new_grad_channel_id"
 RUNTIME_CONFIG_LOG_CHANNEL_KEY = "discord_log_channel_id"
+RUNTIME_CONFIG_INTERNSHIP_ALERT_ROLE_KEY = "discord_internship_alert_role_id"
+RUNTIME_CONFIG_NEW_GRAD_ALERT_ROLE_KEY = "discord_new_grad_alert_role_id"
 
 
 def _parse_bool(value: Optional[str], default: bool = False) -> bool:
@@ -73,6 +75,8 @@ def load_config() -> AppConfig:
 
     enabled_sources = _parse_csv(os.getenv("ENABLED_SOURCES"))
     new_grad_channel_id = os.getenv("DISCORD_NEW_GRAD_CHANNEL_ID")
+    internship_alert_role_id = os.getenv("DISCORD_INTERNSHIP_ALERT_ROLE_ID")
+    new_grad_alert_role_id = os.getenv("DISCORD_NEW_GRAD_ALERT_ROLE_ID")
     enable_new_grad_source = _parse_bool(
         os.getenv("ENABLE_NEW_GRAD_SOURCE"),
         default=bool(new_grad_channel_id),
@@ -117,6 +121,13 @@ def load_config() -> AppConfig:
         source_settings=source_settings,
         poll_interval_seconds=max(30, int(os.getenv("POLL_INTERVAL_SECONDS", "300"))),
         recent_catchup_hours=max(0, int(os.getenv("RECENT_CATCHUP_HOURS", "48"))),
+        digest_interval_seconds=max(900, int(os.getenv("DIGEST_INTERVAL_SECONDS", "14400"))),
+        discord_internship_alert_role_id=(
+            int(internship_alert_role_id) if internship_alert_role_id else None
+        ),
+        discord_new_grad_alert_role_id=(
+            int(new_grad_alert_role_id) if new_grad_alert_role_id else None
+        ),
     )
 
     _apply_source_overrides(config)
@@ -151,6 +162,14 @@ def apply_runtime_channel_overrides(
     if RUNTIME_CONFIG_LOG_CHANNEL_KEY in runtime_config:
         raw_value = runtime_config[RUNTIME_CONFIG_LOG_CHANNEL_KEY].get("value")
         config.discord_log_channel_id = int(raw_value) if raw_value else None
+
+    if RUNTIME_CONFIG_INTERNSHIP_ALERT_ROLE_KEY in runtime_config:
+        raw_value = runtime_config[RUNTIME_CONFIG_INTERNSHIP_ALERT_ROLE_KEY].get("value")
+        config.discord_internship_alert_role_id = int(raw_value) if raw_value else None
+
+    if RUNTIME_CONFIG_NEW_GRAD_ALERT_ROLE_KEY in runtime_config:
+        raw_value = runtime_config[RUNTIME_CONFIG_NEW_GRAD_ALERT_ROLE_KEY].get("value")
+        config.discord_new_grad_alert_role_id = int(raw_value) if raw_value else None
 
 
 def is_new_grad_collection_enabled(config: AppConfig) -> bool:

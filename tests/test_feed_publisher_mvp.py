@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import asdict
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import discord
@@ -15,27 +16,33 @@ from job_bot.utils.normalization import normalize_job_posting
 
 
 class FakeChannel:
-    def __init__(self, messages, *, permissions=None, send_error=None):
+    def __init__(self, messages, *, channel_id=111, permissions=None, send_error=None):
         self.messages = messages
         self.sent = []
-        self.guild = SimpleNamespace(me=object())
+        self.contents = []
+        self.allowed_mentions = []
+        self.id = channel_id
+        self.guild = SimpleNamespace(id=123, me=object())
         self.type = discord.ChannelType.text
         self.permissions = permissions or SimpleNamespace(
             view_channel=True,
             send_messages=True,
             embed_links=True,
             read_message_history=True,
+            mention_everyone=True,
         )
         self.send_error = send_error
 
     def permissions_for(self, _member):
         return self.permissions
 
-    async def send(self, *, embed):
+    async def send(self, *, embed, content=None, allowed_mentions=None):
         if self.send_error is not None:
             raise self.send_error
         self.sent.append(embed)
-        return SimpleNamespace(id=999)
+        self.contents.append(content)
+        self.allowed_mentions.append(allowed_mentions)
+        return SimpleNamespace(id=999 + len(self.sent))
 
     def history(self, **_kwargs):
         async def generate():
@@ -149,7 +156,7 @@ async def test_tracks_publish_to_their_separate_configured_channels(config_facto
             external_id="new-grad-1",
         )
         internship_channel = FakeChannel([])
-        new_grad_channel = FakeChannel([])
+        new_grad_channel = FakeChannel([], channel_id=222)
         publisher = TrackChannelPublisher(config, database)
         publisher.bind_client(  # type: ignore[arg-type]
             FakeClient({111: internship_channel, 222: new_grad_channel})
@@ -275,5 +282,105 @@ async def test_embed_omits_feed_credit_and_contains_safe_apply_link(config_facto
         assert all(field.name != "Source(s)" for field in embed.fields)
         assert "github.com/owner/source" not in str(embed.to_dict())
         assert delivery["marker"] in embed.footer.text
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_periodic_role_digest_links_back_to_individual_job_messages(config_factory) -> None:
+    config = config_factory()
+    config.digest_interval_seconds = 900
+    config.discord_internship_alert_role_id = 555
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    try:
+        await _create_pending_delivery(database, external_id="job-1", location="Austin, TX")
+        await _create_pending_delivery(database, external_id="job-2", location="Boston, MA")
+        channel = FakeChannel([])
+        publisher = TrackChannelPublisher(config, database)
+        publisher.bind_client(FakeClient(channel))  # type: ignore[arg-type]
+
+        sent, reconciled = await publisher.publish_pending()
+        assert (sent, reconciled) == (2, 0)
+        assert len(channel.sent) == 2
+        assert channel.contents == [None, None]
+
+        cursor = (datetime.now(UTC) - timedelta(hours=4)).isoformat()
+        await database.set_digest_cursor(111, cursor)
+
+        assert await publisher.publish_pending() == (0, 0)
+        assert len(channel.sent) == 3
+        digest = channel.sent[-1]
+        assert digest.title == "Internship job digest"
+        assert "Example Corp" in digest.description
+        assert "https://discord.com/channels/123/111/1000" in digest.description
+        assert channel.contents[-1] == "<@&555>"
+        assert "jobbot:digest:" in digest.footer.text
+
+        assert await publisher.publish_pending() == (0, 0)
+        assert len(channel.sent) == 3
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_digest_role_ping_requires_mention_everyone_permission(config_factory) -> None:
+    config = config_factory()
+    config.digest_interval_seconds = 900
+    config.discord_internship_alert_role_id = 555
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    try:
+        await _create_pending_delivery(database)
+        permissions = SimpleNamespace(
+            view_channel=True,
+            send_messages=True,
+            embed_links=True,
+            read_message_history=True,
+            mention_everyone=False,
+        )
+        channel = FakeChannel([], permissions=permissions)
+        publisher = TrackChannelPublisher(config, database)
+        publisher.bind_client(FakeClient(channel))  # type: ignore[arg-type]
+
+        assert await publisher.publish_pending() == (1, 0)
+        expired_cursor = (datetime.now(UTC) - timedelta(hours=4)).isoformat()
+        await database.set_digest_cursor(111, expired_cursor)
+
+        assert await publisher.publish_pending() == (0, 0)
+        assert len(channel.sent) == 1
+        assert await database.get_digest_cursor(111) == expired_cursor
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_digest_marker_reconciles_after_cursor_update_is_interrupted(
+    config_factory,
+) -> None:
+    config = config_factory()
+    config.digest_interval_seconds = 900
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    try:
+        await _create_pending_delivery(database)
+        cursor = (datetime.now(UTC) - timedelta(hours=4)).isoformat()
+        await database.set_digest_cursor(111, cursor)
+        started_at = datetime.fromisoformat(cursor)
+        publisher = TrackChannelPublisher(config, database)
+        marker = publisher._digest_marker(111, started_at)
+        existing_digest = discord.Embed(title="Internship job digest")
+        existing_digest.set_footer(text=f"Job Bot • {marker}")
+        existing_message = SimpleNamespace(
+            id=777,
+            author=SimpleNamespace(id=42),
+            embeds=[existing_digest],
+        )
+        channel = FakeChannel([existing_message])
+        publisher.bind_client(FakeClient(channel))  # type: ignore[arg-type]
+
+        assert await publisher.publish_pending() == (1, 0)
+        assert len(channel.sent) == 1  # The individual job post, not a duplicate digest.
+        assert await database.get_digest_cursor(111) != cursor
     finally:
         await database.close()

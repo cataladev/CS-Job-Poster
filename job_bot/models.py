@@ -208,11 +208,19 @@ class AppConfig:
     source_settings: Dict[str, SourceSettings]
     poll_interval_seconds: int = 300
     recent_catchup_hours: int = 48
+    digest_interval_seconds: int = 14_400
+    discord_internship_alert_role_id: Optional[int] = None
+    discord_new_grad_alert_role_id: Optional[int] = None
 
     def channel_id_for_track(self, track: str) -> Optional[int]:
         if track == "new_grad":
             return self.discord_new_grad_channel_id
         return self.discord_channel_id
+
+    def alert_role_id_for_track(self, track: str) -> Optional[int]:
+        if track == "new_grad":
+            return self.discord_new_grad_alert_role_id
+        return self.discord_internship_alert_role_id
 
     @property
     def database_dsn(self) -> str:

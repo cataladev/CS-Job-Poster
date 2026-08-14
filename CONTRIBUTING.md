@@ -32,7 +32,8 @@ SQLite is supported for isolated unit tests only.
 - Never weaken safe-link validation to rescue a single malformed upstream row.
 - Treat U.S.-only delivery as a hard invariant at both ingestion and publication;
   source filenames alone are not sufficient location evidence.
-- Keep the MVP slash-command boundary limited to channel administration. Do not
+- Keep the MVP slash-command boundary limited to channel and digest-alert-role
+  administration. Do not
   connect legacy text commands, scraping, watchlists, branding, edits, or closure
   handling to `bot.py`; those features are deferred in `TODO.md`.
 - Document new environment variables and schema changes.

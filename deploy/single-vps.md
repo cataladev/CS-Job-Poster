@@ -119,6 +119,10 @@ DATABASE_URL=postgresql://jobbot:<long-random-password>@localhost:5432/jobbot
 DISCORD_CHANNEL_ID=<internship-channel-id>
 DISCORD_NEW_GRAD_CHANNEL_ID=<new-grad-channel-id>
 POLL_INTERVAL_SECONDS=300
+DIGEST_INTERVAL_SECONDS=14400
+# Optional: mentioned only once per track digest; requires Mention Everyone.
+DISCORD_INTERNSHIP_ALERT_ROLE_ID=
+DISCORD_NEW_GRAD_ALERT_ROLE_ID=
 RECENT_CATCHUP_HOURS=48
 REQUEST_TIMEOUT_SECONDS=20
 REQUEST_RETRIES=2
@@ -132,7 +136,9 @@ The Discord bot role must have **View Channel**, **Send Messages**, **Embed Link
 and **Read Message History** in both configured channels. History access is mandatory:
 the service refuses to publish to a channel without it because delivery reconciliation
 would not be safe. Administrators can later change either destination with
-`/set-job-channel`; the database override survives restarts and deployments.
+`/set-job-channel`; the database override survives restarts and deployments. For
+optional role pings in the periodic digest, grant **Mention Everyone** and configure
+the role with `/set-job-alert-role`.
 
 ## 4. Verify the service
 

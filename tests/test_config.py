@@ -17,6 +17,9 @@ def test_load_config_defaults_to_five_minute_poll(monkeypatch, tmp_path) -> None
         "SQLITE_DB_PATH",
         "SOURCE_CONFIG_PATH",
         "POLL_INTERVAL_SECONDS",
+        "DIGEST_INTERVAL_SECONDS",
+        "DISCORD_INTERNSHIP_ALERT_ROLE_ID",
+        "DISCORD_NEW_GRAD_ALERT_ROLE_ID",
     ]:
         monkeypatch.delenv(key, raising=False)
 
@@ -28,6 +31,9 @@ def test_load_config_defaults_to_five_minute_poll(monkeypatch, tmp_path) -> None
     assert config.database_dsn == "job_bot.db"
     assert config.max_job_age_hours == 72
     assert config.poll_interval_seconds == 300
+    assert config.digest_interval_seconds == 14_400
+    assert config.discord_internship_alert_role_id is None
+    assert config.discord_new_grad_alert_role_id is None
 
 
 def test_poll_interval_has_safe_minimum(monkeypatch, tmp_path) -> None:
@@ -38,6 +44,32 @@ def test_poll_interval_has_safe_minimum(monkeypatch, tmp_path) -> None:
     config = load_config()
 
     assert config.poll_interval_seconds == 30
+
+
+def test_digest_settings_support_role_pings_and_a_safe_minimum(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    Path("config").mkdir()
+    monkeypatch.setenv("DIGEST_INTERVAL_SECONDS", "5")
+    monkeypatch.setenv("DISCORD_INTERNSHIP_ALERT_ROLE_ID", "555")
+    monkeypatch.setenv("DISCORD_NEW_GRAD_ALERT_ROLE_ID", "666")
+
+    config = load_config()
+
+    assert config.digest_interval_seconds == 900
+    assert config.discord_internship_alert_role_id == 555
+    assert config.discord_new_grad_alert_role_id == 666
+
+
+def test_blank_digest_role_environment_values_disable_role_pings(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    Path("config").mkdir()
+    monkeypatch.setenv("DISCORD_INTERNSHIP_ALERT_ROLE_ID", "")
+    monkeypatch.setenv("DISCORD_NEW_GRAD_ALERT_ROLE_ID", "")
+
+    config = load_config()
+
+    assert config.discord_internship_alert_role_id is None
+    assert config.discord_new_grad_alert_role_id is None
 
 
 def test_load_config_prefers_database_url_over_sqlite_path(monkeypatch, tmp_path) -> None:

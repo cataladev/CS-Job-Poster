@@ -6,11 +6,14 @@ The bot polls ten U.S. job surfaces: eight from five GitHub repositories and two
 Jobright listings. It combines every successful
 snapshot, removes duplicates across sources, and publishes newly added roles to
 separate internship and new-grad Discord channels. It does not scrape company sites;
-its only MVP command configures those posting channels.
+its MVP commands configure posting channels and optional digest-alert roles.
 
 ## Runtime behavior
 
 - Polls every five minutes by default.
+- Posts each newly discovered role immediately, without a role mention.
+- Sends one digest per track every four hours by default. Each digest links back to
+  the original Discord job posts and can optionally ping a track-specific role.
 - Records the first complete inventory silently and posts only later additions.
 - Fails closed when a feed is malformed, suspiciously empty, or unavailable.
 - Uses conditional GitHub requests (`ETag` and `Last-Modified`) to avoid reprocessing
@@ -25,7 +28,7 @@ its only MVP command configures those posting channels.
 - Never treats an upstream edit to an existing source row as a new job.
 
 The executable entrypoint is `bot.py`. It starts a minimal `discord.Client` without
-Message Content Intent and exposes one admin-only slash command. The legacy text
+Message Content Intent and exposes two admin-only slash commands. The legacy text
 command modules are retained only for data compatibility and are not connected to
 the runtime.
 
@@ -82,6 +85,10 @@ Create a bot and grant it these channel permissions:
 - Embed Links
 - Read Message History
 
+To configure a digest role, it also needs **Mention Everyone** in that track's
+channel. This permission is checked only when a role ping is enabled; normal job
+posts and non-pinging digests do not need it.
+
 Read Message History is required for duplicate reconciliation. The bot fails closed
 before publishing if any permission is missing. Message Content Intent is not needed.
 Invite the bot with application-command support so the slash command is available.
@@ -95,6 +102,13 @@ Server administrators can configure either posting channel without restarting:
 The command verifies all four posting permissions, refuses to assign both tracks to
 the same channel, persists the setting in Postgres, and safely moves only suppressed
 or pending deliveries. Sent or uncertain deliveries are never replayed.
+
+Configure an optional role that is mentioned only once per digest, or omit `role` to
+turn the ping off:
+
+```text
+/set-job-alert-role track:<Internships|New grad> role:<role>
+```
 
 ## Configuration
 
@@ -111,6 +125,9 @@ Optional runtime settings:
 
 ```dotenv
 POLL_INTERVAL_SECONDS=300
+DIGEST_INTERVAL_SECONDS=14400
+DISCORD_INTERNSHIP_ALERT_ROLE_ID=
+DISCORD_NEW_GRAD_ALERT_ROLE_ID=
 RECENT_CATCHUP_HOURS=48
 REQUEST_TIMEOUT_SECONDS=20
 REQUEST_RETRIES=2
@@ -120,10 +137,11 @@ LOG_LEVEL=INFO
 USER_AGENT=cs-job-poster/2.0
 ```
 
-`POLL_INTERVAL_SECONDS` has a minimum of 30 seconds. `RECENT_CATCHUP_HOURS` is a
-one-time upgrade bridge: an already-baselined deployment queues suppressed roles whose
-source date falls in that window, while a fresh installation keeps its first inventory
-silent. SQLite remains supported for
+`POLL_INTERVAL_SECONDS` has a minimum of 30 seconds; `DIGEST_INTERVAL_SECONDS` has a
+minimum of 15 minutes. The alert-role environment values are optional and can be
+overridden live with `/set-job-alert-role`. `RECENT_CATCHUP_HOURS` is a one-time
+upgrade bridge: an already-baselined deployment queues suppressed roles whose source
+date falls in that window, while a fresh installation keeps its first inventory silent. SQLite remains supported for
 isolated tests and migration tooling, but the production publisher requires Postgres
 so a database advisory lock can prevent competing workers.
 

@@ -6,7 +6,10 @@ import discord
 import pytest
 from discord import app_commands
 
-from job_bot.config import RUNTIME_CONFIG_NEW_GRAD_CHANNEL_KEY
+from job_bot.config import (
+    RUNTIME_CONFIG_INTERNSHIP_ALERT_ROLE_KEY,
+    RUNTIME_CONFIG_NEW_GRAD_CHANNEL_KEY,
+)
 from job_bot.database import Database
 from job_bot.feed_publisher import TrackChannelPublisher
 from job_bot.github_feeds import JobObservation
@@ -80,6 +83,11 @@ async def test_admin_slash_command_is_registered(config_factory) -> None:
     assert command.default_permissions is not None
     assert command.default_permissions.administrator
     assert [parameter.name for parameter in command.parameters] == ["track", "channel"]
+    alert_role_command = tree.get_command("set-job-alert-role")
+    assert alert_role_command is not None
+    assert alert_role_command.default_permissions is not None
+    assert alert_role_command.default_permissions.administrator
+    assert [parameter.name for parameter in alert_role_command.parameters] == ["track", "role"]
     await client.close()
     await database.close()
 
@@ -117,6 +125,43 @@ async def test_admin_configuration_persists_and_moves_pending_track_delivery(
         assert runtime_row["value"] == "333"
         assert await database.list_deliveries_for_send(222) == []
         assert len(await database.list_deliveries_for_send(333)) == 1
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_alert_role_configuration_persists_and_can_be_disabled(config_factory) -> None:
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    try:
+        configurator = JobChannelConfigurator(config, database)
+
+        enabled = await configurator.configure_alert_role(
+            track="internship",
+            role_id=555,
+            updated_by_user_id="42",
+        )
+        assert enabled.role_id == 555
+        assert config.discord_internship_alert_role_id == 555
+        runtime_row = await database.get_runtime_config_value(
+            RUNTIME_CONFIG_INTERNSHIP_ALERT_ROLE_KEY
+        )
+        assert runtime_row is not None
+        assert runtime_row["value"] == "555"
+
+        disabled = await configurator.configure_alert_role(
+            track="internship",
+            role_id=None,
+            updated_by_user_id="42",
+        )
+        assert disabled.role_id is None
+        assert config.discord_internship_alert_role_id is None
+        runtime_row = await database.get_runtime_config_value(
+            RUNTIME_CONFIG_INTERNSHIP_ALERT_ROLE_KEY
+        )
+        assert runtime_row is not None
+        assert runtime_row["value"] is None
     finally:
         await database.close()
 

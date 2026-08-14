@@ -1419,6 +1419,61 @@ class Database:
             ).fetchall()
         return [int(row["channel_id"]) for row in rows]
 
+    @staticmethod
+    def _digest_cursor_key(channel_id: int) -> str:
+        return f"job_digest_cursor:{channel_id}"
+
+    async def get_digest_cursor(self, channel_id: int) -> Optional[str]:
+        async with self._lock:
+            row = self._connection.execute(
+                "SELECT value FROM app_state WHERE key = ?",
+                (self._digest_cursor_key(channel_id),),
+            ).fetchone()
+        return str(row["value"]) if row else None
+
+    async def set_digest_cursor(self, channel_id: int, cursor: str) -> None:
+        async with self._lock:
+            now = _utc_now()
+            self._connection.execute(
+                """
+                INSERT INTO app_state (key, value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+                """,
+                (self._digest_cursor_key(channel_id), cursor, now),
+            )
+            self._connection.commit()
+
+    async def list_sent_deliveries_since(
+        self,
+        *,
+        channel_id: int,
+        sent_after: str,
+    ) -> List[DbRow]:
+        async with self._lock:
+            return self._connection.execute(
+                """
+                SELECT
+                    d.canonical_id,
+                    d.message_id,
+                    d.sent_at,
+                    c.track,
+                    c.title,
+                    c.company,
+                    c.location,
+                    c.canonical_url,
+                    c.season_term
+                FROM discord_deliveries d
+                JOIN canonical_jobs c ON c.id = d.canonical_id
+                WHERE d.channel_id = ?
+                  AND d.state = 'sent'
+                  AND d.sent_at IS NOT NULL
+                  AND d.sent_at > ?
+                ORDER BY d.sent_at ASC, d.id ASC
+                """,
+                (str(channel_id), sent_after),
+            ).fetchall()
+
     async def reassign_unsent_deliveries_for_track(
         self,
         *,

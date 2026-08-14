@@ -8,7 +8,9 @@ from discord import app_commands
 
 from job_bot.config import (
     RUNTIME_CONFIG_INTERNSHIP_CHANNEL_KEY,
+    RUNTIME_CONFIG_INTERNSHIP_ALERT_ROLE_KEY,
     RUNTIME_CONFIG_NEW_GRAD_CHANNEL_KEY,
+    RUNTIME_CONFIG_NEW_GRAD_ALERT_ROLE_KEY,
 )
 from job_bot.database import Database
 from job_bot.feed_publisher import TrackChannelPublisher
@@ -18,6 +20,10 @@ from job_bot.models import AppConfig
 TRACK_CONFIG_KEYS = {
     "internship": RUNTIME_CONFIG_INTERNSHIP_CHANNEL_KEY,
     "new_grad": RUNTIME_CONFIG_NEW_GRAD_CHANNEL_KEY,
+}
+TRACK_ALERT_ROLE_CONFIG_KEYS = {
+    "internship": RUNTIME_CONFIG_INTERNSHIP_ALERT_ROLE_KEY,
+    "new_grad": RUNTIME_CONFIG_NEW_GRAD_ALERT_ROLE_KEY,
 }
 TRACK_LABELS = {
     "internship": "Internship",
@@ -30,6 +36,12 @@ class ChannelConfigurationResult:
     track: str
     channel_id: int
     deliveries_moved: int
+
+
+@dataclass(frozen=True)
+class AlertRoleConfigurationResult:
+    track: str
+    role_id: int | None
 
 
 class JobChannelConfigurator:
@@ -78,6 +90,29 @@ class JobChannelConfigurator:
             channel_id=channel_id,
             deliveries_moved=moved,
         )
+
+    async def configure_alert_role(
+        self,
+        *,
+        track: str,
+        role_id: int | None,
+        updated_by_user_id: str,
+    ) -> AlertRoleConfigurationResult:
+        if track not in TRACK_ALERT_ROLE_CONFIG_KEYS:
+            raise ValueError("Track must be internship or new_grad.")
+        if role_id is not None and role_id <= 0:
+            raise ValueError("Role ID must be positive.")
+
+        await self.database.set_runtime_config_value(
+            TRACK_ALERT_ROLE_CONFIG_KEYS[track],
+            str(role_id) if role_id is not None else None,
+            updated_by_user_id,
+        )
+        if track == "internship":
+            self.config.discord_internship_alert_role_id = role_id
+        else:
+            self.config.discord_new_grad_alert_role_id = role_id
+        return AlertRoleConfigurationResult(track=track, role_id=role_id)
 
 
 def register_job_channel_commands(
@@ -165,6 +200,85 @@ def register_job_channel_commands(
         else:
             logger.exception("set_job_channel_failed", exc_info=error)
             message = "I couldn't update that channel. Check the bot logs and try again."
+        if interaction.response.is_done():
+            await interaction.followup.send(message, ephemeral=True)
+        else:
+            await interaction.response.send_message(message, ephemeral=True)
+
+    @tree.command(
+        name="set-job-alert-role",
+        description="Set or disable the role pinged in periodic job digests.",
+    )
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.describe(
+        track="Which job digest should ping this role?",
+        role="Role to ping; leave empty to disable this track's role ping.",
+    )
+    @app_commands.choices(
+        track=[
+            app_commands.Choice(name="Internships", value="internship"),
+            app_commands.Choice(name="New grad", value="new_grad"),
+        ]
+    )
+    async def set_job_alert_role(
+        interaction: discord.Interaction,
+        track: app_commands.Choice[str],
+        role: discord.Role | None = None,
+    ) -> None:
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message(
+                "This command must be used in a server.", ephemeral=True
+            )
+            return
+        if role is not None:
+            if role.guild.id != guild.id or role.is_default():
+                await interaction.response.send_message(
+                    "Choose a non-@everyone role from this server.", ephemeral=True
+                )
+                return
+            channel_id = configurator.config.channel_id_for_track(track.value)
+            channel = guild.get_channel(channel_id) if channel_id is not None else None
+            bot_member = guild.me
+            if channel is not None and bot_member is not None:
+                try:
+                    publisher.validate_role_mention_permissions(channel, bot_member)
+                except RuntimeError as exc:
+                    await interaction.response.send_message(str(exc), ephemeral=True)
+                    return
+
+        result = await configurator.configure_alert_role(
+            track=track.value,
+            role_id=role.id if role is not None else None,
+            updated_by_user_id=str(interaction.user.id),
+        )
+        if result.role_id is None:
+            message = f"{TRACK_LABELS[result.track]} digests will no longer ping a role."
+        else:
+            message = (
+                f"{TRACK_LABELS[result.track]} digests will ping {role.mention} "
+                "at the next digest."
+            )
+        await interaction.response.send_message(message, ephemeral=True)
+        logger.info(
+            "job_alert_role_configured track=%s role=%s user=%s",
+            result.track,
+            result.role_id,
+            interaction.user.id,
+        )
+
+    @set_job_alert_role.error
+    async def set_job_alert_role_error(
+        interaction: discord.Interaction,
+        error: app_commands.AppCommandError,
+    ) -> None:
+        if isinstance(error, app_commands.MissingPermissions):
+            message = "Only server administrators can change job alert roles."
+        else:
+            logger.exception("set_job_alert_role_failed", exc_info=error)
+            message = "I couldn't update that alert role. Check the bot logs and try again."
         if interaction.response.is_done():
             await interaction.followup.send(message, ephemeral=True)
         else:
