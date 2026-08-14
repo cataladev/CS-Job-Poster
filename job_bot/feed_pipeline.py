@@ -148,6 +148,15 @@ class FeedPipeline:
                         )
                         continue
                     job = normalize_job_posting(observation.to_job_posting())
+                    if job.normalized_company in self.config.company_blacklist:
+                        stats.rejected += 1
+                        self.logger.info(
+                            "observation_rejected_company_blacklist source=%s external_id=%s company=%s",
+                            observation.source_id,
+                            observation.external_id,
+                            job.company,
+                        )
+                        continue
                     exact_identity_keys = {f"url:{job.canonical_url}"}
                     exact_identity_keys.update(
                         external_identity_keys(

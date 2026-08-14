@@ -16,6 +16,7 @@ RUNTIME_CONFIG_NEW_GRAD_CHANNEL_KEY = "discord_new_grad_channel_id"
 RUNTIME_CONFIG_LOG_CHANNEL_KEY = "discord_log_channel_id"
 RUNTIME_CONFIG_INTERNSHIP_ALERT_ROLE_KEY = "discord_internship_alert_role_id"
 RUNTIME_CONFIG_NEW_GRAD_ALERT_ROLE_KEY = "discord_new_grad_alert_role_id"
+DEFAULT_COMPANY_BLACKLIST = ("dice",)
 
 
 def _parse_bool(value: Optional[str], default: bool = False) -> bool:
@@ -99,9 +100,15 @@ def load_config() -> AppConfig:
         us_only=_parse_bool(os.getenv("US_ONLY")),
         include_coops=_parse_bool(os.getenv("INCLUDE_COOPS"), default=True),
         season_filter=_parse_csv(os.getenv("SEASON_FILTER")),
-        company_blacklist=[
-            normalize_company_name(value) for value in _parse_csv(os.getenv("COMPANY_BLACKLIST"))
-        ],
+        company_blacklist=sorted(
+            {
+                *(normalize_company_name(value) for value in DEFAULT_COMPANY_BLACKLIST),
+                *(
+                    normalize_company_name(value)
+                    for value in _parse_csv(os.getenv("COMPANY_BLACKLIST"))
+                ),
+            }
+        ),
         keyword_allowlist=[value.lower() for value in _parse_csv(os.getenv("KEYWORD_ALLOWLIST"))],
         keyword_denylist=[value.lower() for value in _parse_csv(os.getenv("KEYWORD_DENYLIST"))],
         log_level=os.getenv("LOG_LEVEL", "INFO").upper(),

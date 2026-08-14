@@ -36,6 +36,7 @@ def test_load_config_defaults_to_five_minute_poll(monkeypatch, tmp_path) -> None
     assert config.discord_internship_alert_role_id is None
     assert config.discord_new_grad_alert_role_id is None
     assert config.direct_ats_poll_interval_seconds == 900
+    assert config.company_blacklist == ["dice"]
 
 
 def test_poll_interval_has_safe_minimum(monkeypatch, tmp_path) -> None:

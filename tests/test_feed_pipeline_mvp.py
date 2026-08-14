@@ -71,13 +71,14 @@ def _job(
     track: str = "internship",
     posted_date: str | None = None,
     source_ref: str = "main/README.md",
+    company: str | None = None,
 ) -> JobObservation:
     return JobObservation(
         source_id=source_id,
         source_label=source_id,
         source_url=f"https://github.com/owner/{source_id}",
         external_id=external_id,
-        company=f"Example {external_id} Corp",
+        company=company or f"Example {external_id} Corp",
         title="Software Engineer Intern" if track == "internship" else "Software Engineer",
         locations=[location],
         application_url=f"https://jobs.example.com/{external_id}",
@@ -86,6 +87,40 @@ def _job(
         posted_date=posted_date,
         source_ref=source_ref,
     )
+
+
+@pytest.mark.asyncio
+async def test_company_blacklist_rejects_dice_reposts(config_factory) -> None:
+    config = config_factory()
+    config.company_blacklist = ["dice"]
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    feed = _feed("jobright_internships")
+    pipeline = FeedPipeline(
+        config=config,
+        database=database,
+        publisher=StubPublisher(),
+        feeds=(feed,),
+        fetcher=StubFetcher(
+            {
+                feed.source_id: [
+                    _job(
+                        feed.source_id,
+                        "dice-repost",
+                        company="Dice",
+                    )
+                ]
+            }
+        ),
+    )
+    try:
+        stats = await pipeline.run()
+
+        assert stats.rejected == 1
+        assert stats.canonical_created == 0
+        assert await database.get_delivery_counts() == {}
+    finally:
+        await database.close()
 
 
 @pytest.mark.asyncio
