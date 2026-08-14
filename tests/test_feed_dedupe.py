@@ -281,6 +281,54 @@ async def test_cycle_suffix_in_title_does_not_create_duplicate(config_factory) -
 
 
 @pytest.mark.asyncio
+async def test_equivalent_state_names_and_specific_seasons_merge_across_sources(
+    config_factory,
+) -> None:
+    """A broad GitHub row and Jobright's detailed copy must not double-post Notion."""
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    try:
+        first = await _ingest(
+            database,
+            JobObservation(
+                source_id="github_list",
+                source_label="GitHub list",
+                source_url="https://github.com/example/list",
+                external_id="notion-github",
+                company="🔥 Notion",
+                title="Software Engineer Intern (Winter 2027)",
+                locations=["San Francisco, California", "New York, New York"],
+                application_url="https://www.notion.so/careers/engineering-intern",
+                track="internship",
+                cycle="2027",
+            ),
+        )
+        second = await _ingest(
+            database,
+            JobObservation(
+                source_id="jobright",
+                source_label="Jobright",
+                source_url="https://jobright.ai/jobs/software-engineer-intern-jobs-in-united-states",
+                external_id="notion-jobright",
+                company="Notion",
+                title="Software Engineer Intern (Winter 2027)",
+                locations=["San Francisco, CA", "New York, NY"],
+                application_url="https://jobright.ai/jobs/info/notion-winter-2027",
+                track="internship",
+                cycle="winter 2027",
+            ),
+        )
+
+        assert first.created
+        assert not second.created
+        assert first.canonical_id == second.canonical_id
+        assert await database.get_delivery_counts() == {"pending": 1}
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_source_edit_and_tracking_variants_do_not_requeue(config_factory) -> None:
     config = config_factory()
     database = Database(config.sqlite_db_path)

@@ -46,6 +46,59 @@ LOCATION_ALIASES = {
     "united states": "us",
     "u.s.": "us",
 }
+US_STATE_NAME_TO_CODE = {
+    "alabama": "al",
+    "alaska": "ak",
+    "arizona": "az",
+    "arkansas": "ar",
+    "california": "ca",
+    "colorado": "co",
+    "connecticut": "ct",
+    "delaware": "de",
+    "florida": "fl",
+    "georgia": "ga",
+    "hawaii": "hi",
+    "idaho": "id",
+    "illinois": "il",
+    "indiana": "in",
+    "iowa": "ia",
+    "kansas": "ks",
+    "kentucky": "ky",
+    "louisiana": "la",
+    "maine": "me",
+    "maryland": "md",
+    "massachusetts": "ma",
+    "michigan": "mi",
+    "minnesota": "mn",
+    "mississippi": "ms",
+    "missouri": "mo",
+    "montana": "mt",
+    "nebraska": "ne",
+    "nevada": "nv",
+    "new hampshire": "nh",
+    "new jersey": "nj",
+    "new mexico": "nm",
+    "new york": "ny",
+    "north carolina": "nc",
+    "north dakota": "nd",
+    "ohio": "oh",
+    "oklahoma": "ok",
+    "oregon": "or",
+    "pennsylvania": "pa",
+    "rhode island": "ri",
+    "south carolina": "sc",
+    "south dakota": "sd",
+    "tennessee": "tn",
+    "texas": "tx",
+    "utah": "ut",
+    "vermont": "vt",
+    "virginia": "va",
+    "washington": "wa",
+    "west virginia": "wv",
+    "wisconsin": "wi",
+    "wyoming": "wy",
+    "district of columbia": "dc",
+}
 TRACKING_QUERY_PREFIXES = ("utm_",)
 TRACKING_QUERY_KEYS = {"ref", "referrer", "source", "gh_src", "gh_source"}
 SEASON_RE = re.compile(
@@ -102,6 +155,14 @@ def normalize_location(location: str) -> str:
         return LOCATION_ALIASES[value]
     value = re.sub(r"[^a-z0-9\s,]+", " ", value)
     value = collapse_whitespace(value.replace(",", " "))
+    for state_name, state_code in US_STATE_NAME_TO_CODE.items():
+        state_suffixes = (f"{state_name} state", state_name)
+        for suffix in state_suffixes:
+            if value == suffix:
+                return state_code
+            if value.endswith(f" {suffix}"):
+                value = f"{value[: -len(suffix)].strip()} {state_code}"
+                break
     return LOCATION_ALIASES.get(value, value)
 
 
@@ -151,6 +212,22 @@ def detect_season_term(*values: str) -> Optional[str]:
     return None
 
 
+def normalize_season_term(
+    season_term: str | None,
+    *,
+    title: str,
+    summary: str,
+    internship_season: str,
+    canonical_url: str,
+) -> Optional[str]:
+    """Prefer a specific season in the role text over a bare source-provided year."""
+    existing = collapse_whitespace(season_term or "").casefold()
+    detected = detect_season_term(title, summary, internship_season, canonical_url)
+    if re.fullmatch(r"20\d{2}", existing) and detected:
+        return detected
+    return existing or detected
+
+
 def build_fingerprint(job: JobPosting) -> str:
     payload = {
         "track": job.track,
@@ -194,15 +271,14 @@ def normalize_job_posting(job: JobPosting) -> JobPosting:
     ]
     job.canonical_location = collapse_location_cluster(job.locations)
     job.remote_status = detect_remote_status(job.locations)
-    job.season_term = job.season_term or detect_season_term(
-        job.title,
-        job.summary,
-        job.internship_season or "",
-        json.dumps(job.raw_data, sort_keys=True),
-        job.canonical_url,
+    job.season_term = normalize_season_term(
+        job.season_term,
+        title=job.title,
+        summary=job.summary,
+        internship_season=job.internship_season or "",
+        canonical_url=job.canonical_url,
     )
     job.internship_season = job.internship_season or job.season_term
     job.summary = summarize_text(job.summary)
     job.dedupe_fingerprint = build_fingerprint(job)
     return job
-
