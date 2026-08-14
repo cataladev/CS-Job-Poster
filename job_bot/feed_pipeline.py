@@ -11,6 +11,7 @@ from job_bot.github_feeds import FEEDS, FeedDefinition, FeedFetchResult, GitHubF
 from job_bot.models import AppConfig
 from job_bot.utils.feed_normalization import (
     external_identity_keys,
+    is_us_location,
     location_scoped_identity_keys,
     role_signature,
 )
@@ -126,6 +127,22 @@ class FeedPipeline:
                 source_merged = 0
 
                 for observation in result.observations:
+                    if not observation.locations or not all(
+                        is_us_location(
+                            location,
+                            trusted_us=False,
+                            context=observation.application_url,
+                        )
+                        for location in observation.locations
+                    ):
+                        stats.rejected += 1
+                        self.logger.warning(
+                            "observation_rejected_non_us source=%s external_id=%s locations=%s",
+                            observation.source_id,
+                            observation.external_id,
+                            observation.locations,
+                        )
+                        continue
                     job = normalize_job_posting(observation.to_job_posting())
                     exact_identity_keys = {f"url:{job.canonical_url}"}
                     exact_identity_keys.update(

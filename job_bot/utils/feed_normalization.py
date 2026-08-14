@@ -25,7 +25,7 @@ _US_STATE_NAMES = (
     "Vermont|Virginia|Washington|West Virginia|Wisconsin|Wyoming|District of Columbia"
 )
 _EXPLICIT_US = re.compile(
-    rf"(?:\bUnited States\b|\bUSA\b|\bU\.S\.\b|\bUS remote\b|remote[^|;]*\bUS\b|"
+    rf"(?:\bUnited States\b|\bUSA\b|\bU\.S\.\b|\bUS\b|"
     rf"\bNYC\b|\bSF\b|\b(?:{_US_STATE_NAMES})\b)",
     re.IGNORECASE,
 )
@@ -42,6 +42,10 @@ _CANADIAN_PROVINCE = re.compile(r"(?:,\s*|\b)(?:AB|BC|MB|NB|NL|NS|NT|NU|ON|PE|QC
 _FOREIGN_URL = re.compile(
     r"(?:[-_/](?:canada|india|united-kingdom|uk|germany|france|singapore|australia)(?:[-_/]|$)|"
     r"(?:CAD|CAN)[-_]Remote)",
+    re.IGNORECASE,
+)
+_GENERIC_TRUSTED_LOCATION = re.compile(
+    r"^(?:remote|hybrid|virtual|multiple locations?|various locations?|not specified|nationwide)$",
     re.IGNORECASE,
 )
 
@@ -216,13 +220,17 @@ def is_us_location(location: str, *, trusted_us: bool, context: str = "") -> boo
     explicit_us = bool(_EXPLICIT_US.search(location))
     state_code = bool(_US_STATE_CODE.search(location))
     foreign = bool(_FOREIGN.search(location) or _CANADIAN_PROVINCE.search(location))
-    if _FOREIGN_URL.search(context) and not explicit_us:
+    if foreign:
+        return False
+    if _FOREIGN_URL.search(context) and not (explicit_us or state_code):
         return False
     if explicit_us or state_code:
         return True
-    if foreign or _FOREIGN.search(context):
+    if _FOREIGN.search(context):
         return False
-    return trusted_us
+    # A feed's U.S. scope may disambiguate only genuinely generic labels. It must
+    # never turn an unknown city/country such as "Asti, Italy" into a U.S. role.
+    return trusted_us and bool(_GENERIC_TRUSTED_LOCATION.fullmatch(location.strip()))
 
 
 def external_identity_keys(url: str, *, company: str = "") -> set[str]:

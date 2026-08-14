@@ -92,7 +92,7 @@ def test_markdown_parser_handles_html_and_markdown_apply_links() -> None:
     assert rejected == 1
 
 
-def test_markdown_parser_covers_continuations_shifted_columns_and_all_locations() -> None:
+def test_markdown_parser_keeps_only_us_parts_of_mixed_location_rows() -> None:
     definition = FeedDefinition(
         "readme_test",
         "README",
@@ -101,14 +101,13 @@ def test_markdown_parser_covers_continuations_shifted_columns_and_all_locations(
         "README.md",
         "internship",
         parse_markdown_table,
-        all_locations=True,
         cycle_hint="Summer 2027",
     )
     markdown_text = """
 | Company | Role | Location | Terms | Application | Age |
 | --- | --- | --- | --- | --- | --- |
-| 🔥 Example Corp ✓ | Software Intern | Toronto, Canada | Summer 2027 | [Simplify](https://simplify.jobs/p/one?utm_source=test) [Direct](https://jobs.example.com/roles/one?utm_source=test) | 0d |
-| ↳ | Platform Intern |  | Summer 2027 | [Apply #1](https://jobs.example.com/roles/two?gh_jid=2&utm_campaign=x) [Apply #2](https://jobs.example.com/roles/three?gh_jid=3) | 1d |
+| 🔥 Example Corp ✓ | Software Intern | Toronto, Canada<br>Austin, TX | Summer 2027 | [Simplify](https://simplify.jobs/p/one?utm_source=test) [Direct](https://jobs.example.com/roles/one?utm_source=test) | 0d |
+| ↳ | Platform Intern | Remote in Canada<br>Remote in USA | Summer 2027 | [Apply #1](https://jobs.example.com/roles/two?gh_jid=2&utm_campaign=x) [Apply #2](https://jobs.example.com/roles/three?gh_jid=3) | 1d |
 """
 
     jobs, rejected = parse_markdown_table(markdown_text, definition)
@@ -116,16 +115,16 @@ def test_markdown_parser_covers_continuations_shifted_columns_and_all_locations(
     assert rejected == 0
     assert len(jobs) == 3
     assert [job.company for job in jobs] == ["Example Corp"] * 3
-    assert jobs[0].locations == ["Toronto, Canada"]
+    assert jobs[0].locations == ["Austin, TX"]
     assert jobs[0].application_url == "https://jobs.example.com/roles/one"
-    assert jobs[1].locations == ["Not specified"]
+    assert jobs[1].locations == ["Remote in USA"]
     assert {job.application_url for job in jobs[1:]} == {
         "https://jobs.example.com/roles/two?gh_jid=2",
         "https://jobs.example.com/roles/three?gh_jid=3",
     }
 
 
-def test_runtime_feeds_cover_every_active_job_readme_surface() -> None:
+def test_runtime_feeds_cover_only_us_job_surfaces() -> None:
     configured = {(feed.repository, feed.branch, feed.path) for feed in FEEDS}
 
     assert configured == {
@@ -134,8 +133,6 @@ def test_runtime_feeds_cover_every_active_job_readme_surface() -> None:
         ("SimplifyJobs/New-Grad-Positions", "dev", "README.md"),
         ("speedyapply/2027-SWE-College-Jobs", "main", "README.md"),
         ("speedyapply/2027-SWE-College-Jobs", "main", "NEW_GRAD_USA.md"),
-        ("speedyapply/2027-SWE-College-Jobs", "main", "INTERN_INTL.md"),
-        ("speedyapply/2027-SWE-College-Jobs", "main", "NEW_GRAD_INTL.md"),
         ("sndsh404/summer-2027-internships", "main", "README.md"),
         (
             "zshah101/Automated-List-Of-Summer-2027-and-Fall-2026-Tech-Internships",
@@ -148,6 +145,9 @@ def test_runtime_feeds_cover_every_active_job_readme_surface() -> None:
             "docs/api/jobs.json",
         ),
     }
+
+    assert all("INTL" not in feed.path for feed in FEEDS)
+    assert all(not feed.trusted_us for feed in FEEDS)
 
 
 def test_intern_engine_parser_accepts_structured_jobs_object() -> None:

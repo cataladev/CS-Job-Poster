@@ -38,8 +38,13 @@ def test_application_url_rejects_unsafe_destinations() -> None:
 
 def test_us_location_requires_evidence_unless_feed_is_trusted() -> None:
     assert is_us_location("Austin, TX", trusted_us=False)
+    assert is_us_location("Virtual US", trusted_us=False)
+    assert is_us_location("multiple US", trusted_us=False)
     assert not is_us_location("Toronto, ON, Canada", trusted_us=True)
     assert not is_us_location("Remote in Canada", trusted_us=True)
+    assert not is_us_location("Asti, Italy +1", trusted_us=True)
+    assert not is_us_location("Ho Chi Minh City, Vietnam", trusted_us=True)
+    assert not is_us_location("Austin, TX and Toronto, Canada", trusted_us=False)
     assert is_us_location("Remote", trusted_us=True)
     assert not is_us_location("Remote", trusted_us=False)
 

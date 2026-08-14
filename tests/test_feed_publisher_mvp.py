@@ -63,6 +63,7 @@ async def _create_pending_delivery(
     track: str = "internship",
     channel_id: int = 111,
     external_id: str = "job-1",
+    location: str = "Austin, TX",
 ) -> None:
     title = "Software Engineer Intern" if track == "internship" else "Software Engineer"
     observation = JobObservation(
@@ -72,7 +73,7 @@ async def _create_pending_delivery(
         external_id=external_id,
         company="Example Corp",
         title=title,
-        locations=["Austin, TX"],
+        locations=[location],
         application_url=sanitize_application_url(
             f"https://jobs.example.com/{external_id}"
         ).url,
@@ -169,6 +170,24 @@ async def test_tracks_publish_to_their_separate_configured_channels(config_facto
             for field in new_grad_channel.sent[0].fields
             if field.name == "Track"
         ) == "New Grad"
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_publisher_suppresses_non_us_pending_delivery(config_factory) -> None:
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    try:
+        await _create_pending_delivery(database, location="Toronto, ON, Canada")
+        channel = FakeChannel([])
+        publisher = TrackChannelPublisher(config, database)
+        publisher.bind_client(FakeClient(channel))  # type: ignore[arg-type]
+
+        assert await publisher.publish_pending() == (0, 0)
+        assert channel.sent == []
+        assert await database.get_delivery_counts() == {"suppressed": 1}
     finally:
         await database.close()
 
