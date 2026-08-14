@@ -78,6 +78,7 @@ class FeedDefinition:
     track: str
     parser: Parser
     trusted_us: bool = False
+    all_locations: bool = False
     cycle_hint: str | None = None
 
     @property
@@ -123,19 +124,24 @@ def _safe_url(raw_url: object) -> str:
     return decision.url
 
 
-def _preferred_application_url(raw_urls: Sequence[str]) -> str:
+def _preferred_application_urls(raw_urls: Sequence[str]) -> list[str]:
     safe_urls = [url for raw in raw_urls if (url := _safe_url(raw))]
     if not safe_urls:
-        return ""
+        return []
     aggregator_hosts = {"simplify.jobs", "www.simplify.jobs", "speedyapply.com"}
-    return next(
-        (
-            url
-            for url in safe_urls
-            if (urlsplit(url).hostname or "").casefold() not in aggregator_hosts
-        ),
-        safe_urls[-1],
-    )
+    direct_urls = [
+        url
+        for url in safe_urls
+        if (urlsplit(url).hostname or "").casefold() not in aggregator_hosts
+    ]
+    preferred = direct_urls or [safe_urls[-1]]
+    return list(dict.fromkeys(preferred))
+
+
+def _preferred_application_url(raw_urls: Sequence[str]) -> str:
+    """Compatibility helper for callers that only need one destination."""
+    urls = _preferred_application_urls(raw_urls)
+    return urls[0] if urls else ""
 
 
 def _us_locations(
@@ -158,6 +164,30 @@ def _us_locations(
     return cleaned if is_us_location(joined, trusted_us=trusted_us, context=context) else []
 
 
+def _feed_locations(
+    locations: Sequence[object],
+    *,
+    definition: FeedDefinition,
+    context: str,
+) -> list[str]:
+    cleaned = [clean_feed_text(location) for location in locations if clean_feed_text(location)]
+    if definition.all_locations:
+        return cleaned or ["Not specified"]
+    return _us_locations(
+        cleaned,
+        trusted_us=definition.trusted_us,
+        context=context,
+    )
+
+
+def _company_name(value: str, previous: str | None) -> tuple[str, str | None]:
+    if value.strip() in {"", "↳"}:
+        return previous or "", previous
+    cleaned = re.sub(r"^[🔥⭐\s]+", "", value).strip()
+    cleaned = re.sub(r"\s*[✓🆁]+$", "", cleaned).strip()
+    return cleaned, cleaned or previous
+
+
 def parse_simplify_json(text: str, definition: FeedDefinition) -> tuple[list[JobObservation], int]:
     try:
         payload = json.loads(text)
@@ -177,9 +207,9 @@ def parse_simplify_json(text: str, definition: FeedDefinition) -> tuple[list[Job
         company = clean_feed_text(item.get("company_name"))
         title = clean_feed_text(item.get("title"))
         application_url = _safe_url(item.get("url"))
-        locations = _us_locations(
+        locations = _feed_locations(
             _sequence(item.get("locations")),
-            trusted_us=False,
+            definition=definition,
             context=f"{title} {application_url}",
         )
         if not company or not title or not application_url or not locations:
@@ -249,10 +279,12 @@ def parse_markdown_table(text: str, definition: FeedDefinition) -> tuple[list[Jo
         title_index = _column_index(indexes, "position", "role", "title")
         location_index = _column_index(indexes, "location", "locations")
         apply_index = _column_index(indexes, "posting", "apply", "application")
-        date_index = _column_index(indexes, "added", "age", "date")
+        date_index = _column_index(indexes, "added", "age", "date", "posted")
+        term_index = _column_index(indexes, "term", "terms", "season", "cycle")
         if None in {company_index, title_index, location_index, apply_index}:
             continue
 
+        previous_company: str | None = None
         for row in table.find_all("tr")[1:]:
             if "🔒" in row.get_text(" ", strip=True):
                 continue
@@ -261,47 +293,72 @@ def parse_markdown_table(text: str, definition: FeedDefinition) -> tuple[list[Jo
             if len(cells) <= required_max:
                 rejected += 1
                 continue
-            company = clean_feed_text(cells[company_index].get_text(" ", strip=True))
+            raw_company = clean_feed_text(cells[company_index].get_text(" ", strip=True))
+            company, previous_company = _company_name(raw_company, previous_company)
             title = clean_feed_text(cells[title_index].get_text(" ", strip=True))
             location = clean_feed_text(cells[location_index].get_text(" ", strip=True))
-            links = [str(link.get("href") or "") for link in cells[apply_index].find_all("a")]
-            application_url = _preferred_application_url(links)
-            locations = _us_locations(
+            link_cells = cells[location_index + 1 :]
+            links = [
+                str(link.get("href") or "")
+                for cell in link_cells
+                for link in cell.find_all("a")
+            ]
+            application_urls = _preferred_application_urls(links)
+            locations = _feed_locations(
                 [location],
-                trusted_us=definition.trusted_us,
-                context=f"{title} {application_url}",
+                definition=definition,
+                context=f"{title} {' '.join(application_urls)}",
             )
-            if not company or not title or not application_url or not locations:
+            if not company or not title or not application_urls or not locations:
                 rejected += 1
                 continue
-            raw_date = (
-                clean_feed_text(cells[date_index].get_text(" ", strip=True))
-                if date_index is not None and date_index < len(cells)
-                else ""
-            )
+
+            raw_date = ""
+            if date_index is not None and date_index < len(cells):
+                raw_date = clean_feed_text(cells[date_index].get_text(" ", strip=True))
+            if not _age_date(raw_date):
+                for cell in reversed(cells[location_index + 1 :]):
+                    candidate = clean_feed_text(cell.get_text(" ", strip=True))
+                    if _age_date(candidate):
+                        raw_date = candidate
+                        break
+
+            term = ""
+            if term_index is not None and term_index < len(cells):
+                term = clean_feed_text(cells[term_index].get_text(" ", strip=True))
+            if not term:
+                term = " ".join(
+                    clean_feed_text(cell.get_text(" ", strip=True))
+                    for cell in cells[location_index + 1 :]
+                    if not cell.find("a")
+                )
             cycle = definition.cycle_hint
             if definition.track == "internship":
-                cycle = detect_season_term(title, definition.cycle_hint or "") or definition.cycle_hint
+                cycle = (
+                    detect_season_term(title, term, definition.cycle_hint or "")
+                    or definition.cycle_hint
+                )
             elif definition.track == "new_grad":
                 year = re.search(r"\b20(?:26|27|28|29)\b", title)
                 cycle = year.group(0) if year else definition.cycle_hint
-            observations.append(
-                JobObservation(
-                    source_id=definition.source_id,
-                    source_label=definition.source_label,
-                    source_url=definition.source_url,
-                    source_ref=f"{definition.branch}/{definition.path}",
-                    external_id=application_url,
-                    company=company,
-                    title=title,
-                    locations=locations,
-                    application_url=application_url,
-                    track=definition.track,
-                    cycle=cycle,
-                    posted_date=_age_date(raw_date),
-                    raw_data={"source_date": raw_date},
+            for application_url in application_urls:
+                observations.append(
+                    JobObservation(
+                        source_id=definition.source_id,
+                        source_label=definition.source_label,
+                        source_url=definition.source_url,
+                        source_ref=f"{definition.branch}/{definition.path}",
+                        external_id=application_url,
+                        company=company,
+                        title=title,
+                        locations=locations,
+                        application_url=application_url,
+                        track=definition.track,
+                        cycle=cycle,
+                        posted_date=_age_date(raw_date),
+                        raw_data={"source_date": raw_date, "term": term},
+                    )
                 )
-            )
     if not observations:
         raise ValueError(f"{definition.source_id} produced no active U.S. observations")
     return observations, rejected
@@ -325,9 +382,9 @@ def parse_intern_engine_json(text: str, definition: FeedDefinition) -> tuple[lis
         title = clean_feed_text(item.get("title"))
         application_url = _safe_url(item.get("url"))
         location = clean_feed_text(item.get("location"))
-        locations = _us_locations(
+        locations = _feed_locations(
             [location],
-            trusted_us=True,
+            definition=definition,
             context=f"{title} {application_url}",
         )
         if not company or not title or not application_url or not locations:
@@ -363,19 +420,32 @@ FEEDS: tuple[FeedDefinition, ...] = (
         "Simplify",
         "SimplifyJobs/Summer2027-Internships",
         "dev",
-        ".github/scripts/listings.json",
+        "README.md",
         "internship",
-        parse_simplify_json,
+        parse_markdown_table,
+        all_locations=True,
+        cycle_hint="Summer 2027",
     ),
     FeedDefinition(
         "simplify_new_grad",
         "Simplify",
         "SimplifyJobs/New-Grad-Positions",
         "dev",
-        ".github/scripts/listings.json",
+        "README.md",
         "new_grad",
-        parse_simplify_json,
+        parse_markdown_table,
+        all_locations=True,
         cycle_hint="2027",
+    ),
+    FeedDefinition(
+        "simplify_offseason_internships",
+        "Simplify",
+        "SimplifyJobs/Summer2027-Internships",
+        "dev",
+        "README-Off-Season.md",
+        "internship",
+        parse_markdown_table,
+        all_locations=True,
     ),
     FeedDefinition(
         "speedy_internships",
@@ -385,7 +455,7 @@ FEEDS: tuple[FeedDefinition, ...] = (
         "README.md",
         "internship",
         parse_markdown_table,
-        trusted_us=True,
+        all_locations=True,
     ),
     FeedDefinition(
         "speedy_new_grad",
@@ -395,7 +465,29 @@ FEEDS: tuple[FeedDefinition, ...] = (
         "NEW_GRAD_USA.md",
         "new_grad",
         parse_markdown_table,
-        trusted_us=True,
+        all_locations=True,
+        cycle_hint="2027",
+    ),
+    FeedDefinition(
+        "speedy_internships_international",
+        "SpeedyApply",
+        "speedyapply/2027-SWE-College-Jobs",
+        "main",
+        "INTERN_INTL.md",
+        "internship",
+        parse_markdown_table,
+        all_locations=True,
+        cycle_hint="2027",
+    ),
+    FeedDefinition(
+        "speedy_new_grad_international",
+        "SpeedyApply",
+        "speedyapply/2027-SWE-College-Jobs",
+        "main",
+        "NEW_GRAD_INTL.md",
+        "new_grad",
+        parse_markdown_table,
+        all_locations=True,
         cycle_hint="2027",
     ),
     FeedDefinition(
@@ -406,7 +498,7 @@ FEEDS: tuple[FeedDefinition, ...] = (
         "README.md",
         "internship",
         parse_markdown_table,
-        trusted_us=True,
+        all_locations=True,
         cycle_hint="Summer 2027",
     ),
     FeedDefinition(
@@ -418,6 +510,16 @@ FEEDS: tuple[FeedDefinition, ...] = (
         "internship",
         parse_intern_engine_json,
         trusted_us=True,
+    ),
+    FeedDefinition(
+        "intern_engine_readme",
+        "Internship Engine",
+        "zshah101/Automated-List-Of-Summer-2027-and-Fall-2026-Tech-Internships",
+        "main",
+        "README.md",
+        "internship",
+        parse_markdown_table,
+        all_locations=True,
     ),
 )
 

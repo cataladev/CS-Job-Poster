@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 
-from job_bot.database import Database
+from job_bot.database import Database, RECENT_FEED_CATCHUP_STATE_KEY
 from job_bot.feed_pipeline import FeedPipeline
 from job_bot.github_feeds import (
     FeedDefinition,
@@ -60,6 +61,8 @@ def _job(
     *,
     location: str = "Austin, TX",
     track: str = "internship",
+    posted_date: str | None = None,
+    source_ref: str = "main/README.md",
 ) -> JobObservation:
     return JobObservation(
         source_id=source_id,
@@ -72,6 +75,8 @@ def _job(
         application_url=f"https://jobs.example.com/{external_id}",
         track=track,
         cycle="Summer 2027",
+        posted_date=posted_date,
+        source_ref=source_ref,
     )
 
 
@@ -106,6 +111,91 @@ async def test_first_complete_snapshot_is_silent_then_new_job_queues(config_fact
         repeated = await pipeline.run()
         assert repeated.deliveries_queued == 0
         assert await database.get_delivery_counts() == {"pending": 1, "suppressed": 2}
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_upgrade_promotes_only_recent_suppressed_jobs_once(config_factory) -> None:
+    config = config_factory()
+    config.recent_catchup_hours = 48
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    feed = _feed("one")
+    recent = datetime.now(UTC).date().isoformat()
+    old = (datetime.now(UTC) - timedelta(days=10)).date().isoformat()
+    fetcher = StubFetcher(
+        {
+            "one": [
+                _job("one", "recent", posted_date=recent),
+                _job("one", "old", posted_date=old),
+                _job(
+                    "one",
+                    "legacy-json-only",
+                    posted_date=recent,
+                    source_ref="main/listings.json",
+                ),
+            ]
+        }
+    )
+    pipeline = FeedPipeline(
+        config=config,
+        database=database,
+        publisher=StubPublisher(),
+        feeds=(feed,),
+        fetcher=fetcher,
+    )
+    try:
+        assert (await pipeline.run()).baseline_completed
+        assert await database.get_delivery_counts() == {"suppressed": 3}
+
+        # Simulate a database created by the pre-catch-up deployment: its feed
+        # baseline exists, but the new one-time migration marker does not.
+        database._connection.execute(  # noqa: SLF001 - upgrade-state fixture
+            "DELETE FROM app_state WHERE key = ?",
+            (RECENT_FEED_CATCHUP_STATE_KEY,),
+        )
+        database._connection.commit()  # noqa: SLF001 - upgrade-state fixture
+
+        upgraded = await pipeline.run()
+        assert upgraded.deliveries_promoted == 1
+        assert await database.get_delivery_counts() == {"pending": 1, "suppressed": 2}
+
+        repeated = await pipeline.run()
+        assert repeated.deliveries_promoted == 0
+        assert await database.get_delivery_counts() == {"pending": 1, "suppressed": 2}
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_fresh_baseline_never_replays_recent_inventory(config_factory) -> None:
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    feed = _feed("one")
+    fetcher = StubFetcher(
+        {
+            "one": [
+                _job(
+                    "one",
+                    "recent-at-install",
+                    posted_date=datetime.now(UTC).date().isoformat(),
+                )
+            ]
+        }
+    )
+    pipeline = FeedPipeline(
+        config=config,
+        database=database,
+        publisher=StubPublisher(),
+        feeds=(feed,),
+        fetcher=fetcher,
+    )
+    try:
+        assert (await pipeline.run()).baseline_completed
+        assert (await pipeline.run()).deliveries_promoted == 0
+        assert await database.get_delivery_counts() == {"suppressed": 1}
     finally:
         await database.close()
 

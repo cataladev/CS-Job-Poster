@@ -116,6 +116,7 @@ def load_config() -> AppConfig:
         company_seed_path=os.getenv("COMPANY_SEED_PATH", "data/company_watchlist_seed.csv"),
         source_settings=source_settings,
         poll_interval_seconds=max(30, int(os.getenv("POLL_INTERVAL_SECONDS", "300"))),
+        recent_catchup_hours=max(0, int(os.getenv("RECENT_CATCHUP_HOURS", "48"))),
     )
 
     _apply_source_overrides(config)

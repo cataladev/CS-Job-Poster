@@ -23,6 +23,7 @@ except ImportError:  # pragma: no cover - SQLite tests do not install postgres d
 
 DbRow = Mapping[str, Any]
 POSTGRES_PRIMARY_RUNTIME_LOCK_ID = 5_942_248_014_240_001_17
+RECENT_FEED_CATCHUP_STATE_KEY = "readme_recent_catchup_v1"
 
 
 def _utc_now() -> str:
@@ -1468,6 +1469,80 @@ class Database:
                 "SELECT state, COUNT(*) AS count FROM discord_deliveries GROUP BY state"
             ).fetchall()
         return {str(row["state"]): int(row["count"]) for row in rows}
+
+    async def promote_recent_suppressed_deliveries_once(
+        self,
+        cutoff_date: str,
+        eligible_sources: Iterable[tuple[str, str]],
+    ) -> int:
+        """Queue recent baseline observations exactly once after an existing deployment upgrades."""
+        source_pairs = sorted(set(eligible_sources))
+        async with self._lock:
+            try:
+                state = self._connection.execute(
+                    "SELECT value FROM app_state WHERE key = ?",
+                    (RECENT_FEED_CATCHUP_STATE_KEY,),
+                ).fetchone()
+                if state and state["value"] == "complete":
+                    return 0
+
+                now = _utc_now()
+                source_predicate = " OR ".join(
+                    "(o.source_id = ? AND o.source_ref = ?)" for _ in source_pairs
+                ) or "0 = 1"
+                source_params = [value for pair in source_pairs for value in pair]
+                cursor = self._connection.execute(
+                    f"""
+                    UPDATE discord_deliveries
+                    SET state = 'pending', updated_at = ?
+                    WHERE state = 'suppressed'
+                      AND EXISTS (
+                          SELECT 1
+                          FROM feed_observations o
+                          WHERE o.canonical_id = discord_deliveries.canonical_id
+                            AND o.posted_date IS NOT NULL
+                            AND o.posted_date >= ?
+                            AND ({source_predicate})
+                      )
+                    """,
+                    (now, cutoff_date, *source_params),
+                )
+                promoted = max(0, int(cursor.rowcount or 0))
+                self._connection.execute(
+                    """
+                    INSERT INTO app_state (key, value, updated_at)
+                    VALUES (?, 'complete', ?)
+                    ON CONFLICT(key) DO UPDATE SET
+                        value = excluded.value,
+                        updated_at = excluded.updated_at
+                    """,
+                    (RECENT_FEED_CATCHUP_STATE_KEY, now),
+                )
+                self._connection.commit()
+                return promoted
+            except Exception:
+                self._connection.rollback()
+                raise
+
+    async def mark_recent_suppressed_catchup_complete(self) -> None:
+        """Prevent a fresh installation from replaying its intentionally silent baseline."""
+        async with self._lock:
+            try:
+                now = _utc_now()
+                self._connection.execute(
+                    """
+                    INSERT INTO app_state (key, value, updated_at)
+                    VALUES (?, 'complete', ?)
+                    ON CONFLICT(key) DO UPDATE SET
+                        value = excluded.value,
+                        updated_at = excluded.updated_at
+                    """,
+                    (RECENT_FEED_CATCHUP_STATE_KEY, now),
+                )
+                self._connection.commit()
+            except Exception:
+                self._connection.rollback()
+                raise
 
     async def mark_delivery_sending(self, delivery_id: int) -> None:
         async with self._lock:

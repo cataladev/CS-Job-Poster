@@ -1,8 +1,8 @@
 # CS Job Poster
 
-A focused Discord publisher for curated U.S. internships and new-grad roles.
+A focused Discord publisher for curated internships and new-grad roles.
 
-The bot polls six feeds from five GitHub repositories, combines every successful
+The bot polls ten active job surfaces from five GitHub repositories, combines every successful
 snapshot, removes duplicates across sources, and publishes newly added roles to
 separate internship and new-grad Discord channels. It does not scrape company sites;
 its only MVP command configures those posting channels.
@@ -14,8 +14,8 @@ its only MVP command configures those posting channels.
 - Fails closed when a feed is malformed, suspiciously empty, or unavailable.
 - Uses conditional GitHub requests (`ETag` and `Last-Modified`) to avoid reprocessing
   unchanged feeds.
-- Requires explicit U.S. evidence in Simplify's mixed-location data. Files explicitly
-  scoped to U.S. roles are trusted unless a row clearly names a foreign location.
+- Includes every active row in the configured README job tables, including explicitly
+  international files and rows. Archived and inactive tables are not feeds.
 - Applies no title, category, seniority, season, or job-age filter.
 - Sends internships to `DISCORD_CHANNEL_ID` and new-grad roles to
   `DISCORD_NEW_GRAD_CHANNEL_ID`.
@@ -32,15 +32,21 @@ the runtime.
 
 | Feed | Ref and file | Format |
 |---|---|---|
-| Simplify internships | `SimplifyJobs/Summer2027-Internships` — `dev/.github/scripts/listings.json` | JSON |
-| Simplify new grad | `SimplifyJobs/New-Grad-Positions` — `dev/.github/scripts/listings.json` | JSON |
+| Simplify summer internships | `SimplifyJobs/Summer2027-Internships` — `dev/README.md` | Markdown/HTML table |
+| Simplify off-season internships | `SimplifyJobs/Summer2027-Internships` — `dev/README-Off-Season.md` | Markdown/HTML table |
+| Simplify new grad | `SimplifyJobs/New-Grad-Positions` — `dev/README.md` | Markdown/HTML table |
 | SpeedyApply internships | `speedyapply/2027-SWE-College-Jobs` — `main/README.md` | Markdown/HTML table |
 | SpeedyApply new grad | `speedyapply/2027-SWE-College-Jobs` — `main/NEW_GRAD_USA.md` | Markdown/HTML table |
+| SpeedyApply international internships | `speedyapply/2027-SWE-College-Jobs` — `main/INTERN_INTL.md` | Markdown/HTML table |
+| SpeedyApply international new grad | `speedyapply/2027-SWE-College-Jobs` — `main/NEW_GRAD_INTL.md` | Markdown/HTML table |
 | sndsh internships | `sndsh404/summer-2027-internships` — `main/README.md` | Markdown table |
 | Internship Engine | `zshah101/Automated-List-Of-Summer-2027-and-Fall-2026-Tech-Internships` — `main/docs/api/jobs.json` | JSON |
+| Internship Engine README | `zshah101/Automated-List-Of-Summer-2027-and-Fall-2026-Tech-Internships` — `main/README.md` | Markdown/HTML table |
 
 The fixed feed definitions live in `job_bot/github_feeds.py`. `config/sources.yaml`
-is deliberately not a runtime switchboard for the MVP.
+is deliberately not a runtime switchboard for the MVP. Continuation rows inherit the
+preceding company, missing locations are retained as `Not specified`, and every safe
+direct application link in a multi-apply row is observed before global deduplication.
 
 ## Duplicate guarantees
 
@@ -101,6 +107,7 @@ Optional runtime settings:
 
 ```dotenv
 POLL_INTERVAL_SECONDS=300
+RECENT_CATCHUP_HOURS=48
 REQUEST_TIMEOUT_SECONDS=20
 REQUEST_RETRIES=2
 SOURCE_CONCURRENCY=6
@@ -109,7 +116,10 @@ LOG_LEVEL=INFO
 USER_AGENT=cs-job-poster/2.0
 ```
 
-`POLL_INTERVAL_SECONDS` has a minimum of 30 seconds. SQLite remains supported for
+`POLL_INTERVAL_SECONDS` has a minimum of 30 seconds. `RECENT_CATCHUP_HOURS` is a
+one-time upgrade bridge: an already-baselined deployment queues suppressed roles whose
+source date falls in that window, while a fresh installation keeps its first inventory
+silent. SQLite remains supported for
 isolated tests and migration tooling, but the production publisher requires Postgres
 so a database advisory lock can prevent competing workers.
 
@@ -127,7 +137,7 @@ make db-migrate
 make run-postgres
 ```
 
-On the first successful run, all six current inventories are saved with suppressed
+On the first successful run, all ten current inventories are saved with suppressed
 deliveries and nothing is posted. A partial first run cannot complete that baseline.
 Each feed added later also gets its own silent first snapshot.
 
@@ -158,7 +168,7 @@ post editing, branding, and enrichment.
 ## Important modules
 
 - `job_bot/github_feeds.py` — feed definitions, conditional fetching, schema adapters.
-- `job_bot/utils/feed_normalization.py` — U.S. classification, link safety, ATS keys.
+- `job_bot/utils/feed_normalization.py` — location handling, link safety, ATS keys.
 - `job_bot/feed_pipeline.py` — concurrent collection, silent baselines, ingestion.
 - `job_bot/database.py` — observations, canonical merging, delivery outbox.
 - `job_bot/feed_publisher.py` — Discord embeds and marker reconciliation.

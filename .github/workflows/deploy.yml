@@ -66,6 +66,7 @@ jobs:
           DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
           DEPLOY_AUTO_UPDATE_UNIT: ${{ secrets.DEPLOY_AUTO_UPDATE_UNIT }}
+          DEPLOY_SERVICE_UNIT: ${{ secrets.DEPLOY_SERVICE_UNIT }}
         run: |
           set -euo pipefail
           : "${DEPLOY_HOST:?Missing DEPLOY_HOST secret}"
@@ -73,10 +74,11 @@ jobs:
 
           DEPLOY_PORT="${DEPLOY_PORT:-22}"
           DEPLOY_AUTO_UPDATE_UNIT="${DEPLOY_AUTO_UPDATE_UNIT:-job-bot-auto-update.service}"
+          DEPLOY_SERVICE_UNIT="${DEPLOY_SERVICE_UNIT:-job-bot.service}"
 
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
           ssh-keyscan -p "${DEPLOY_PORT}" -H "${DEPLOY_HOST}" >> ~/.ssh/known_hosts
 
           ssh -p "${DEPLOY_PORT}" "${DEPLOY_USER}@${DEPLOY_HOST}" \
-            "sudo systemctl start '${DEPLOY_AUTO_UPDATE_UNIT}' && sudo systemctl show '${DEPLOY_AUTO_UPDATE_UNIT}' --property=Result,ExecMainStatus,ActiveState,SubState --no-pager && sudo journalctl -u '${DEPLOY_AUTO_UPDATE_UNIT}' -n 50 --no-pager"
+            "sudo systemctl start '${DEPLOY_AUTO_UPDATE_UNIT}' && sudo systemctl show '${DEPLOY_AUTO_UPDATE_UNIT}' --property=Result,ExecMainStatus,ActiveState,SubState --no-pager && sudo journalctl -u '${DEPLOY_AUTO_UPDATE_UNIT}' -n 50 --no-pager && sudo systemctl show '${DEPLOY_SERVICE_UNIT}' --property=Result,ExecMainStatus,ActiveState,SubState --no-pager && sudo journalctl -u '${DEPLOY_SERVICE_UNIT}' -n 100 --no-pager"

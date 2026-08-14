@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime, timedelta
 from typing import Callable, Iterable, Protocol
 
 from job_bot.database import Database
@@ -32,6 +33,7 @@ class FeedRunStats:
     canonicals_merged: int = 0
     deliveries_queued: int = 0
     deliveries_suppressed: int = 0
+    deliveries_promoted: int = 0
     deliveries_sent: int = 0
     deliveries_reconciled: int = 0
     baseline_completed: bool = False
@@ -205,13 +207,38 @@ class FeedPipeline:
                     feed.source_id for feed in self.feeds
                 )
                 if stats.baseline_completed:
+                    await self.database.mark_recent_suppressed_catchup_complete()
                     self.logger.info("initial_feed_baseline_completed")
+
+            if initial_baseline_complete and not stats.errors:
+                cutoff_date = (
+                    datetime.now(UTC) - timedelta(hours=self.config.recent_catchup_hours)
+                ).date().isoformat()
+                stats.deliveries_promoted = (
+                    await self.database.promote_recent_suppressed_deliveries_once(
+                        cutoff_date,
+                        (
+                            (feed.source_id, f"{feed.branch}/{feed.path}")
+                            for feed in self.feeds
+                        ),
+                    )
+                    if self.config.recent_catchup_hours > 0
+                    else 0
+                )
+                if self.config.recent_catchup_hours == 0:
+                    await self.database.mark_recent_suppressed_catchup_complete()
+                if stats.deliveries_promoted:
+                    self.logger.info(
+                        "recent_baseline_deliveries_promoted count=%s cutoff_date=%s",
+                        stats.deliveries_promoted,
+                        cutoff_date,
+                    )
 
             sent, reconciled = await self.publisher.publish_pending()
             stats.deliveries_sent = sent
             stats.deliveries_reconciled = reconciled
             self.logger.info(
-                "feed_run_finished feeds=%s observations=%s rejected=%s created=%s duplicates=%s merged=%s queued=%s suppressed=%s sent=%s reconciled=%s errors=%s",
+                "feed_run_finished feeds=%s observations=%s rejected=%s created=%s duplicates=%s merged=%s queued=%s suppressed=%s promoted=%s sent=%s reconciled=%s errors=%s",
                 stats.feeds_checked,
                 stats.observations,
                 stats.rejected,
@@ -220,6 +247,7 @@ class FeedPipeline:
                 stats.canonicals_merged,
                 stats.deliveries_queued,
                 stats.deliveries_suppressed,
+                stats.deliveries_promoted,
                 stats.deliveries_sent,
                 stats.deliveries_reconciled,
                 len(stats.errors),
