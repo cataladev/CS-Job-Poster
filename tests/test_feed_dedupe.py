@@ -324,6 +324,8 @@ async def test_equivalent_state_names_and_specific_seasons_merge_across_sources(
         assert not second.created
         assert first.canonical_id == second.canonical_id
         assert await database.get_delivery_counts() == {"pending": 1}
+        canonical = (await database.get_canonical_jobs([first.canonical_id]))[0]
+        assert canonical.canonical_url == "https://www.notion.so/careers/engineering-intern"
     finally:
         await database.close()
 

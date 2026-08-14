@@ -32,6 +32,15 @@ NEW_GRAD_SIGNALS = {
     "software developer 1",
     "associate software engineer",
 }
+NON_CANDIDATE_EARLY_CAREER_SIGNALS = {
+    "head of",
+    "director",
+    "manager",
+    "recruiter",
+    "recruiting",
+    "recruitment",
+    "talent",
+}
 PRETTY_CATEGORY_NAMES = {
     "requested": "Requested",
     "fortune500": "Fortune500",
@@ -122,11 +131,21 @@ class TrackClassifier:
         summary: str = "",
         employment_type: str = "",
     ) -> TrackClassification:
-        text = " ".join([title.lower(), summary.lower(), employment_type.lower()])
-        if self._has_any(text, INTERNSHIP_SIGNALS):
+        # Descriptions frequently mention interns, internal tools, or graduate
+        # requirements for an otherwise full-time role. They are not safe routing
+        # evidence. Route only on the actual title and structured employment type.
+        title_text = title.lower()
+        employment_text = employment_type.lower()
+        if self._has_any(title_text, INTERNSHIP_SIGNALS):
             return TrackClassification("internship", "internship_signal")
-        if self._has_any(text, NEW_GRAD_SIGNALS):
+        if self._has_any(title_text, NEW_GRAD_SIGNALS):
+            if self._has_any(title_text, NON_CANDIDATE_EARLY_CAREER_SIGNALS):
+                return TrackClassification(None, "non_candidate_early_career_role")
             return TrackClassification("new_grad", "new_grad_signal")
+        if self._has_any(employment_text, INTERNSHIP_SIGNALS):
+            return TrackClassification("internship", "internship_employment_signal")
+        if self._has_any(employment_text, NEW_GRAD_SIGNALS):
+            return TrackClassification("new_grad", "new_grad_employment_signal")
         return TrackClassification(None, "no_track_signal")
 
     def matches(self, job: JobPosting, expected_track: str) -> bool:

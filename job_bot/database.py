@@ -10,7 +10,11 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from job_bot.models import CanonicalJob, FeedIngestResult, JobPosting
-from job_bot.utils.feed_normalization import role_signature, role_title_key
+from job_bot.utils.feed_normalization import (
+    preferred_application_url,
+    role_signature,
+    role_title_key,
+)
 from job_bot.utils.normalization import normalize_company_name
 
 try:
@@ -1151,13 +1155,17 @@ class Database:
                     created = True
 
                 canonical_row = self._connection.execute(
-                    "SELECT source_names, provenance_tags, summary FROM canonical_jobs WHERE id = ?",
+                    "SELECT source_names, provenance_tags, summary, canonical_url FROM canonical_jobs WHERE id = ?",
                     (canonical_id,),
                 ).fetchone()
                 existing_sources = json.loads(canonical_row["source_names"] or "[]")
                 existing_provenance = json.loads(canonical_row["provenance_tags"] or "[]")
                 merged_sources = sorted(set(existing_sources + [source_id]))
                 merged_provenance = sorted(set(existing_provenance + list(job.provenance_tags)))
+                canonical_url = preferred_application_url(
+                    str(canonical_row["canonical_url"] or ""),
+                    job.canonical_url or job.url,
+                )
                 self._connection.execute(
                     """
                     UPDATE canonical_jobs
@@ -1171,7 +1179,7 @@ class Database:
                         _json_dump(merged_sources),
                         _json_dump(merged_provenance),
                         job.summary,
-                        job.canonical_url or job.url,
+                        canonical_url,
                         canonical_id,
                     ),
                 )

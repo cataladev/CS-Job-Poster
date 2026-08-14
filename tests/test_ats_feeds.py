@@ -155,3 +155,36 @@ def test_direct_ats_parser_ignores_non_early_career_and_non_us_jobs() -> None:
 
     assert observations == []
     assert rejected == 0
+
+
+def test_direct_ats_parser_routes_explicit_new_grad_title_despite_internship_text() -> None:
+    payload = {
+        "jobs": [
+            {
+                "id": "notion-new-grad",
+                "title": "Software Engineer, New Grad (Dec 2026)",
+                "location": "San Francisco, California",
+                "jobUrl": "/notion/notion-new-grad",
+                "employmentType": "FullTime",
+                "descriptionPlain": (
+                    "Build internal tools and occasionally support the internship program."
+                ),
+            },
+            {
+                "id": "notion-recruiting",
+                "title": "Head of Early Career Recruiting",
+                "location": "San Francisco, California",
+                "jobUrl": "/notion/notion-recruiting",
+                "employmentType": "FullTime",
+            },
+        ]
+    }
+
+    observations, rejected = parse_direct_ats_json(
+        json.dumps(payload), _definition("ashby")
+    )
+
+    assert rejected == 0
+    assert [(job.external_id, job.track) for job in observations] == [
+        ("notion-new-grad", "new_grad"),
+    ]

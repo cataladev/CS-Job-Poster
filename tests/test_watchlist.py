@@ -116,6 +116,24 @@ def test_track_classifier_distinguishes_internship_and_new_grad() -> None:
     assert new_grad.track == "new_grad"
 
 
+def test_track_classifier_does_not_route_from_description_mentions() -> None:
+    classifier = TrackClassifier()
+
+    ambiguous = classifier.classify(
+        title="Software Engineer",
+        summary="Partners with intern and new grad cohorts across the company.",
+        employment_type="Full Time",
+    )
+    explicit_new_grad = classifier.classify(
+        title="Software Engineer, New Grad",
+        summary="Previous internship experience is a plus.",
+        employment_type="Full Time",
+    )
+
+    assert ambiguous.track is None
+    assert explicit_new_grad.track == "new_grad"
+
+
 @pytest.mark.asyncio
 async def test_watchlist_list_companies_returns_alphabetical_order(config_factory) -> None:
     config = config_factory()

@@ -128,6 +128,16 @@ _DOWNLOAD_SUFFIXES = (
     ".xlsm",
     ".zip",
 )
+_AGGREGATOR_APPLICATION_HOSTS = frozenset(
+    {
+        "jobright.ai",
+        "www.jobright.ai",
+        "simplify.jobs",
+        "www.simplify.jobs",
+        "speedyapply.com",
+        "www.speedyapply.com",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -270,6 +280,21 @@ def external_identity_keys(url: str, *, company: str = "") -> set[str]:
         )
         keys.update(f"req:{company}:{value}" for value in stable_ids)
     return keys
+
+
+def preferred_application_url(existing_url: str, candidate_url: str) -> str:
+    """Keep a direct application destination when an aggregator copy arrives."""
+    if not existing_url:
+        return candidate_url
+    if not candidate_url:
+        return existing_url
+    existing_host = (urlsplit(existing_url).hostname or "").casefold()
+    candidate_host = (urlsplit(candidate_url).hostname or "").casefold()
+    existing_is_aggregator = existing_host in _AGGREGATOR_APPLICATION_HOSTS
+    candidate_is_aggregator = candidate_host in _AGGREGATOR_APPLICATION_HOSTS
+    if existing_is_aggregator and not candidate_is_aggregator:
+        return candidate_url
+    return existing_url
 
 
 def location_scoped_identity_keys(
