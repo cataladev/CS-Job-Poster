@@ -201,6 +201,33 @@ async def test_fresh_baseline_never_replays_recent_inventory(config_factory) -> 
 
 
 @pytest.mark.asyncio
+async def test_pipeline_rejects_non_us_observation_before_ingestion(config_factory) -> None:
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    feed = _feed("one")
+    fetcher = StubFetcher(
+        {"one": [_job("one", "canada", location="Toronto, ON, Canada")]}
+    )
+    pipeline = FeedPipeline(
+        config=config,
+        database=database,
+        publisher=StubPublisher(),
+        feeds=(feed,),
+        fetcher=fetcher,
+    )
+    try:
+        result = await pipeline.run()
+
+        assert result.baseline_completed
+        assert result.rejected == 1
+        assert result.canonical_created == 0
+        assert await database.get_delivery_counts() == {}
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_partial_baseline_never_queues_jobs(config_factory) -> None:
     config = config_factory()
     database = Database(config.sqlite_db_path)

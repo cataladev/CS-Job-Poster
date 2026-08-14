@@ -1576,6 +1576,22 @@ class Database:
                 self._connection.rollback()
                 raise
 
+    async def mark_delivery_suppressed(self, delivery_id: int, reason: str) -> None:
+        async with self._lock:
+            try:
+                self._connection.execute(
+                    """
+                    UPDATE discord_deliveries
+                    SET state = 'suppressed', last_error = ?, updated_at = ?
+                    WHERE id = ? AND state IN ('pending', 'sending', 'uncertain')
+                    """,
+                    (reason[:2_000], _utc_now(), delivery_id),
+                )
+                self._connection.commit()
+            except Exception:
+                self._connection.rollback()
+                raise
+
     async def mark_delivery_sent(
         self,
         *,

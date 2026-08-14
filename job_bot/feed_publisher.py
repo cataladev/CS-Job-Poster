@@ -9,6 +9,7 @@ import discord
 
 from job_bot.database import Database
 from job_bot.models import AppConfig, CanonicalJob
+from job_bot.utils.feed_normalization import is_us_location
 
 
 def _truncate(value: object, limit: int) -> str:
@@ -79,6 +80,29 @@ class TrackChannelPublisher:
                     delivery["id"],
                     canonical_id,
                     existing_message_id,
+                )
+                continue
+
+            location_parts = [
+                part.strip() for part in job.location.split("|") if part.strip()
+            ]
+            if not location_parts or not all(
+                is_us_location(
+                    location,
+                    trusted_us=False,
+                    context=job.canonical_url,
+                )
+                for location in location_parts
+            ):
+                await self.database.mark_delivery_suppressed(
+                    int(delivery["id"]),
+                    "non-U.S. location rejected by publisher",
+                )
+                self.logger.warning(
+                    "delivery_suppressed_non_us delivery=%s canonical=%s location=%s",
+                    delivery["id"],
+                    canonical_id,
+                    job.location,
                 )
                 continue
 

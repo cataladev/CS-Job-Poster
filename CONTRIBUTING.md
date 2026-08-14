@@ -1,6 +1,6 @@
 # Contributing
 
-This project is a two-channel Discord publisher for curated internships and
+This project is a two-channel Discord publisher for curated U.S. internships and
 new-grad roles. Read `README.md` before changing runtime behavior.
 
 ## Setup
@@ -30,6 +30,8 @@ SQLite is supported for isolated unit tests only.
   jobs disappeared.
 - Keep Discord sending behind the transactional outbox and marker reconciliation.
 - Never weaken safe-link validation to rescue a single malformed upstream row.
+- Treat U.S.-only delivery as a hard invariant at both ingestion and publication;
+  source filenames alone are not sufficient location evidence.
 - Keep the MVP slash-command boundary limited to channel administration. Do not
   connect legacy text commands, scraping, watchlists, branding, edits, or closure
   handling to `bot.py`; those features are deferred in `TODO.md`.

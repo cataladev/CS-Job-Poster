@@ -78,7 +78,6 @@ class FeedDefinition:
     track: str
     parser: Parser
     trusted_us: bool = False
-    all_locations: bool = False
     cycle_hint: str | None = None
 
     @property
@@ -150,7 +149,12 @@ def _us_locations(
     trusted_us: bool,
     context: str,
 ) -> list[str]:
-    cleaned = [clean_feed_text(location) for location in locations if clean_feed_text(location)]
+    cleaned: list[str] = []
+    for location in locations:
+        for fragment in re.split(r"\s*(?:\||;|\r?\n)\s*", str(location or "")):
+            value = clean_feed_text(fragment)
+            if value:
+                cleaned.append(value)
     if not cleaned:
         return ["United States"] if trusted_us else []
     accepted = [
@@ -160,8 +164,7 @@ def _us_locations(
     ]
     if accepted:
         return accepted
-    joined = " / ".join(cleaned)
-    return cleaned if is_us_location(joined, trusted_us=trusted_us, context=context) else []
+    return []
 
 
 def _feed_locations(
@@ -170,14 +173,19 @@ def _feed_locations(
     definition: FeedDefinition,
     context: str,
 ) -> list[str]:
-    cleaned = [clean_feed_text(location) for location in locations if clean_feed_text(location)]
-    if definition.all_locations:
-        return cleaned or ["Not specified"]
     return _us_locations(
-        cleaned,
+        locations,
         trusted_us=definition.trusted_us,
         context=context,
     )
+
+
+def _location_cell_values(cell: Tag) -> list[str]:
+    values = [clean_feed_text(value) for value in cell.stripped_strings]
+    values = [value for value in values if value]
+    if len(values) > 1 and re.fullmatch(r"\d+\s+locations?", values[0], re.IGNORECASE):
+        values = values[1:]
+    return values
 
 
 def _company_name(value: str, previous: str | None) -> tuple[str, str | None]:
@@ -296,7 +304,7 @@ def parse_markdown_table(text: str, definition: FeedDefinition) -> tuple[list[Jo
             raw_company = clean_feed_text(cells[company_index].get_text(" ", strip=True))
             company, previous_company = _company_name(raw_company, previous_company)
             title = clean_feed_text(cells[title_index].get_text(" ", strip=True))
-            location = clean_feed_text(cells[location_index].get_text(" ", strip=True))
+            raw_locations = _location_cell_values(cells[location_index])
             link_cells = cells[location_index + 1 :]
             links = [
                 str(link.get("href") or "")
@@ -305,7 +313,7 @@ def parse_markdown_table(text: str, definition: FeedDefinition) -> tuple[list[Jo
             ]
             application_urls = _preferred_application_urls(links)
             locations = _feed_locations(
-                [location],
+                raw_locations,
                 definition=definition,
                 context=f"{title} {' '.join(application_urls)}",
             )
@@ -423,7 +431,6 @@ FEEDS: tuple[FeedDefinition, ...] = (
         "README.md",
         "internship",
         parse_markdown_table,
-        all_locations=True,
         cycle_hint="Summer 2027",
     ),
     FeedDefinition(
@@ -434,7 +441,6 @@ FEEDS: tuple[FeedDefinition, ...] = (
         "README.md",
         "new_grad",
         parse_markdown_table,
-        all_locations=True,
         cycle_hint="2027",
     ),
     FeedDefinition(
@@ -445,7 +451,6 @@ FEEDS: tuple[FeedDefinition, ...] = (
         "README-Off-Season.md",
         "internship",
         parse_markdown_table,
-        all_locations=True,
     ),
     FeedDefinition(
         "speedy_internships",
@@ -455,7 +460,6 @@ FEEDS: tuple[FeedDefinition, ...] = (
         "README.md",
         "internship",
         parse_markdown_table,
-        all_locations=True,
     ),
     FeedDefinition(
         "speedy_new_grad",
@@ -465,29 +469,6 @@ FEEDS: tuple[FeedDefinition, ...] = (
         "NEW_GRAD_USA.md",
         "new_grad",
         parse_markdown_table,
-        all_locations=True,
-        cycle_hint="2027",
-    ),
-    FeedDefinition(
-        "speedy_internships_international",
-        "SpeedyApply",
-        "speedyapply/2027-SWE-College-Jobs",
-        "main",
-        "INTERN_INTL.md",
-        "internship",
-        parse_markdown_table,
-        all_locations=True,
-        cycle_hint="2027",
-    ),
-    FeedDefinition(
-        "speedy_new_grad_international",
-        "SpeedyApply",
-        "speedyapply/2027-SWE-College-Jobs",
-        "main",
-        "NEW_GRAD_INTL.md",
-        "new_grad",
-        parse_markdown_table,
-        all_locations=True,
         cycle_hint="2027",
     ),
     FeedDefinition(
@@ -498,7 +479,6 @@ FEEDS: tuple[FeedDefinition, ...] = (
         "README.md",
         "internship",
         parse_markdown_table,
-        all_locations=True,
         cycle_hint="Summer 2027",
     ),
     FeedDefinition(
@@ -509,7 +489,6 @@ FEEDS: tuple[FeedDefinition, ...] = (
         "docs/api/jobs.json",
         "internship",
         parse_intern_engine_json,
-        trusted_us=True,
     ),
     FeedDefinition(
         "intern_engine_readme",
@@ -519,7 +498,6 @@ FEEDS: tuple[FeedDefinition, ...] = (
         "README.md",
         "internship",
         parse_markdown_table,
-        all_locations=True,
     ),
 )
 
