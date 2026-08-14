@@ -68,7 +68,7 @@ fi
 chown -R "${APP_USER}:${APP_USER}" "${APP_DIR}"
 
 if [[ ! -f "${ENV_FILE}" ]]; then
-  cp "${APP_DIR}/deploy/job-bot.env.example" "${ENV_FILE}"
+  cp "${APP_DIR}/deploy/prod.env.example" "${ENV_FILE}"
 fi
 
 chown root:"${APP_USER}" "${ENV_FILE}"

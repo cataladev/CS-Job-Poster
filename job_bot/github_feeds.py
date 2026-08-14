@@ -545,6 +545,7 @@ def parse_jobright_public_cards(
                     "employment_type": employment_type,
                     "work_model": clean_feed_text(job.get("workModel")),
                     "salary": clean_feed_text(job.get("salaryDesc")),
+                    "company_logo_url": company_data.get("companyLogo") or job.get("jdLogo"),
                 },
             )
         )

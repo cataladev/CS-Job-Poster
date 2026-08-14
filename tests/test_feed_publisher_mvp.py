@@ -71,6 +71,7 @@ async def _create_pending_delivery(
     channel_id: int = 111,
     external_id: str = "job-1",
     location: str = "Austin, TX",
+    raw_data: dict | None = None,
 ) -> None:
     title = "Software Engineer Intern" if track == "internship" else "Software Engineer"
     observation = JobObservation(
@@ -86,6 +87,7 @@ async def _create_pending_delivery(
         ).url,
         track=track,
         cycle="Summer 2027",
+        raw_data=raw_data or {},
     )
     job = normalize_job_posting(observation.to_job_posting())
     key = role_signature(
@@ -282,6 +284,29 @@ async def test_embed_omits_feed_credit_and_contains_safe_apply_link(config_facto
         assert all(field.name != "Source(s)" for field in embed.fields)
         assert "github.com/owner/source" not in str(embed.to_dict())
         assert delivery["marker"] in embed.footer.text
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_delivery_uses_source_company_logo_thumbnail(config_factory) -> None:
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    try:
+        logo_url = "https://cdn.example.com/company-logo.png?token=still-valid"
+        await _create_pending_delivery(
+            database,
+            raw_data={"company_logo_url": logo_url},
+        )
+        channel = FakeChannel([])
+        publisher = TrackChannelPublisher(config, database)
+        publisher.bind_client(FakeClient(channel))  # type: ignore[arg-type]
+
+        sent, reconciled = await publisher.publish_pending()
+
+        assert (sent, reconciled) == (1, 0)
+        assert channel.sent[0].thumbnail.url == logo_url
     finally:
         await database.close()
 

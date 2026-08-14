@@ -121,12 +121,30 @@ The command verifies all four posting permissions, refuses to assign both tracks
 the same channel, persists the setting in Postgres, and safely moves only suppressed
 or pending deliveries. Sent or uncertain deliveries are never replayed.
 
+Alternatively, an administrator can create (or reuse) `#internship-jobs` and
+`#new-grad-jobs`, then configure both tracks in one command. The bot needs **Manage
+Channels** for this setup command:
+
+```text
+/create-job-channels category:<optional category>
+```
+
 Configure an optional role that is mentioned only once per digest, or omit `role` to
 turn the ping off:
 
 ```text
 /set-job-alert-role track:<Internships|New grad> role:<role>
 ```
+
+Members can then opt themselves in or out without administrator access:
+
+```text
+/job-alert track:<Internships|New grad>
+```
+
+The bot must have **Manage Roles**, and its highest role must sit above both opt-in
+roles. Role mentions still happen only in the track digest, never on individual job
+posts.
 
 ## Configuration
 
@@ -165,6 +183,19 @@ window, while a fresh installation keeps its first inventory silent. SQLite rema
 isolated tests and migration tooling, but the production publisher requires Postgres
 so a database advisory lock can prevent competing workers.
 
+## Development and production environments
+
+Use distinct Discord channels, databases, and preferably separate Discord bot tokens.
+The committed templates contain no credentials:
+
+- Development/test server: `deploy/dev.env.example`
+- Production VPS: `deploy/prod.env.example` (installed outside the repo as
+  `/etc/job-bot/job-bot.env`)
+
+The production service must use Postgres and should only run on the VPS. The local
+development setup below uses a dedicated `jobbot_dev` database and is safe for a
+test Discord server; it must never point at main-server channels.
+
 ## Local development
 
 Python 3.11 is required.
@@ -173,7 +204,7 @@ Python 3.11 is required.
 python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env
+cp deploy/dev.env.example .env
 make postgres-up
 make db-migrate
 make run-postgres

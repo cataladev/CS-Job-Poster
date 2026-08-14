@@ -1684,7 +1684,7 @@ class Database:
         async with self._lock:
             rows = self._connection.execute(
                 """
-                SELECT source_id, source_label, source_url, source_ref, posted_date
+                SELECT source_id, source_label, source_url, source_ref, posted_date, payload
                 FROM feed_observations
                 WHERE canonical_id = ?
                 ORDER BY source_label ASC, source_id ASC
@@ -1694,12 +1694,21 @@ class Database:
         labels = []
         seen = set()
         dates = []
+        company_logo_urls = []
         for row in rows:
             if row["source_label"] not in seen:
                 seen.add(row["source_label"])
                 labels.append(row["source_label"])
             if row["posted_date"]:
                 dates.append(row["posted_date"])
+            try:
+                payload = json.loads(str(row["payload"] or "{}"))
+            except (TypeError, json.JSONDecodeError):
+                payload = {}
+            raw_data = payload.get("raw_data") if isinstance(payload, Mapping) else None
+            logo_url = raw_data.get("company_logo_url") if isinstance(raw_data, Mapping) else None
+            if isinstance(logo_url, str) and logo_url and logo_url not in company_logo_urls:
+                company_logo_urls.append(logo_url)
         return {
             "source_labels": labels,
             "sources": [
@@ -1712,6 +1721,7 @@ class Database:
                 if row["source_label"] and row["source_url"]
             ],
             "posted_date": min(dates) if dates else None,
+            "company_logo_url": company_logo_urls[0] if company_logo_urls else None,
         }
 
     async def get_runtime_config_value(self, key: str) -> Optional[DbRow]:

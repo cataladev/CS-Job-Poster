@@ -93,7 +93,8 @@ What this installs:
 
 ## 3. Fill in the production env file
 
-Use the generated example as the base:
+The bootstrap installs `deploy/prod.env.example` as the base. Do not copy the
+development template to the VPS:
 
 ```bash
 sudoedit /etc/job-bot/job-bot.env
@@ -139,7 +140,10 @@ the service refuses to publish to a channel without it because delivery reconcil
 would not be safe. Administrators can later change either destination with
 `/set-job-channel`; the database override survives restarts and deployments. For
 optional role pings in the periodic digest, grant **Mention Everyone** and configure
-the role with `/set-job-alert-role`.
+the role with `/set-job-alert-role`. To let members opt in themselves, also grant the
+bot **Manage Roles**, place its role above the two alert roles, and direct members to
+`/job-alert`. An administrator can create and configure both standard job channels in
+one step with `/create-job-channels` when the bot has **Manage Channels**.
 
 ## 4. Verify the service
 

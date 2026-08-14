@@ -29,6 +29,10 @@ TRACK_LABELS = {
     "internship": "Internship",
     "new_grad": "New-grad",
 }
+TRACK_CHANNEL_NAMES = {
+    "internship": "internship-jobs",
+    "new_grad": "new-grad-jobs",
+}
 
 
 @dataclass(frozen=True)
@@ -124,6 +128,83 @@ def register_job_channel_commands(
     logger = logging.getLogger("job_channel_commands")
 
     @tree.command(
+        name="job-alert",
+        description="Opt in or out of the configured internship or new-grad digest alert.",
+    )
+    @app_commands.guild_only()
+    @app_commands.describe(track="Which job digest alert should be toggled?")
+    @app_commands.choices(
+        track=[
+            app_commands.Choice(name="Internships", value="internship"),
+            app_commands.Choice(name="New grad", value="new_grad"),
+        ]
+    )
+    async def job_alert(
+        interaction: discord.Interaction,
+        track: app_commands.Choice[str],
+    ) -> None:
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message(
+                "This command must be used in a server.", ephemeral=True
+            )
+            return
+        role_id = configurator.config.alert_role_id_for_track(track.value)
+        role = guild.get_role(role_id) if role_id is not None else None
+        if role is None:
+            await interaction.response.send_message(
+                f"No opt-in {TRACK_LABELS[track.value].lower()} alert role is configured yet.",
+                ephemeral=True,
+            )
+            return
+        if role.is_default() or role.managed:
+            await interaction.response.send_message(
+                "That alert role cannot be assigned by the bot. Ask an administrator to configure another role.",
+                ephemeral=True,
+            )
+            return
+        bot_member = guild.me
+        if bot_member is None and interaction.client.user is not None:
+            bot_member = await guild.fetch_member(interaction.client.user.id)
+        if bot_member is None or not bot_member.guild_permissions.manage_roles:
+            await interaction.response.send_message(
+                "I need the Manage Roles permission to manage alert subscriptions.",
+                ephemeral=True,
+            )
+            return
+        if role >= bot_member.top_role:
+            await interaction.response.send_message(
+                "Move my bot role above the alert role, then try again.", ephemeral=True
+            )
+            return
+        member = interaction.user
+        if not isinstance(member, discord.Member):
+            member = await guild.fetch_member(interaction.user.id)
+        try:
+            if role in member.roles:
+                await member.remove_roles(role, reason="Job alert opt-out")
+                message = f"You will no longer receive {TRACK_LABELS[track.value].lower()} digest pings."
+                action = "opt_out"
+            else:
+                await member.add_roles(role, reason="Job alert opt-in")
+                message = f"You will receive {TRACK_LABELS[track.value].lower()} digest pings."
+                action = "opt_in"
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                "Discord blocked that role change. Check my role position and permissions.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_message(message, ephemeral=True)
+        logger.info(
+            "job_alert_subscription track=%s action=%s user=%s role=%s",
+            track.value,
+            action,
+            interaction.user.id,
+            role.id,
+        )
+
+    @tree.command(
         name="set-job-channel",
         description="Set the Discord channel for internship or new-grad job posts.",
     )
@@ -200,6 +281,99 @@ def register_job_channel_commands(
         else:
             logger.exception("set_job_channel_failed", exc_info=error)
             message = "I couldn't update that channel. Check the bot logs and try again."
+        if interaction.response.is_done():
+            await interaction.followup.send(message, ephemeral=True)
+        else:
+            await interaction.response.send_message(message, ephemeral=True)
+
+    @tree.command(
+        name="create-job-channels",
+        description="Create or reuse the standard job channels and configure both tracks.",
+    )
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.describe(category="Optional category that should contain both job channels.")
+    async def create_job_channels(
+        interaction: discord.Interaction,
+        category: discord.CategoryChannel | None = None,
+    ) -> None:
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message(
+                "This command must be used in a server.", ephemeral=True
+            )
+            return
+        bot_member = guild.me
+        if bot_member is None and interaction.client.user is not None:
+            bot_member = await guild.fetch_member(interaction.client.user.id)
+        if bot_member is None or not bot_member.guild_permissions.manage_channels:
+            await interaction.response.send_message(
+                "I need the Manage Channels permission to create the job channels.",
+                ephemeral=True,
+            )
+            return
+
+        channels: dict[str, discord.TextChannel] = {}
+        created_tracks: list[str] = []
+        for track_name, channel_name in TRACK_CHANNEL_NAMES.items():
+            channel = discord.utils.find(
+                lambda candidate: candidate.name == channel_name
+                and (category is None or candidate.category_id == category.id),
+                guild.text_channels,
+            )
+            if channel is None:
+                channel = await guild.create_text_channel(
+                    channel_name,
+                    category=category,
+                    reason=f"Job bot setup requested by {interaction.user}",
+                )
+                created_tracks.append(track_name)
+            try:
+                publisher.validate_channel_permissions(channel, bot_member)
+            except RuntimeError as exc:
+                await interaction.response.send_message(str(exc), ephemeral=True)
+                return
+            channels[track_name] = channel
+
+        results = []
+        for track_name, channel in channels.items():
+            result = await configurator.configure(
+                track=track_name,
+                channel_id=channel.id,
+                updated_by_user_id=str(interaction.user.id),
+            )
+            results.append(result)
+        created_label = (
+            f" Created: {', '.join(TRACK_LABELS[track] for track in created_tracks)}."
+            if created_tracks
+            else " Reused the existing standard channels."
+        )
+        await interaction.response.send_message(
+            "Configured "
+            + " and ".join(channel.mention for channel in channels.values())
+            + "."
+            + created_label,
+            ephemeral=True,
+        )
+        logger.info(
+            "job_channels_created_or_configured guild=%s user=%s created=%s channels=%s",
+            guild.id,
+            interaction.user.id,
+            created_tracks,
+            {result.track: result.channel_id for result in results},
+        )
+
+    @create_job_channels.error
+    async def create_job_channels_error(
+        interaction: discord.Interaction,
+        error: app_commands.AppCommandError,
+    ) -> None:
+        if isinstance(error, app_commands.MissingPermissions):
+            message = "Only server administrators can create or configure job channels."
+        else:
+            logger.exception("create_job_channels_failed", exc_info=error)
+            message = "I couldn't create the job channels. Check my channel permissions and try again."
         if interaction.response.is_done():
             await interaction.followup.send(message, ephemeral=True)
         else:

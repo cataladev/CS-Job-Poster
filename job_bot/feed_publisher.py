@@ -8,9 +8,16 @@ from typing import Any
 
 import discord
 
+from job_bot.branding import BrandingResolver
 from job_bot.database import Database
 from job_bot.models import AppConfig, CanonicalJob
-from job_bot.utils.feed_normalization import is_us_location
+from job_bot.utils.feed_normalization import is_us_location, sanitize_application_url
+from job_bot.utils.http import AsyncHttpClient
+
+
+FALLBACK_COMPANY_THUMBNAIL_URL = (
+    "https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/72x72/1f9cc.png"
+)
 
 
 def _truncate(value: object, limit: int) -> str:
@@ -22,8 +29,10 @@ class TrackChannelPublisher:
     def __init__(self, config: AppConfig, database: Database) -> None:
         self.config = config
         self.database = database
+        self.branding = BrandingResolver(config, database)
         self.client: discord.Client | None = None
         self.logger = logging.getLogger(self.__class__.__name__)
+        self._logo_cache: dict[str, str] = {}
         # The core feeds and the slower direct-ATS sweep run independently. Keep
         # the stateful pending-delivery claim/send flow single-file so concurrent
         # collectors cannot read the same pending delivery and post it twice.
@@ -48,20 +57,28 @@ class TrackChannelPublisher:
             and self.config.discord_new_grad_channel_id != self.config.discord_channel_id
         ):
             channel_ids.add(self.config.discord_new_grad_channel_id)
-        for channel_id in sorted(channel_ids):
-            try:
-                await self._initialize_digest_cursor(channel_id)
-                channel_sent, channel_reconciled = await self._publish_channel(channel_id)
-                await self._publish_digest_if_due(channel_id)
-            except (RuntimeError, discord.HTTPException) as exc:
-                self.logger.error(
-                    "delivery_channel_blocked channel=%s error=%s",
-                    channel_id,
-                    exc,
-                )
-                continue
-            sent += channel_sent
-            reconciled += channel_reconciled
+        async with AsyncHttpClient(
+            timeout_seconds=self.config.request_timeout_seconds,
+            retries=self.config.request_retries,
+            user_agent=self.config.user_agent,
+        ) as http_client:
+            for channel_id in sorted(channel_ids):
+                try:
+                    await self._initialize_digest_cursor(channel_id)
+                    channel_sent, channel_reconciled = await self._publish_channel(
+                        channel_id,
+                        http_client=http_client,
+                    )
+                    await self._publish_digest_if_due(channel_id)
+                except (RuntimeError, discord.HTTPException) as exc:
+                    self.logger.error(
+                        "delivery_channel_blocked channel=%s error=%s",
+                        channel_id,
+                        exc,
+                    )
+                    continue
+                sent += channel_sent
+                reconciled += channel_reconciled
         return sent, reconciled
 
     async def _initialize_digest_cursor(self, channel_id: int) -> None:
@@ -142,7 +159,12 @@ class TrackChannelPublisher:
             message.id,
         )
 
-    async def _publish_channel(self, channel_id: int) -> tuple[int, int]:
+    async def _publish_channel(
+        self,
+        channel_id: int,
+        *,
+        http_client: AsyncHttpClient,
+    ) -> tuple[int, int]:
         deliveries = await self.database.list_deliveries_for_send(channel_id)
         if not deliveries:
             return 0, 0
@@ -202,10 +224,20 @@ class TrackChannelPublisher:
                 continue
 
             metadata = await self.database.get_feed_observation_metadata(canonical_id)
+            logo_url = await self._resolve_logo_url(
+                job,
+                metadata=metadata,
+                http_client=http_client,
+            )
             await self.database.mark_delivery_sending(int(delivery["id"]))
             try:
                 message = await channel.send(
-                    embed=self.build_embed(job, marker=marker, metadata=metadata)
+                    embed=self.build_embed(
+                        job,
+                        marker=marker,
+                        metadata=metadata,
+                        logo_url=logo_url,
+                    )
                 )
             except (discord.HTTPException, asyncio.TimeoutError) as exc:
                 await self.database.mark_delivery_uncertain(int(delivery["id"]), str(exc))
@@ -242,6 +274,7 @@ class TrackChannelPublisher:
         *,
         marker: str,
         metadata: dict[str, Any],
+        logo_url: str | None = None,
     ) -> discord.Embed:
         embed = discord.Embed(
             title=_truncate(job.title, 256),
@@ -271,8 +304,43 @@ class TrackChannelPublisher:
         )
         if metadata.get("posted_date"):
             embed.add_field(name="Posted", value=metadata["posted_date"], inline=True)
+        if logo_url:
+            embed.set_thumbnail(url=logo_url)
         embed.set_footer(text=f"Job Bot • {marker}")
         return embed
+
+    async def _resolve_logo_url(
+        self,
+        job: CanonicalJob,
+        *,
+        metadata: dict[str, Any],
+        http_client: AsyncHttpClient,
+    ) -> str:
+        """Prefer the logo supplied by a source, then cached verified branding."""
+        source_logo = self._safe_thumbnail_url(metadata.get("company_logo_url"))
+        if source_logo:
+            return source_logo
+
+        cache_key = job.normalized_company or job.company.casefold()
+        cached = self._logo_cache.get(cache_key)
+        if cached:
+            return cached
+        try:
+            resolved = await self.branding.resolve_logo_url_for_job(
+                job,
+                http_client=http_client,
+            )
+        except Exception as exc:
+            self.logger.debug("company_logo_resolution_failed company=%s error=%s", job.company, exc)
+            resolved = None
+        logo_url = self._safe_thumbnail_url(resolved) or FALLBACK_COMPANY_THUMBNAIL_URL
+        self._logo_cache[cache_key] = logo_url
+        return logo_url
+
+    @staticmethod
+    def _safe_thumbnail_url(value: object) -> str:
+        raw_url = str(value or "").strip()
+        return raw_url if sanitize_application_url(raw_url).url else ""
 
     def build_digest_embed(
         self,
