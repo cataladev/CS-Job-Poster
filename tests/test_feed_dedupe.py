@@ -281,6 +281,51 @@ async def test_cycle_suffix_in_title_does_not_create_duplicate(config_factory) -
 
 
 @pytest.mark.asyncio
+async def test_start_month_and_national_location_merge_across_sources(config_factory) -> None:
+    """A sparse repo row and an ATS row for one role must produce one post."""
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    try:
+        direct_ats = JobObservation(
+            source_id="direct_ats_ashby_notion",
+            source_label="Notion direct careers",
+            source_url="https://jobs.ashbyhq.com/notion",
+            external_id="notion-ats-1",
+            company="Notion",
+            title="Software Engineer, New Grad (Dec 2026)",
+            locations=["San Francisco, CA"],
+            application_url="https://jobs.ashbyhq.com/notion/notion-ats-1",
+            track="new_grad",
+            cycle="2026",
+        )
+        repository_copy = JobObservation(
+            source_id="github_new_grad_list",
+            source_label="GitHub new-grad list",
+            source_url="https://github.com/example/new-grad",
+            external_id="notion-repo-1",
+            company="Notion",
+            title="Software Engineer, New Grad",
+            locations=["United States"],
+            application_url="https://jobright.ai/jobs/info/notion-new-grad",
+            track="new_grad",
+            cycle="2026",
+        )
+
+        first = await _ingest(database, direct_ats)
+        second = await _ingest(database, repository_copy)
+
+        assert first.created
+        assert not second.created
+        assert first.canonical_id == second.canonical_id
+        assert await database.get_delivery_counts() == {"pending": 1}
+        canonical = (await database.get_canonical_jobs([first.canonical_id]))[0]
+        assert canonical.canonical_url == "https://jobs.ashbyhq.com/notion/notion-ats-1"
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_equivalent_state_names_and_specific_seasons_merge_across_sources(
     config_factory,
 ) -> None:

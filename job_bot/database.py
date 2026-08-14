@@ -38,6 +38,20 @@ def _json_dump(value: Any) -> str:
     return json.dumps(value if value is not None else {}, sort_keys=True)
 
 
+def _feed_locations_overlap(
+    incoming_locations: set[str], candidate_locations: set[str]
+) -> bool:
+    """Match a national listing to its specific-city copy, never two city copies.
+
+    Repository rows sometimes only say ``United States`` while the ATS names the
+    actual city. That broad U.S. label is safe as a bridge only after company,
+    title, track, and cycle have already matched.
+    """
+    return bool(incoming_locations.intersection(candidate_locations)) or (
+        "us" in incoming_locations or "us" in candidate_locations
+    )
+
+
 SQLITE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS canonical_jobs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1093,7 +1107,7 @@ class Database:
                         candidate_locations = set(
                             json.loads(row["normalized_locations"] or "[]")
                         )
-                        if job_locations.intersection(candidate_locations):
+                        if _feed_locations_overlap(job_locations, candidate_locations):
                             candidate_ids.add(int(row["id"]))
 
                 job_locations = set(job.normalized_locations)
@@ -1113,7 +1127,9 @@ class Database:
                     same_title = role_title_key(
                         row["normalized_title"], row["season_term"]
                     ) == role_title_key(job.normalized_title, job.season_term)
-                    if same_cycle and same_title and job_locations.intersection(candidate_locations):
+                    if same_cycle and same_title and _feed_locations_overlap(
+                        job_locations, candidate_locations
+                    ):
                         candidate_ids.add(int(row["id"]))
 
                 merged_ids: List[int] = []

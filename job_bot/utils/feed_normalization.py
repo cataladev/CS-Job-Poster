@@ -138,6 +138,13 @@ _AGGREGATOR_APPLICATION_HOSTS = frozenset(
         "www.speedyapply.com",
     }
 )
+_TITLE_DATE_TOKENS = frozenset(
+    {
+        "jan", "january", "feb", "february", "mar", "march", "apr", "april",
+        "may", "jun", "june", "jul", "july", "aug", "august", "sep", "sept",
+        "september", "oct", "october", "nov", "november", "dec", "december",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -338,12 +345,19 @@ def role_signature(
 
 
 def role_title_key(normalized_title: str, cycle: str | None) -> str:
-    """Remove title tokens already represented by the separate cycle identity."""
+    """Remove title tokens already represented by the separate cycle identity.
+
+    Sources commonly append a start month, such as ``(Dec 2026)``, while the
+    company ATS and another repo use the same role name without it. The date is
+    availability metadata, not a distinct role identity.
+    """
     cycle_tokens = set(re.findall(r"[a-z0-9]+", (cycle or "").casefold()))
     removable = cycle_tokens.intersection(
         {"summer", "fall", "winter", "spring"}
         | {str(year) for year in range(2020, 2041)}
     )
     return " ".join(
-        token for token in normalized_title.casefold().split() if token not in removable
+        token
+        for token in normalized_title.casefold().split()
+        if token not in removable and token not in _TITLE_DATE_TOKENS
     )
