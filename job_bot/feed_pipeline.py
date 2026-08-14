@@ -180,6 +180,11 @@ class FeedPipeline:
                     source_merged += len(ingest.merged_canonical_ids)
                     stats.canonicals_merged += len(ingest.merged_canonical_ids)
 
+                    # The database adapter is intentionally synchronous inside its
+                    # transaction boundary. Yield between rows so large README
+                    # snapshots cannot starve Discord's gateway heartbeat.
+                    await asyncio.sleep(0)
+
                 stats.observations += len(result.observations)
                 stats.rejected += result.rejected
                 await self.database.record_feed_success(

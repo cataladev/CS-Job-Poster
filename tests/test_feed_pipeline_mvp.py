@@ -279,6 +279,48 @@ async def test_overlapping_scheduler_trigger_is_skipped(config_factory) -> None:
 
 
 @pytest.mark.asyncio
+async def test_ingestion_yields_to_gateway_heartbeat_between_rows(config_factory) -> None:
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    feed = _feed("one")
+    fetcher = StubFetcher({"one": [_job("one", "a"), _job("one", "b")]})
+    pipeline = FeedPipeline(
+        config=config,
+        database=database,
+        publisher=StubPublisher(),
+        feeds=(feed,),
+        fetcher=fetcher,
+    )
+    callback_ran = False
+    second_row_saw_callback = False
+    calls = 0
+    original_ingest = database.ingest_feed_job
+
+    async def observed_ingest(**kwargs):
+        nonlocal callback_ran, second_row_saw_callback, calls
+        calls += 1
+        if calls == 1:
+            def mark_callback() -> None:
+                nonlocal callback_ran
+                callback_ran = True
+
+            asyncio.get_running_loop().call_soon(mark_callback)
+        elif calls == 2:
+            second_row_saw_callback = callback_ran
+        return await original_ingest(**kwargs)
+
+    database.ingest_feed_job = observed_ingest  # type: ignore[method-assign]
+    try:
+        await pipeline.run()
+
+        assert callback_ran
+        assert second_row_saw_callback
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_restart_preserves_baseline_and_pending_identity(config_factory) -> None:
     config = config_factory()
     feed = _feed("one")
