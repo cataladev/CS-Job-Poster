@@ -28,6 +28,7 @@ except ImportError:  # pragma: no cover - SQLite tests do not install postgres d
 DbRow = Mapping[str, Any]
 POSTGRES_PRIMARY_RUNTIME_LOCK_ID = 5_942_248_014_240_001_17
 RECENT_FEED_CATCHUP_STATE_KEY = "readme_recent_catchup_v1"
+SEMANTIC_DEDUPE_WINDOW_DAYS = 3
 
 
 def _utc_now() -> str:
@@ -36,6 +37,28 @@ def _utc_now() -> str:
 
 def _json_dump(value: Any) -> str:
     return json.dumps(value if value is not None else {}, sort_keys=True)
+
+
+def _feed_date(value: str | None) -> datetime.date | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).date()
+    except ValueError:
+        return None
+
+
+def _semantic_dedupe_window_matches(
+    *,
+    incoming_posted_date: str | None,
+    candidate_posted_date: str | None,
+    candidate_first_seen: str,
+) -> bool:
+    """Limit metadata-only cross-source matching to the same posting window."""
+    incoming = _feed_date(incoming_posted_date) or datetime.now(timezone.utc).date()
+    candidate = _feed_date(candidate_posted_date) or _feed_date(candidate_first_seen)
+    return candidate is not None and abs((incoming - candidate).days) <= SEMANTIC_DEDUPE_WINDOW_DAYS
 
 
 def _feed_locations_overlap(
@@ -1071,6 +1094,12 @@ class Database:
             cycle=job.season_term,
             normalized_locations=job.normalized_locations,
         )
+        # The unique canonical fingerprint represents an individual posting
+        # window. Stable URL/requisition matches still merge without this limit.
+        feed_dedupe_fingerprint = (
+            f"{feed_dedupe_fingerprint}:posted:"
+            f"{(_feed_date(posted_date) or datetime.now(timezone.utc).date()).isoformat()}"
+        )
         async with self._lock:
             try:
                 candidate_ids: set[int] = set()
@@ -1113,9 +1142,13 @@ class Database:
                 job_locations = set(job.normalized_locations)
                 rows = self._connection.execute(
                     """
-                    SELECT id, normalized_title, normalized_locations, season_term
-                    FROM canonical_jobs
-                    WHERE track = ? AND normalized_company = ?
+                    SELECT c.id, c.normalized_title, c.normalized_locations,
+                           c.season_term, c.first_seen,
+                           MIN(NULLIF(o.posted_date, '')) AS first_posted_date
+                    FROM canonical_jobs c
+                    LEFT JOIN feed_observations o ON o.canonical_id = c.id
+                    WHERE c.track = ? AND c.normalized_company = ?
+                    GROUP BY c.id
                     """,
                     (job.track, job.normalized_company),
                 ).fetchall()
@@ -1127,8 +1160,17 @@ class Database:
                     same_title = role_title_key(
                         row["normalized_title"], row["season_term"]
                     ) == role_title_key(job.normalized_title, job.season_term)
-                    if same_cycle and same_title and _feed_locations_overlap(
-                        job_locations, candidate_locations
+                    if (
+                        same_cycle
+                        and same_title
+                        and _semantic_dedupe_window_matches(
+                            incoming_posted_date=posted_date,
+                            candidate_posted_date=row["first_posted_date"],
+                            candidate_first_seen=row["first_seen"],
+                        )
+                        and _feed_locations_overlap(
+                            job_locations, candidate_locations
+                        )
                     ):
                         candidate_ids.add(int(row["id"]))
 

@@ -13,7 +13,6 @@ from job_bot.utils.feed_normalization import (
     external_identity_keys,
     is_us_location,
     location_scoped_identity_keys,
-    role_signature,
 )
 from job_bot.utils.http import AsyncHttpClient
 from job_bot.utils.normalization import normalize_job_posting
@@ -159,15 +158,6 @@ class FeedPipeline:
                     canonical_keys = location_scoped_identity_keys(
                         exact_identity_keys,
                         normalized_locations=job.normalized_locations,
-                    )
-                    canonical_keys.add(
-                        role_signature(
-                            track=job.track,
-                            company=job.normalized_company,
-                            title=job.normalized_title,
-                            cycle=job.season_term,
-                            normalized_locations=job.normalized_locations,
-                        )
                     )
                     channel_id = self.config.channel_id_for_track(job.track)
                     if (

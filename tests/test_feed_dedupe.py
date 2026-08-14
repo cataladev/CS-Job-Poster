@@ -9,7 +9,6 @@ from job_bot.github_feeds import JobObservation
 from job_bot.utils.feed_normalization import (
     external_identity_keys,
     location_scoped_identity_keys,
-    role_signature,
     sanitize_application_url,
 )
 from job_bot.utils.normalization import normalize_job_posting
@@ -49,15 +48,6 @@ async def _ingest(
         exact_identity_keys,
         normalized_locations=job.normalized_locations,
     )
-    keys.add(
-        role_signature(
-            track=job.track,
-            company=job.normalized_company,
-            title=job.normalized_title,
-            cycle=job.season_term,
-            normalized_locations=job.normalized_locations,
-        )
-    )
     return await database.ingest_feed_job(
         job=job,
         source_id=normalized_observation.source_id,
@@ -80,6 +70,7 @@ def _observation(
     *,
     location: str = "Austin, TX",
     title: str = "Software Engineer Intern",
+    posted_date: str | None = None,
 ) -> JobObservation:
     return JobObservation(
         source_id=source,
@@ -92,6 +83,7 @@ def _observation(
         application_url=url,
         track="internship",
         cycle="Summer 2027",
+        posted_date=posted_date,
     )
 
 
@@ -119,6 +111,85 @@ async def test_cross_source_same_location_is_one_delivery(config_factory) -> Non
             "total_posted": 0,
             "total_deduplicated": 0,
         }
+        assert await database.get_delivery_counts() == {"pending": 1}
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_cross_source_semantic_match_requires_a_three_day_posting_window(
+    config_factory,
+) -> None:
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    try:
+        first = await _ingest(
+            database,
+            _observation(
+                "source-a",
+                "a-1",
+                "https://careers.example.com/jobs/123",
+                posted_date="2026-08-10",
+            ),
+        )
+        within_window = await _ingest(
+            database,
+            _observation(
+                "source-b",
+                "b-1",
+                "https://apply.example.com/openings/987",
+                posted_date="2026-08-13",
+            ),
+        )
+        outside_window = await _ingest(
+            database,
+            _observation(
+                "source-c",
+                "c-1",
+                "https://jobs.example.net/roles/456",
+                posted_date="2026-08-14",
+            ),
+        )
+
+        assert within_window.canonical_id == first.canonical_id
+        assert not within_window.created
+        assert outside_window.created
+        assert outside_window.canonical_id != first.canonical_id
+        assert await database.get_delivery_counts() == {"pending": 2}
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_stable_ats_requisition_merges_outside_semantic_posting_window(
+    config_factory,
+) -> None:
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    try:
+        direct = await _ingest(
+            database,
+            _observation(
+                "direct-ats",
+                "greenhouse-12345",
+                "https://job-boards.greenhouse.io/example/jobs/12345",
+                posted_date="2026-08-10",
+            ),
+        )
+        repository_copy = await _ingest(
+            database,
+            _observation(
+                "repo-copy",
+                "greenhouse-repo-12345",
+                "https://careers.example.com/openings/software?gh_jid=12345",
+                posted_date="2026-08-14",
+            ),
+        )
+
+        assert not repository_copy.created
+        assert repository_copy.canonical_id == direct.canonical_id
         assert await database.get_delivery_counts() == {"pending": 1}
     finally:
         await database.close()
