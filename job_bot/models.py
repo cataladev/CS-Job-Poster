@@ -207,6 +207,7 @@ class AppConfig:
     company_seed_path: str
     source_settings: Dict[str, SourceSettings]
     poll_interval_seconds: int = 300
+    recent_catchup_hours: int = 48
 
     def channel_id_for_track(self, track: str) -> Optional[int]:
         if track == "new_grad":

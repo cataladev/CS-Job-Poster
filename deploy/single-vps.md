@@ -119,6 +119,7 @@ DATABASE_URL=postgresql://jobbot:<long-random-password>@localhost:5432/jobbot
 DISCORD_CHANNEL_ID=<internship-channel-id>
 DISCORD_NEW_GRAD_CHANNEL_ID=<new-grad-channel-id>
 POLL_INTERVAL_SECONDS=300
+RECENT_CATCHUP_HOURS=48
 REQUEST_TIMEOUT_SECONDS=20
 REQUEST_RETRIES=2
 SOURCE_CONCURRENCY=6
@@ -188,6 +189,7 @@ Optional repository secrets:
 
 - `DEPLOY_PORT`: use this if admin SSH is not on `22`
 - `DEPLOY_AUTO_UPDATE_UNIT`: only needed if you renamed the default unit
+- `DEPLOY_SERVICE_UNIT`: only needed if you renamed `job-bot.service`
 
 Workflow behavior:
 

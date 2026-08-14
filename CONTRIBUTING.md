@@ -1,6 +1,6 @@
 # Contributing
 
-This project is a two-channel Discord publisher for curated U.S. internships and
+This project is a two-channel Discord publisher for curated internships and
 new-grad roles. Read `README.md` before changing runtime behavior.
 
 ## Setup
@@ -51,7 +51,7 @@ When changing persistence, also run the Postgres path:
 make test-postgres
 ```
 
-Tests should cover real-format fixtures, schema drift, U.S. classification, conditional
+Tests should cover real-format fixtures, schema drift, location handling, conditional
 `304` fetches, URL variants, cross-source duplication, partial and complete baselines,
 delivery retries, process restarts, and migration compatibility as applicable.
 
