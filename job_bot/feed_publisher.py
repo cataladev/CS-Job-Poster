@@ -48,6 +48,37 @@ def _priority_companies(seed_path: str) -> set[str]:
         return set()
 
 
+def _job_highlights(title: str, cycle: str | None, remote_status: str) -> list[str]:
+    """Build compact, scannable tags without trying to infer a job's seniority."""
+    title_text = title.casefold()
+    highlights: list[str] = []
+    season_badges = (
+        ("spring", "🌸 Spring"),
+        ("summer", "☀️ Summer"),
+        ("fall", "🍂 Fall"),
+        ("winter", "❄️ Winter"),
+    )
+    cycle_text = (cycle or "").casefold()
+    for term, label in season_badges:
+        if term in cycle_text:
+            highlights.append(label)
+            break
+
+    if any(term in title_text for term in ("game developer", "game engineer", "gameplay")):
+        highlights.append("🎮 Game Dev")
+    elif "data science" in title_text or "data scientist" in title_text:
+        highlights.append("📊 Data Science")
+    elif any(
+        term in title_text
+        for term in ("software engineer", "software developer", "software engineering", "swe")
+    ):
+        highlights.append("💻 SWE")
+
+    if remote_status.casefold() == "remote":
+        highlights.append("🛰️ Remote")
+    return highlights
+
+
 class TrackChannelPublisher:
     def __init__(self, config: AppConfig, database: Database) -> None:
         self.config = config
@@ -324,10 +355,12 @@ class TrackChannelPublisher:
         metadata: dict[str, Any],
         logo_url: str | None = None,
     ) -> discord.Embed:
+        highlights = _job_highlights(job.title, job.season_term, job.remote_status)
+        description_prefix = "🛰️ **REMOTE**\n" if job.remote_status.casefold() == "remote" else ""
         embed = discord.Embed(
             title=_truncate(job.title, 256),
             url=job.canonical_url,
-            description=f"[Apply here]({job.canonical_url})",
+            description=f"{description_prefix}[Apply here]({job.canonical_url})",
             color=discord.Color.blurple(),
         )
         embed.add_field(
@@ -350,6 +383,8 @@ class TrackChannelPublisher:
             value=_truncate(job.season_term or "Not stated", 1_024),
             inline=True,
         )
+        if highlights:
+            embed.add_field(name="Highlights", value="  •  ".join(highlights), inline=False)
         if metadata.get("posted_date"):
             embed.add_field(name="Posted", value=metadata["posted_date"], inline=True)
         if logo_url:
@@ -418,7 +453,16 @@ class TrackChannelPublisher:
             else:
                 url = str(delivery["canonical_url"])
             cycle = _truncate(delivery["season_term"] or "Cycle TBA", 40)
-            entries.append(f"{badge}[{company} — {title}]({url})\n> 📍 {location}  •  {cycle}")
+            highlights = _job_highlights(
+                str(delivery["title"]),
+                delivery["season_term"],
+                str(delivery["remote_status"] or ""),
+            )
+            highlight_text = f"  •  {' · '.join(highlights)}" if highlights else ""
+            entries.append(
+                f"{badge}[{company} — {title}]({url})\n"
+                f"> 📍 {location}  •  {cycle}{highlight_text}"
+            )
 
         hidden_count = len(deliveries) - len(visible_deliveries)
         if hidden_count:

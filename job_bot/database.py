@@ -1528,7 +1528,8 @@ class Database:
                     c.company,
                     c.location,
                     c.canonical_url,
-                    c.season_term
+                    c.season_term,
+                    c.remote_status
                 FROM discord_deliveries d
                 JOIN canonical_jobs c ON c.id = d.canonical_id
                 WHERE d.channel_id = ?

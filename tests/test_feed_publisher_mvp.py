@@ -10,7 +10,7 @@ import discord
 import pytest
 
 from job_bot.database import Database
-from job_bot.feed_publisher import TrackChannelPublisher
+from job_bot.feed_publisher import TrackChannelPublisher, _job_highlights
 from job_bot.github_feeds import JobObservation
 from job_bot.utils.feed_normalization import role_signature, sanitize_application_url
 from job_bot.utils.normalization import normalize_job_posting
@@ -75,6 +75,19 @@ def test_daily_digest_is_scheduled_for_four_pm_new_york_time(config_factory) -> 
     assert winter == datetime(2026, 12, 15, 21, tzinfo=UTC)
 
 
+@pytest.mark.parametrize(
+    ("title", "cycle", "remote_status", "expected"),
+    [
+        ("Software Engineer Intern", "Summer 2027", "onsite", ["☀️ Summer", "💻 SWE"]),
+        ("Data Scientist Intern", "Spring 2027", "remote", ["🌸 Spring", "📊 Data Science", "🛰️ Remote"]),
+    ],
+)
+def test_job_highlights_cover_swe_data_science_and_seasons(
+    title, cycle, remote_status, expected
+) -> None:
+    assert _job_highlights(title, cycle, remote_status) == expected
+
+
 async def _create_pending_delivery(
     database: Database,
     *,
@@ -83,9 +96,13 @@ async def _create_pending_delivery(
     external_id: str = "job-1",
     location: str = "Austin, TX",
     company: str = "Example Corp",
+    title: str | None = None,
+    cycle: str = "Summer 2027",
     raw_data: dict | None = None,
 ) -> None:
-    title = "Software Engineer Intern" if track == "internship" else "Software Engineer"
+    title = title or (
+        "Software Engineer Intern" if track == "internship" else "Software Engineer"
+    )
     observation = JobObservation(
         source_id="source",
         source_label="Source",
@@ -98,7 +115,7 @@ async def _create_pending_delivery(
             f"https://jobs.example.com/{external_id}"
         ).url,
         track=track,
-        cycle="Summer 2027",
+        cycle=cycle,
         raw_data=raw_data or {},
     )
     job = normalize_job_posting(observation.to_job_posting())
@@ -291,11 +308,37 @@ async def test_embed_omits_feed_credit_and_contains_safe_apply_link(config_facto
             "Location",
             "Track",
             "Cycle",
+            "Highlights",
             "Posted",
         }
         assert all(field.name != "Source(s)" for field in embed.fields)
         assert "github.com/owner/source" not in str(embed.to_dict())
         assert delivery["marker"] in embed.footer.text
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_embed_adds_season_role_and_remote_highlights(config_factory) -> None:
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    try:
+        await _create_pending_delivery(
+            database,
+            title="Game Developer Intern",
+            location="Remote in USA",
+            cycle="Fall 2027",
+        )
+        delivery = (await database.list_deliveries_for_send(111))[0]
+        job = (await database.get_canonical_jobs([int(delivery["canonical_id"])]))[0]
+        publisher = TrackChannelPublisher(config, database)
+
+        embed = publisher.build_embed(job, marker=delivery["marker"], metadata={})
+
+        highlights = next(field.value for field in embed.fields if field.name == "Highlights")
+        assert highlights == "🍂 Fall  •  🎮 Game Dev  •  🛰️ Remote"
+        assert embed.description.startswith("🛰️ **REMOTE**")
     finally:
         await database.close()
 
