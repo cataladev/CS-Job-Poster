@@ -5,7 +5,9 @@ import logging
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Callable, Iterable, Protocol
+from urllib.parse import urlsplit
 
+from job_bot.ats_feeds import build_direct_ats_feeds
 from job_bot.database import Database
 from job_bot.github_feeds import FEEDS, FeedDefinition, FeedFetchResult, GitHubFeedFetcher
 from job_bot.models import AppConfig
@@ -15,7 +17,11 @@ from job_bot.utils.feed_normalization import (
     location_scoped_identity_keys,
 )
 from job_bot.utils.http import AsyncHttpClient
-from job_bot.utils.normalization import normalize_job_posting
+from job_bot.utils.normalization import (
+    direct_link_company_key,
+    normalize_company_name,
+    normalize_job_posting,
+)
 
 
 class PendingPublisher(Protocol):
@@ -36,11 +42,20 @@ class FeedRunStats:
     deliveries_promoted: int = 0
     deliveries_sent: int = 0
     deliveries_reconciled: int = 0
+    direct_link_boards_fetched: int = 0
     baseline_completed: bool = False
     errors: list[str] = field(default_factory=list)
 
 
 HttpClientFactory = Callable[..., AsyncHttpClient]
+JOBRIGHT_DELIVERY_WAIT = timedelta(minutes=5)
+DIRECT_ATS_CACHE_TTL = timedelta(hours=4)
+
+
+def _is_jobright_observation(observation: object, application_url: str) -> bool:
+    source_id = str(getattr(observation, "source_id", "")).casefold()
+    host = (urlsplit(application_url).hostname or "").casefold()
+    return source_id.startswith("jobright") or host in {"jobright.ai", "www.jobright.ai"}
 
 
 class FeedPipeline:
@@ -53,6 +68,7 @@ class FeedPipeline:
         feeds: Iterable[FeedDefinition] = FEEDS,
         fetcher: GitHubFeedFetcher | None = None,
         http_client_factory: HttpClientFactory = AsyncHttpClient,
+        direct_link_feeds: Iterable[FeedDefinition] | None = None,
     ) -> None:
         self.config = config
         self.database = database
@@ -60,6 +76,23 @@ class FeedPipeline:
         self.feeds = tuple(feeds)
         self.fetcher = fetcher or GitHubFeedFetcher()
         self.http_client_factory = http_client_factory
+        direct_feeds = (
+            tuple(direct_link_feeds)
+            if direct_link_feeds is not None
+            else build_direct_ats_feeds(
+                config.company_seed_path,
+                poll_interval_seconds=int(DIRECT_ATS_CACHE_TTL.total_seconds()),
+            )
+        )
+        self._direct_link_feeds_by_company: dict[str, list[FeedDefinition]] = {}
+        for feed in direct_feeds:
+            normalized_company = direct_link_company_key(feed.company_name or "")
+            if normalized_company:
+                self._direct_link_feeds_by_company.setdefault(normalized_company, []).append(feed)
+        # Some Workday tenants reject bursts of anonymous CXS requests. The
+        # cache path already runs at most once per board every four hours, so
+        # serialize only that provider instead of slowing normal feed polling.
+        self._workday_fetch_lock = asyncio.Lock()
         self.logger = logging.getLogger(self.__class__.__name__)
         self._lock = asyncio.Lock()
 
@@ -92,6 +125,11 @@ class FeedPipeline:
                     for feed in self.feeds
                 ]
                 results = await asyncio.gather(*tasks, return_exceptions=True)
+                stats.direct_link_boards_fetched = await self._prime_direct_link_cache(
+                    results,
+                    http_client,
+                    semaphore,
+                )
 
             for feed, result in zip(self.feeds, results):
                 stats.feeds_checked += 1
@@ -148,6 +186,27 @@ class FeedPipeline:
                         )
                         continue
                     job = normalize_job_posting(observation.to_job_posting())
+                    is_jobright = _is_jobright_observation(
+                        observation,
+                        job.canonical_url or job.url,
+                    )
+                    resolved_direct_url = None
+                    if is_jobright:
+                        jobright_url = job.canonical_url or job.url
+                        resolved_direct_url = await self.database.find_cached_direct_link(
+                            job=job,
+                            posted_date=observation.posted_date,
+                        )
+                        if resolved_direct_url:
+                            job.url = resolved_direct_url
+                            job.canonical_url = resolved_direct_url
+                            job.alternate_urls = [*job.alternate_urls, jobright_url]
+                            job.raw_data = {
+                                **job.raw_data,
+                                "jobright_fallback_url": jobright_url,
+                                "direct_link_cache": True,
+                            }
+                            job = normalize_job_posting(job)
                     if job.normalized_company in self.config.company_blacklist:
                         stats.rejected += 1
                         self.logger.info(
@@ -175,6 +234,13 @@ class FeedPipeline:
                     ):
                         channel_id = None
                     delivery_suppressed = suppress_delivery or channel_id is None
+                    delivery_not_before = (
+                        (datetime.now(UTC) + JOBRIGHT_DELIVERY_WAIT).isoformat()
+                        if is_jobright and not resolved_direct_url and not delivery_suppressed
+                        else None
+                    )
+                    payload = asdict(observation)
+                    payload["raw_data"] = dict(job.raw_data)
                     ingest = await self.database.ingest_feed_job(
                         job=job,
                         source_id=observation.source_id,
@@ -183,11 +249,19 @@ class FeedPipeline:
                         source_url=observation.source_url,
                         source_ref=observation.source_ref,
                         posted_date=observation.posted_date,
-                        payload=asdict(observation),
+                        payload=payload,
                         canonical_keys=canonical_keys,
                         channel_id=channel_id,
                         suppress_delivery=delivery_suppressed,
+                        delivery_not_before=delivery_not_before,
                     )
+                    if not is_jobright:
+                        await self.database.cache_direct_link(
+                            job=job,
+                            source_id=observation.source_id,
+                            source_ref=observation.source_ref,
+                            posted_date=observation.posted_date,
+                        )
                     if ingest.created:
                         source_created += 1
                         stats.canonical_created += 1
@@ -279,6 +353,107 @@ class FeedPipeline:
                 len(stats.errors),
             )
             return stats
+
+    async def _prime_direct_link_cache(
+        self,
+        results: list[FeedFetchResult | BaseException],
+        http_client: AsyncHttpClient,
+        semaphore: asyncio.Semaphore,
+    ) -> int:
+        """Fetch only stale ATS boards for companies in the current Jobright batch.
+
+        Responses populate the local direct-link cache only; they are not ingested
+        as standalone delivery sources, so this cannot create duplicate Discord
+        messages.
+        """
+        if not self._direct_link_feeds_by_company:
+            return 0
+        target_feeds: dict[str, FeedDefinition] = {}
+        targeted_queries: dict[str, set[str]] = {}
+        for result in results:
+            if not isinstance(result, FeedFetchResult) or not result.definition.source_id.startswith(
+                "jobright"
+            ):
+                continue
+            for observation in result.observations:
+                for feed in self._direct_link_feeds_by_company.get(
+                    direct_link_company_key(observation.company), []
+                ):
+                    target_feeds[feed.source_id] = feed
+                    if feed.provider in {"workday", "bytedance", "amazon"}:
+                        targeted_queries.setdefault(feed.source_id, set()).add(observation.title)
+        due_source_ids = await self.database.get_due_direct_ats_sources(
+            target_feeds,
+            stale_before=(datetime.now(UTC) - DIRECT_ATS_CACHE_TTL).isoformat(),
+        )
+        if not due_source_ids:
+            return 0
+        due_feeds = [target_feeds[source_id] for source_id in sorted(due_source_ids)]
+        fetched = await asyncio.gather(
+            *(
+                self._fetch_direct_link_board(
+                    feed,
+                    http_client,
+                    semaphore,
+                    search_texts=targeted_queries.get(feed.source_id, ()),
+                )
+                for feed in due_feeds
+            ),
+            return_exceptions=True,
+        )
+        successful = 0
+        for feed, result in zip(due_feeds, fetched):
+            if isinstance(result, BaseException):
+                await self.database.record_direct_ats_cache_check(
+                    source_id=feed.source_id,
+                    provider=feed.provider or "unknown",
+                    board_token=feed.path,
+                    error=str(result),
+                )
+                self.logger.warning(
+                    "direct_link_board_failed source=%s error=%s", feed.source_id, result
+                )
+                continue
+            for observation in result.observations:
+                await self.database.cache_direct_link(
+                    job=normalize_job_posting(observation.to_job_posting()),
+                    source_id=observation.source_id,
+                    source_ref=observation.source_ref,
+                    posted_date=observation.posted_date,
+                )
+            await self.database.record_direct_ats_cache_check(
+                source_id=feed.source_id,
+                provider=feed.provider or "unknown",
+                board_token=feed.path,
+            )
+            successful += 1
+        return successful
+
+    async def _fetch_direct_link_board(
+        self,
+        feed: FeedDefinition,
+        http_client: AsyncHttpClient,
+        semaphore: asyncio.Semaphore,
+        *,
+        search_texts: Iterable[str] = (),
+    ) -> FeedFetchResult:
+        async with semaphore:
+            if feed.provider == "workday":
+                async with self._workday_fetch_lock:
+                    if search_texts:
+                        return await self.fetcher.fetch_workday_queries(
+                            feed, http_client, search_texts=search_texts
+                        )
+                    return await self.fetcher.fetch(feed, http_client)
+            if feed.provider == "bytedance" and search_texts:
+                return await self.fetcher.fetch_bytedance_queries(
+                    feed, http_client, search_texts=tuple(search_texts)
+                )
+            if feed.provider == "amazon" and search_texts:
+                return await self.fetcher.fetch_amazon_queries(
+                    feed, http_client, search_texts=tuple(search_texts)
+                )
+            return await self.fetcher.fetch(feed, http_client)
 
     async def _fetch_one(
         self,

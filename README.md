@@ -56,11 +56,13 @@ the runtime.
 | Jobright software-engineering internships | `jobright.ai/jobs/software-engineer-intern-jobs-in-united-states` | Public SSR query + anonymous visitor API |
 | Jobright software-engineering new grad | `jobright.ai/jobs/software-engineer-new-graduate-jobs-in-united-states` | Public SSR query + anonymous visitor API |
 
-In addition, the active runtime builds direct-employer feeds from every supported ATS
-URL in `data/company_watchlist_seed.csv`: currently 155 Greenhouse, 39 Lever, 82 Ashby,
-and 33 SmartRecruiters boards. These use the provider's public job-board API rather
-than HTML scraping, retain the direct employer application URL, and are optional during
-the initial aggregator baseline so an unavailable employer board cannot halt delivery.
+In addition, the active runtime builds a reviewed direct-employer board index from the
+supported ATS URLs in `data/company_watchlist_seed.csv`: currently Greenhouse, Lever,
+Ashby, and SmartRecruiters boards. When a Jobright role's company has a matching board,
+the runtime requests that public API only if its local result is more than four hours old,
+then uses an unambiguous direct match while retaining Jobright as fallback. This avoids
+polling every employer board on every cycle and does not use HTML rendering or login-only
+endpoints.
 
 The fixed feed definitions live in `job_bot/github_feeds.py`. `config/sources.yaml`
 is deliberately not a runtime switchboard for the MVP. The Jobright integration derives

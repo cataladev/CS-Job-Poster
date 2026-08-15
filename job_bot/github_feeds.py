@@ -20,6 +20,7 @@ from job_bot.utils.feed_normalization import (
 )
 from job_bot.utils.http import AsyncHttpClient
 from job_bot.utils.normalization import build_row_hash, detect_season_term
+from job_bot.watchlist import TrackClassifier
 
 
 @dataclass(frozen=True)
@@ -86,6 +87,10 @@ JOBRIGHT_NEW_GRAD_SIGNALS = (
     "software developer i",
     "software developer 1",
     "associate software engineer",
+)
+WORKDAY_PUBLIC_USER_AGENT = (
+    "Mozilla/5.0 (compatible; LennyFindsJobs/1.0; "
+    "+https://github.com/LennyFindsJobs)"
 )
 
 
@@ -453,6 +458,75 @@ def parse_intern_engine_json(text: str, definition: FeedDefinition) -> tuple[lis
     return observations, rejected
 
 
+def parse_applyguy_json(text: str, definition: FeedDefinition) -> tuple[list[JobObservation], int]:
+    """Use ApplyGuy's public JSON only when it exposes an employer apply URL.
+
+    The listing page URL is deliberately ignored. This keeps the feed a direct
+    link cache source rather than routing users through another aggregator.
+    """
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{definition.source_id} returned invalid JSON") from exc
+    jobs = payload.get("jobs") if isinstance(payload, Mapping) else None
+    if not isinstance(jobs, list) or not jobs:
+        raise ValueError(f"{definition.source_id} must return an object with a non-empty jobs array")
+
+    classifier = TrackClassifier()
+    observations: list[JobObservation] = []
+    rejected = 0
+    for item in jobs:
+        if not isinstance(item, Mapping):
+            rejected += 1
+            continue
+        company = clean_feed_text(item.get("company"))
+        title = clean_feed_text(item.get("title"))
+        # `listingUrl` is the direct employer/ATS destination. `url` is the
+        # ApplyGuy landing page and must never be selected as an application URL.
+        application_url = _safe_url(item.get("listingUrl"))
+        locations = _feed_locations(
+            [clean_feed_text(item.get("location"))],
+            definition=definition,
+            context=f"{title} {application_url}",
+        )
+        classification = classifier.classify(title=title, summary="", employment_type="")
+        declared_track = (
+            "new_grad"
+            if definition.track == "new_grad"
+            and clean_feed_text(item.get("matchKind")).casefold() == "entry_level"
+            else classification.track
+        )
+        if (
+            not company
+            or not title
+            or not application_url
+            or not locations
+            or declared_track is None
+        ):
+            rejected += 1
+            continue
+        observations.append(
+            JobObservation(
+                source_id=definition.source_id,
+                source_label=definition.source_label,
+                source_url=definition.source_url,
+                source_ref=f"{definition.branch}/{definition.path}",
+                external_id=clean_feed_text(item.get("id")) or application_url,
+                company=company,
+                title=title,
+                locations=locations,
+                application_url=application_url,
+                track=declared_track,
+                cycle=clean_feed_text(item.get("season")) or None,
+                posted_date=_iso_date(item.get("posted")),
+                raw_data={"category": item.get("category"), "source": "applyguy"},
+            )
+        )
+    if not observations:
+        raise ValueError(f"{definition.source_id} produced no active U.S. observations")
+    return observations, rejected
+
+
 def parse_jobright_next_data(text: str, definition: FeedDefinition) -> tuple[list[JobObservation], int]:
     """Parse Jobright's public, server-rendered U.S. role listings.
 
@@ -662,6 +736,25 @@ FEEDS: tuple[FeedDefinition, ...] = (
         parse_markdown_table,
     ),
     FeedDefinition(
+        "applyguy_internships",
+        "ApplyGuy direct listings",
+        "ApplyGuy/2027-Internships",
+        "main",
+        "data/internships.json",
+        "internship",
+        parse_applyguy_json,
+    ),
+    FeedDefinition(
+        "applyguy_new_grad",
+        "ApplyGuy direct listings",
+        "ApplyGuy/2027-New-Grad-Jobs",
+        "main",
+        "data/new-grad-jobs.json",
+        "new_grad",
+        parse_applyguy_json,
+        cycle_hint="2027",
+    ),
+    FeedDefinition(
         "jobright_internships",
         "Jobright",
         "jobright.ai",
@@ -699,6 +792,16 @@ class GitHubFeedFetcher:
     ) -> FeedFetchResult:
         if definition.provider == "smartrecruiters":
             return await self._fetch_smartrecruiters_board(definition, http_client)
+        if definition.provider == "workday":
+            return await self._fetch_workday_board(definition, http_client)
+        if definition.provider == "oracle":
+            return await self._fetch_oracle_board(definition, http_client)
+        if definition.provider == "bytedance":
+            return await self._fetch_bytedance_board(definition, http_client)
+        if definition.provider == "rippling":
+            return await self._fetch_rippling_board(definition, http_client)
+        if definition.provider == "amazon":
+            return await self._fetch_amazon_board(definition, http_client)
         if definition.provider == "jobright":
             return await self._fetch_jobright_public_windows(
                 definition,
@@ -877,6 +980,337 @@ class GitHubFeedFetcher:
                 break
 
         text = json.dumps({"content": all_items}, sort_keys=True)
+        observations, rejected = definition.parser(text, definition)
+        return FeedFetchResult(
+            definition=definition,
+            observations=observations,
+            rejected=rejected,
+            etag=response_headers.get("ETag"),
+            last_modified=response_headers.get("Last-Modified"),
+            content_sha=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        )
+
+    async def _fetch_workday_board(
+        self,
+        definition: FeedDefinition,
+        http_client: AsyncHttpClient,
+    ) -> FeedFetchResult:
+        """Fetch a bounded recent Workday window from its public CXS endpoint.
+
+        This is intentionally capped at 100 records. It is a cache-enrichment
+        path for companies already present in the current Jobright batch, not a
+        replacement for a full company crawler.
+        """
+        if not definition.fetch_url:
+            raise ValueError(f"{definition.source_id} has no Workday URL")
+        offset = 0
+        # Workday CXS tenants commonly cap anonymous page size at 20; larger
+        # values return HTTP 400 instead of a useful page-size error.
+        limit = 20
+        max_pages = 5
+        all_items: list[object] = []
+        response_headers: Mapping[str, str] = {}
+        for _ in range(max_pages):
+            data, response_headers, _ = await http_client.post_json(
+                definition.fetch_url,
+                json={"limit": limit, "offset": offset, "searchText": ""},
+                headers={
+                    "Accept": "application/json",
+                    # Several Workday tenants reject generic automation UAs even
+                    # for their public CXS endpoint. This remains an identified
+                    # client, but advertises browser-compatible semantics.
+                    "User-Agent": WORKDAY_PUBLIC_USER_AGENT,
+                },
+            )
+            if not isinstance(data, Mapping) or not isinstance(data.get("jobPostings"), list):
+                raise ValueError(f"{definition.source_id} returned invalid Workday data")
+            items = data["jobPostings"]
+            all_items.extend(items)
+            offset += limit
+            total = data.get("total")
+            if not items or not isinstance(total, int) or offset >= total:
+                break
+        text = json.dumps({"jobPostings": all_items}, sort_keys=True)
+        observations, rejected = definition.parser(text, definition)
+        return FeedFetchResult(
+            definition=definition,
+            observations=observations,
+            rejected=rejected,
+            etag=response_headers.get("ETag"),
+            last_modified=response_headers.get("Last-Modified"),
+            content_sha=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        )
+
+    async def _fetch_oracle_board(
+        self,
+        definition: FeedDefinition,
+        http_client: AsyncHttpClient,
+    ) -> FeedFetchResult:
+        if not definition.fetch_url:
+            raise ValueError(f"{definition.source_id} has no Oracle URL")
+        data, response_headers, _ = await http_client.get_json(
+            definition.fetch_url,
+            headers={"Accept": "application/json"},
+        )
+        text = json.dumps(data, sort_keys=True)
+        observations, rejected = definition.parser(text, definition)
+        return FeedFetchResult(
+            definition=definition,
+            observations=observations,
+            rejected=rejected,
+            etag=response_headers.get("ETag"),
+            last_modified=response_headers.get("Last-Modified"),
+            content_sha=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        )
+
+    async def _fetch_bytedance_board(
+        self,
+        definition: FeedDefinition,
+        http_client: AsyncHttpClient,
+    ) -> FeedFetchResult:
+        if not definition.fetch_url:
+            raise ValueError(f"{definition.source_id} has no ByteDance URL")
+        data, response_headers, _ = await http_client.post_json(
+            definition.fetch_url,
+            json={
+                "recruitment_id_list": [],
+                "job_category_id_list": [],
+                "subject_id_list": [],
+                "location_code_list": [],
+                "keyword": "Software Engineer",
+                "limit": 100,
+                "offset": 0,
+            },
+            headers={
+                "Content-Type": "application/json",
+                "Accept-Language": "en-US",
+                "Website-Path": "en",
+                "X-Tt-Env": "boe_epam_api",
+                "Referer": "https://joinbytedance.com/",
+            },
+        )
+        text = json.dumps(data, sort_keys=True)
+        observations, rejected = definition.parser(text, definition)
+        return FeedFetchResult(
+            definition=definition,
+            observations=observations,
+            rejected=rejected,
+            etag=response_headers.get("ETag"),
+            last_modified=response_headers.get("Last-Modified"),
+            content_sha=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        )
+
+    async def fetch_bytedance_queries(
+        self,
+        definition: FeedDefinition,
+        http_client: AsyncHttpClient,
+        *,
+        search_texts: Sequence[str],
+    ) -> FeedFetchResult:
+        """Resolve current Jobright titles against ByteDance's public board.
+
+        One generic search misses roles whose public titles use a different
+        engineering speciality. These few exact-title requests are still bounded
+        to the current Jobright batch and are made at most once per board per
+        four-hour cache window.
+        """
+        if definition.provider != "bytedance" or not definition.fetch_url:
+            raise ValueError(f"{definition.source_id} is not a ByteDance board")
+        items_by_id: dict[str, object] = {}
+        response_headers: Mapping[str, str] = {}
+        for search_text in dict.fromkeys(text.strip() for text in search_texts if text.strip()):
+            data, response_headers, _ = await http_client.post_json(
+                definition.fetch_url,
+                json={
+                    "recruitment_id_list": [],
+                    "job_category_id_list": [],
+                    "subject_id_list": [],
+                    "location_code_list": [],
+                    "keyword": search_text,
+                    "limit": 20,
+                    "offset": 0,
+                },
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept-Language": "en-US",
+                    "Website-Path": "en",
+                    "X-Tt-Env": "boe_epam_api",
+                    "Referer": "https://joinbytedance.com/",
+                },
+            )
+            result = data.get("data") if isinstance(data, Mapping) else None
+            items = result.get("job_post_list") if isinstance(result, Mapping) else None
+            if not isinstance(items, list):
+                raise ValueError(f"{definition.source_id} returned invalid ByteDance data")
+            for item in items:
+                if not isinstance(item, Mapping):
+                    continue
+                key = clean_feed_text(item.get("id")) or hashlib.sha256(
+                    json.dumps(item, sort_keys=True, default=str).encode()
+                ).hexdigest()
+                items_by_id[key] = item
+        text = json.dumps({"data": {"job_post_list": list(items_by_id.values())}}, sort_keys=True)
+        observations, rejected = definition.parser(text, definition)
+        return FeedFetchResult(
+            definition=definition,
+            observations=observations,
+            rejected=rejected,
+            etag=response_headers.get("ETag"),
+            last_modified=response_headers.get("Last-Modified"),
+            content_sha=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        )
+
+    async def _fetch_rippling_board(
+        self,
+        definition: FeedDefinition,
+        http_client: AsyncHttpClient,
+    ) -> FeedFetchResult:
+        """Query the same anonymous, search-only index as Rippling's careers page.
+
+        This is a single bounded request for the current employer, made only
+        after Jobright has produced a Rippling observation and subject to the
+        direct-board four-hour cache cooldown.
+        """
+        if not definition.fetch_url:
+            raise ValueError(f"{definition.source_id} has no Rippling URL")
+        data, response_headers, _ = await http_client.post_json(
+            definition.fetch_url,
+            json={
+                "requests": [
+                    {
+                        "indexName": "careers_en-US_production",
+                        "hitsPerPage": 100,
+                        "query": "",
+                    }
+                ]
+            },
+            headers={
+                # This is Rippling's public, browser-delivered Algolia
+                # search-only credential; it cannot mutate the index.
+                "X-Algolia-Application-Id": "6FNAX3TBEF",
+                "X-Algolia-API-Key": "416caa4690f002ff6fe4a2097623640b",
+                "Content-Type": "application/json",
+                "Referer": "https://www.rippling.com/",
+            },
+        )
+        text = json.dumps(data, sort_keys=True)
+        observations, rejected = definition.parser(text, definition)
+        return FeedFetchResult(
+            definition=definition,
+            observations=observations,
+            rejected=rejected,
+            etag=response_headers.get("ETag"),
+            last_modified=response_headers.get("Last-Modified"),
+            content_sha=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        )
+
+    async def _fetch_amazon_board(
+        self,
+        definition: FeedDefinition,
+        http_client: AsyncHttpClient,
+    ) -> FeedFetchResult:
+        if not definition.fetch_url:
+            raise ValueError(f"{definition.source_id} has no Amazon URL")
+        data, response_headers, _ = await http_client.get_json(
+            definition.fetch_url,
+            params={
+                "base_query": "Software Engineer",
+                "result_limit": "100",
+                "offset": "0",
+                "sort": "recent",
+            },
+            # amazon.jobs currently advertises zstd even when the aiohttp build
+            # cannot decode its response frame reliably; gzip is universally
+            # supported and keeps this one-request path deterministic.
+            headers={"Accept": "application/json", "Accept-Encoding": "gzip"},
+        )
+        text = json.dumps(data, sort_keys=True)
+        observations, rejected = definition.parser(text, definition)
+        return FeedFetchResult(
+            definition=definition,
+            observations=observations,
+            rejected=rejected,
+            etag=response_headers.get("ETag"),
+            last_modified=response_headers.get("Last-Modified"),
+            content_sha=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        )
+
+    async def fetch_amazon_queries(
+        self,
+        definition: FeedDefinition,
+        http_client: AsyncHttpClient,
+        *,
+        search_texts: Sequence[str],
+    ) -> FeedFetchResult:
+        """Resolve the current Jobright titles without walking Amazon's catalog."""
+        if definition.provider != "amazon" or not definition.fetch_url:
+            raise ValueError(f"{definition.source_id} is not an Amazon board")
+        jobs_by_id: dict[str, object] = {}
+        response_headers: Mapping[str, str] = {}
+        for search_text in dict.fromkeys(text.strip() for text in search_texts if text.strip()):
+            data, response_headers, _ = await http_client.get_json(
+                definition.fetch_url,
+                params={
+                    "base_query": search_text,
+                    "result_limit": "20",
+                    "offset": "0",
+                    "sort": "recent",
+                },
+                headers={"Accept": "application/json", "Accept-Encoding": "gzip"},
+            )
+            jobs = data.get("jobs") if isinstance(data, Mapping) else None
+            if not isinstance(jobs, list):
+                raise ValueError(f"{definition.source_id} returned invalid Amazon data")
+            for job in jobs:
+                if not isinstance(job, Mapping):
+                    continue
+                key = clean_feed_text(job.get("id")) or clean_feed_text(job.get("job_path"))
+                if key:
+                    jobs_by_id[key] = job
+        text = json.dumps({"jobs": list(jobs_by_id.values())}, sort_keys=True)
+        observations, rejected = definition.parser(text, definition)
+        return FeedFetchResult(
+            definition=definition,
+            observations=observations,
+            rejected=rejected,
+            etag=response_headers.get("ETag"),
+            last_modified=response_headers.get("Last-Modified"),
+            content_sha=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        )
+
+    async def fetch_workday_queries(
+        self,
+        definition: FeedDefinition,
+        http_client: AsyncHttpClient,
+        *,
+        search_texts: Sequence[str],
+    ) -> FeedFetchResult:
+        """Resolve current Jobright titles against one public Workday board.
+
+        Workday caps anonymous pages at 20. Searching the known title avoids a
+        wide board walk and gives the cache only candidates relevant to the
+        current Jobright batch.
+        """
+        if definition.provider != "workday" or not definition.fetch_url:
+            raise ValueError(f"{definition.source_id} is not a Workday board")
+        items_by_path: dict[str, object] = {}
+        response_headers: Mapping[str, str] = {}
+        for search_text in dict.fromkeys(text.strip() for text in search_texts if text.strip()):
+            data, response_headers, _ = await http_client.post_json(
+                definition.fetch_url,
+                json={"limit": 20, "offset": 0, "searchText": search_text},
+                headers={"Accept": "application/json", "User-Agent": WORKDAY_PUBLIC_USER_AGENT},
+            )
+            if not isinstance(data, Mapping) or not isinstance(data.get("jobPostings"), list):
+                raise ValueError(f"{definition.source_id} returned invalid Workday data")
+            for item in data["jobPostings"]:
+                if not isinstance(item, Mapping):
+                    continue
+                key = clean_feed_text(item.get("externalPath")) or hashlib.sha256(
+                    json.dumps(item, sort_keys=True, default=str).encode()
+                ).hexdigest()
+                items_by_path[key] = item
+        text = json.dumps({"jobPostings": list(items_by_path.values())}, sort_keys=True)
         observations, rejected = definition.parser(text, definition)
         return FeedFetchResult(
             definition=definition,

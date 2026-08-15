@@ -357,10 +357,16 @@ class TrackChannelPublisher:
     ) -> discord.Embed:
         highlights = _job_highlights(job.title, job.season_term, job.remote_status)
         description_prefix = "🛰️ **REMOTE**\n" if job.remote_status.casefold() == "remote" else ""
+        jobright_fallback_url = self._safe_thumbnail_url(metadata.get("jobright_fallback_url"))
+        apply_links = (
+            f"[Apply directly]({job.canonical_url})\n[Jobright fallback]({jobright_fallback_url})"
+            if jobright_fallback_url
+            else f"[Apply here]({job.canonical_url})"
+        )
         embed = discord.Embed(
             title=_truncate(job.title, 256),
             url=job.canonical_url,
-            description=f"{description_prefix}[Apply here]({job.canonical_url})",
+            description=f"{description_prefix}{apply_links}",
             color=discord.Color.blurple(),
         )
         embed.add_field(

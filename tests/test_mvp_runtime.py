@@ -9,7 +9,7 @@ from job_bot.mvp_runtime import FeedDiscordClient
 
 
 @pytest.mark.asyncio
-async def test_runtime_starts_core_and_direct_ats_as_independent_poll_tasks() -> None:
+async def test_runtime_starts_only_the_core_poll_task() -> None:
     started: list[tuple[object, int, str]] = []
     release = asyncio.Event()
 
@@ -23,24 +23,16 @@ async def test_runtime_starts_core_and_direct_ats_as_independent_poll_tasks() ->
 
     harness = Harness()
     core_pipeline = object()
-    direct_ats_pipeline = object()
     FeedDiscordClient._ensure_poll_task(
         harness,  # type: ignore[arg-type]
         name="core",
         pipeline=core_pipeline,  # type: ignore[arg-type]
         interval_seconds=300,
     )
-    FeedDiscordClient._ensure_poll_task(
-        harness,  # type: ignore[arg-type]
-        name="direct_ats",
-        pipeline=direct_ats_pipeline,  # type: ignore[arg-type]
-        interval_seconds=900,
-    )
     try:
         await asyncio.sleep(0)
         assert {(pipeline, interval, group) for pipeline, interval, group in started} == {
             (core_pipeline, 300, "core"),
-            (direct_ats_pipeline, 900, "direct_ats"),
         }
     finally:
         release.set()

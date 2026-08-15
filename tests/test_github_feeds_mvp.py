@@ -165,6 +165,8 @@ def test_runtime_feeds_cover_only_us_job_surfaces() -> None:
     configured = {(feed.repository, feed.branch, feed.path) for feed in FEEDS}
 
     assert configured == {
+        ("ApplyGuy/2027-Internships", "main", "data/internships.json"),
+        ("ApplyGuy/2027-New-Grad-Jobs", "main", "data/new-grad-jobs.json"),
         ("SimplifyJobs/Summer2027-Internships", "dev", "README.md"),
         ("SimplifyJobs/Summer2027-Internships", "dev", "README-Off-Season.md"),
         ("SimplifyJobs/New-Grad-Positions", "dev", "README.md"),

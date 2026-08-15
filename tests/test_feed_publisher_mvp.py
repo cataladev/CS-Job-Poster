@@ -319,6 +319,32 @@ async def test_embed_omits_feed_credit_and_contains_safe_apply_link(config_facto
 
 
 @pytest.mark.asyncio
+async def test_embed_shows_verified_direct_link_with_jobright_fallback(config_factory) -> None:
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    try:
+        await _create_pending_delivery(
+            database,
+            raw_data={"jobright_fallback_url": "https://jobright.ai/jobs/info/startup-role"},
+        )
+        delivery = (await database.list_deliveries_for_send(111))[0]
+        job = (await database.get_canonical_jobs([int(delivery["canonical_id"])]))[0]
+        metadata = await database.get_feed_observation_metadata(int(delivery["canonical_id"]))
+        publisher = TrackChannelPublisher(config, database)
+
+        embed = publisher.build_embed(job, marker=delivery["marker"], metadata=metadata)
+
+        assert embed.url == "https://jobs.example.com/job-1"
+        assert embed.description == (
+            "[Apply directly](https://jobs.example.com/job-1)\n"
+            "[Jobright fallback](https://jobright.ai/jobs/info/startup-role)"
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_embed_adds_season_role_and_remote_highlights(config_factory) -> None:
     config = config_factory()
     database = Database(config.sqlite_db_path)

@@ -11,11 +11,13 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from job_bot.models import CanonicalJob, FeedIngestResult, JobPosting
 from job_bot.utils.feed_normalization import (
+    is_aggregator_application_url,
     preferred_application_url,
     role_signature,
     role_title_key,
+    sanitize_application_url,
 )
-from job_bot.utils.normalization import normalize_company_name
+from job_bot.utils.normalization import direct_link_company_key, normalize_company_name
 
 try:
     import psycopg
@@ -72,6 +74,25 @@ def _feed_locations_overlap(
     """
     return bool(incoming_locations.intersection(candidate_locations)) or (
         "us" in incoming_locations or "us" in candidate_locations
+    )
+
+
+def _season_terms_compatible(incoming: str, candidate: str) -> bool:
+    """Allow a bare year to bridge source-specific season precision.
+
+    A source saying only ``2027`` cannot distinguish a summer role from a winter
+    role, so it may match a fully specified 2027 term only when every other
+    direct-link guard succeeds. Two explicit, different seasons never match.
+    """
+    if incoming == candidate or not incoming or not candidate:
+        return True
+    incoming_year = re.search(r"\b20\d{2}\b", incoming)
+    candidate_year = re.search(r"\b20\d{2}\b", candidate)
+    return bool(
+        incoming_year
+        and candidate_year
+        and incoming_year.group(0) == candidate_year.group(0)
+        and (incoming == incoming_year.group(0) or candidate == candidate_year.group(0))
     )
 
 
@@ -417,6 +438,30 @@ CREATE TABLE IF NOT EXISTS feed_canonical_keys (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS direct_link_cache (
+    cache_key TEXT PRIMARY KEY,
+    track TEXT NOT NULL,
+    normalized_company TEXT NOT NULL,
+    normalized_title TEXT NOT NULL,
+    season_term TEXT NOT NULL DEFAULT '',
+    normalized_locations TEXT NOT NULL,
+    direct_url TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    source_ref TEXT NOT NULL DEFAULT '',
+    posted_date TEXT,
+    first_seen TEXT NOT NULL,
+    last_seen TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS direct_ats_cache_state (
+    source_id TEXT PRIMARY KEY,
+    provider TEXT NOT NULL,
+    board_token TEXT NOT NULL,
+    last_checked_at TEXT NOT NULL,
+    last_success_at TEXT,
+    last_error TEXT
+);
+
 CREATE TABLE IF NOT EXISTS discord_deliveries (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     canonical_id INTEGER NOT NULL REFERENCES canonical_jobs(id) ON DELETE CASCADE,
@@ -427,6 +472,7 @@ CREATE TABLE IF NOT EXISTS discord_deliveries (
     attempts INTEGER NOT NULL DEFAULT 0,
     last_error TEXT,
     created_at TEXT NOT NULL,
+    not_before TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL,
     sent_at TEXT,
     UNIQUE(canonical_id, channel_id)
@@ -458,6 +504,12 @@ CREATE INDEX IF NOT EXISTS idx_feed_canonical_match
 
 CREATE INDEX IF NOT EXISTS idx_feed_keys_canonical
     ON feed_canonical_keys(canonical_id);
+
+CREATE INDEX IF NOT EXISTS idx_direct_link_cache_lookup
+    ON direct_link_cache(track, normalized_company, normalized_title, season_term, posted_date);
+
+CREATE INDEX IF NOT EXISTS idx_direct_ats_cache_state_checked
+    ON direct_ats_cache_state(last_checked_at);
 
 CREATE INDEX IF NOT EXISTS idx_discord_deliveries_state
     ON discord_deliveries(channel_id, state, created_at);
@@ -588,6 +640,16 @@ class Database:
             self._ensure_column("company_requests", "homepage_url", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column("job_application_statuses", "notes", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column("feed_observations", "source_ref", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column("discord_deliveries", "not_before", "TEXT NOT NULL DEFAULT ''")
+            # This must run after the additive migration above. Existing databases
+            # created before ``not_before`` cannot build this index from the base
+            # schema script yet.
+            self._connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_discord_deliveries_ready
+                    ON discord_deliveries(channel_id, state, not_before, created_at)
+                """
+            )
             self._migrate_legacy_process_notes()
             self._migrate_legacy_process_roles()
             self._seed_legacy_deliveries()
@@ -1085,6 +1147,7 @@ class Database:
         canonical_keys: Iterable[str],
         channel_id: Optional[int],
         suppress_delivery: bool,
+        delivery_not_before: Optional[str] = None,
     ) -> FeedIngestResult:
         keys = sorted(set(canonical_keys))
         feed_dedupe_fingerprint = role_signature(
@@ -1337,8 +1400,8 @@ class Database:
                         """
                         INSERT OR IGNORE INTO discord_deliveries (
                             canonical_id, channel_id, state, marker, message_id, attempts,
-                            last_error, created_at, updated_at, sent_at
-                        ) VALUES (?, ?, ?, ?, NULL, 0, NULL, ?, ?, NULL)
+                            last_error, created_at, not_before, updated_at, sent_at
+                        ) VALUES (?, ?, ?, ?, NULL, 0, NULL, ?, ?, ?, NULL)
                         """,
                         (
                             canonical_id,
@@ -1346,6 +1409,7 @@ class Database:
                             delivery_state,
                             self._delivery_marker(canonical_id, channel),
                             now,
+                            delivery_not_before or "",
                             now,
                         ),
                     )
@@ -1361,6 +1425,179 @@ class Database:
             except Exception:
                 self._connection.rollback()
                 raise
+
+    async def cache_direct_link(
+        self,
+        *,
+        job: JobPosting,
+        source_id: str,
+        source_ref: str,
+        posted_date: str | None,
+    ) -> None:
+        """Remember a direct URL already observed by an existing feed.
+
+        This is deliberately a local write only. Feed collectors remain the sole
+        source of network work, and each cache record is keyed by a role shape so
+        historical URLs never require a table scan during Jobright enrichment.
+        """
+        direct_url = sanitize_application_url(job.canonical_url or job.url).url
+        if not direct_url or is_aggregator_application_url(direct_url):
+            return
+        season_term = (job.season_term or "").casefold()
+        locations = sorted(set(job.normalized_locations))
+        cache_payload = {
+            "track": job.track,
+            "company": direct_link_company_key(job.company),
+            "title": job.normalized_title,
+            "season": season_term,
+            "locations": locations,
+            "url": direct_url,
+            "source": source_id,
+        }
+        cache_key = hashlib.sha256(
+            json.dumps(cache_payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        observed_date = (_feed_date(posted_date) or datetime.now(timezone.utc).date()).isoformat()
+        now = _utc_now()
+        async with self._lock:
+            try:
+                self._connection.execute(
+                    """
+                    INSERT INTO direct_link_cache (
+                        cache_key, track, normalized_company, normalized_title, season_term,
+                        normalized_locations, direct_url, source_id, source_ref, posted_date,
+                        first_seen, last_seen
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(cache_key) DO UPDATE SET
+                        source_ref = excluded.source_ref,
+                        posted_date = excluded.posted_date,
+                        last_seen = excluded.last_seen
+                    """,
+                    (
+                        cache_key,
+                        job.track,
+                        direct_link_company_key(job.company),
+                        job.normalized_title,
+                        season_term,
+                        _json_dump(locations),
+                        direct_url,
+                        source_id,
+                        source_ref,
+                        observed_date,
+                        now,
+                        now,
+                    ),
+                )
+                self._connection.commit()
+            except Exception:
+                self._connection.rollback()
+                raise
+
+    async def find_cached_direct_link(
+        self,
+        *,
+        job: JobPosting,
+        posted_date: str | None,
+        limit: int = 25,
+    ) -> str | None:
+        """Return one safe, recent direct URL or ``None`` when a match is ambiguous."""
+        season_term = (job.season_term or "").casefold()
+        async with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT direct_url, normalized_locations, season_term, posted_date, first_seen
+                FROM direct_link_cache
+                WHERE track = ?
+                  AND normalized_company = ?
+                  AND normalized_title = ?
+                ORDER BY last_seen DESC
+                LIMIT ?
+                """,
+                (
+                    job.track,
+                    direct_link_company_key(job.company),
+                    job.normalized_title,
+                    max(1, limit),
+                ),
+            ).fetchall()
+
+        job_locations = set(job.normalized_locations)
+        matched_urls: set[str] = set()
+        for row in rows:
+            direct_url = sanitize_application_url(str(row["direct_url"] or "")).url
+            if not direct_url or is_aggregator_application_url(direct_url):
+                continue
+            candidate_locations = set(json.loads(row["normalized_locations"] or "[]"))
+            if not _season_terms_compatible(season_term, str(row["season_term"] or "")):
+                continue
+            if not _semantic_dedupe_window_matches(
+                incoming_posted_date=posted_date,
+                candidate_posted_date=row["posted_date"],
+                candidate_first_seen=row["first_seen"],
+            ):
+                continue
+            if _feed_locations_overlap(job_locations, candidate_locations):
+                matched_urls.add(direct_url)
+
+        return next(iter(matched_urls)) if len(matched_urls) == 1 else None
+
+    async def get_due_direct_ats_sources(
+        self,
+        source_ids: Iterable[str],
+        *,
+        stale_before: str,
+    ) -> set[str]:
+        """Return board sources not checked within the direct-link cache window."""
+        values = sorted(set(source_ids))
+        if not values:
+            return set()
+        placeholders = ", ".join("?" for _ in values)
+        async with self._lock:
+            rows = self._connection.execute(
+                f"""
+                SELECT source_id
+                FROM direct_ats_cache_state
+                WHERE source_id IN ({placeholders})
+                  AND last_checked_at >= ?
+                """,
+                (*values, stale_before),
+            ).fetchall()
+        fresh = {str(row["source_id"]) for row in rows}
+        return set(values) - fresh
+
+    async def record_direct_ats_cache_check(
+        self,
+        *,
+        source_id: str,
+        provider: str,
+        board_token: str,
+        error: str | None = None,
+    ) -> None:
+        """Persist the bounded board-request cooldown, including failures."""
+        async with self._lock:
+            now = _utc_now()
+            self._connection.execute(
+                """
+                INSERT INTO direct_ats_cache_state (
+                    source_id, provider, board_token, last_checked_at, last_success_at, last_error
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_id) DO UPDATE SET
+                    provider = excluded.provider,
+                    board_token = excluded.board_token,
+                    last_checked_at = excluded.last_checked_at,
+                    last_success_at = excluded.last_success_at,
+                    last_error = excluded.last_error
+                """,
+                (
+                    source_id,
+                    provider,
+                    board_token,
+                    now,
+                    now if error is None else None,
+                    error[:2_000] if error else None,
+                ),
+            )
+            self._connection.commit()
 
     def _merge_feed_canonicals_locked(self, canonical_ids: Iterable[int]) -> tuple[int, List[int]]:
         values = sorted(set(int(value) for value in canonical_ids))
@@ -1462,17 +1699,20 @@ class Database:
         return survivor, duplicates
 
     async def list_deliveries_for_send(self, channel_id: int) -> List[DbRow]:
+        now = _utc_now()
         async with self._lock:
             return self._connection.execute(
                 """
                 SELECT * FROM discord_deliveries
                 WHERE channel_id = ? AND state IN ('pending', 'sending', 'uncertain')
+                  AND (not_before = '' OR not_before <= ?)
                 ORDER BY created_at ASC, id ASC
                 """,
-                (str(channel_id),),
+                (str(channel_id), now),
             ).fetchall()
 
     async def list_delivery_channel_ids_for_send(self) -> List[int]:
+        now = _utc_now()
         async with self._lock:
             rows = self._connection.execute(
                 """
@@ -1480,8 +1720,10 @@ class Database:
                 FROM discord_deliveries
                 WHERE state IN ('pending', 'sending', 'uncertain')
                   AND channel_id <> '0'
+                  AND (not_before = '' OR not_before <= ?)
                 ORDER BY channel_id ASC
-                """
+                """,
+                (now,),
             ).fetchall()
         return [int(row["channel_id"]) for row in rows]
 
@@ -1762,6 +2004,7 @@ class Database:
         seen = set()
         dates = []
         company_logo_urls = []
+        jobright_fallback_urls = []
         for row in rows:
             if row["source_label"] not in seen:
                 seen.add(row["source_label"])
@@ -1776,6 +2019,12 @@ class Database:
             logo_url = raw_data.get("company_logo_url") if isinstance(raw_data, Mapping) else None
             if isinstance(logo_url, str) and logo_url and logo_url not in company_logo_urls:
                 company_logo_urls.append(logo_url)
+            fallback_url = (
+                raw_data.get("jobright_fallback_url") if isinstance(raw_data, Mapping) else None
+            )
+            safe_fallback_url = sanitize_application_url(str(fallback_url or "")).url
+            if safe_fallback_url and is_aggregator_application_url(safe_fallback_url):
+                jobright_fallback_urls.append(safe_fallback_url)
         return {
             "source_labels": labels,
             "sources": [
@@ -1789,6 +2038,9 @@ class Database:
             ],
             "posted_date": min(dates) if dates else None,
             "company_logo_url": company_logo_urls[0] if company_logo_urls else None,
+            "jobright_fallback_url": (
+                sorted(set(jobright_fallback_urls))[0] if jobright_fallback_urls else None
+            ),
         }
 
     async def get_runtime_config_value(self, key: str) -> Optional[DbRow]:

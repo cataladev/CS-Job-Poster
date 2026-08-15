@@ -24,6 +24,22 @@ COMPANY_SUFFIXES = {
     "limited",
     "plc",
 }
+# These are verified employer-brand variants, not fuzzy matching. They are used
+# only by direct-link enrichment so a Jobright label such as "NVIDIA AI" can
+# safely reach the same employer board as "NVIDIA".
+DIRECT_LINK_COMPANY_ALIASES = {
+    "anduril industries": "anduril",
+    "astranis space technologies": "astranis",
+    "cadence": "cadence design systems",
+    "tiktok": "bytedance",
+    "tiktok usds joint venture": "bytedance",
+    "creatify ai": "creatify lab",
+    "exa": "exa labs",
+    "amazon web services aws": "amazon",
+    "magna international": "magna",
+    "nvidia ai": "nvidia",
+    "sony electronics": "sony",
+}
 TITLE_SYNONYMS = {
     "software engineering": "software engineer",
     "software developer": "software engineer",
@@ -138,6 +154,12 @@ def normalize_company_name(company: str) -> str:
     return " ".join(tokens)
 
 
+def direct_link_company_key(company: str) -> str:
+    """Return a conservative employer key for direct-link cache lookups."""
+    normalized = normalize_company_name(company)
+    return DIRECT_LINK_COMPANY_ALIASES.get(normalized, normalized)
+
+
 def normalize_title(title: str) -> str:
     title = collapse_whitespace(title).lower()
     title = title.replace("–", "-").replace("—", "-")
@@ -155,6 +177,11 @@ def normalize_location(location: str) -> str:
         return LOCATION_ALIASES[value]
     value = re.sub(r"[^a-z0-9\s,]+", " ", value)
     value = collapse_whitespace(value.replace(",", " "))
+    # Greenhouse and similar boards commonly format a U.S. city as
+    # ``Seattle, Washington, United States`` while Jobright emits
+    # ``Seattle, WA``. Drop the redundant country before canonicalizing the
+    # state so equivalent locations can share one direct link.
+    value = re.sub(r"\b(?:united states|usa|us)\s*$", "", value).strip()
     for state_name, state_code in US_STATE_NAME_TO_CODE.items():
         state_suffixes = (f"{state_name} state", state_name)
         for suffix in state_suffixes:

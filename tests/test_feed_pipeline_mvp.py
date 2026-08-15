@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from datetime import UTC, datetime, timedelta
 
 from job_bot.database import Database, RECENT_FEED_CATCHUP_STATE_KEY
@@ -11,6 +12,7 @@ from job_bot.github_feeds import (
     JobObservation,
     parse_markdown_table,
 )
+from job_bot.utils.normalization import normalize_job_posting
 
 import pytest
 
@@ -72,6 +74,8 @@ def _job(
     posted_date: str | None = None,
     source_ref: str = "main/README.md",
     company: str | None = None,
+    title: str | None = None,
+    application_url: str | None = None,
 ) -> JobObservation:
     return JobObservation(
         source_id=source_id,
@@ -79,14 +83,348 @@ def _job(
         source_url=f"https://github.com/owner/{source_id}",
         external_id=external_id,
         company=company or f"Example {external_id} Corp",
-        title="Software Engineer Intern" if track == "internship" else "Software Engineer",
+        title=title or ("Software Engineer Intern" if track == "internship" else "Software Engineer"),
         locations=[location],
-        application_url=f"https://jobs.example.com/{external_id}",
+        application_url=application_url or f"https://jobs.example.com/{external_id}",
         track=track,
         cycle="Summer 2027",
         posted_date=posted_date,
         source_ref=source_ref,
     )
+
+
+@pytest.mark.asyncio
+async def test_cached_direct_link_enriches_jobright_before_delivery(config_factory) -> None:
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    direct_feed = _feed("github_direct")
+    jobright_feed = _feed("jobright_internships")
+    posted_date = datetime.now(UTC).date().isoformat()
+    direct = _job(
+        direct_feed.source_id,
+        "direct-1",
+        company="Startup Corp",
+        posted_date=posted_date,
+        application_url="https://careers.startup.com/jobs/1",
+    )
+    jobright = _job(
+        jobright_feed.source_id,
+        "jobright-1",
+        company="Startup Corp",
+        posted_date=posted_date,
+        application_url="https://jobright.ai/jobs/info/jobright-1",
+    )
+    pipeline = FeedPipeline(
+        config=config,
+        database=database,
+        publisher=StubPublisher(),
+        feeds=(direct_feed, jobright_feed),
+        fetcher=StubFetcher({direct_feed.source_id: [direct], jobright_feed.source_id: [jobright]}),
+    )
+    try:
+        assert (await pipeline.run()).baseline_completed
+        jobs = await database.search_text("Startup Corp")
+        assert len(jobs) == 1
+        assert jobs[0].canonical_url == "https://careers.startup.com/jobs/1"
+        metadata = await database.get_feed_observation_metadata(int(jobs[0].id or 0))
+        assert metadata["jobright_fallback_url"] == "https://jobright.ai/jobs/info/jobright-1"
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_targeted_ats_board_primes_jobright_direct_link_cache(config_factory) -> None:
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    jobright_feed = _feed("jobright_internships")
+    direct_board = FeedDefinition(
+        "direct_ashby_startup",
+        "Startup Corp direct careers",
+        "direct-ats/ashby",
+        "public",
+        "startup",
+        "direct_ats",
+        parse_markdown_table,
+        fetch_url="https://api.ashbyhq.com/posting-api/job-board/startup",
+        provider="ashby",
+        company_name="Startup Corp",
+        required_for_baseline=False,
+    )
+    posted_date = datetime.now(UTC).date().isoformat()
+    jobright = _job(
+        jobright_feed.source_id,
+        "jobright-1",
+        company="Startup Corp",
+        posted_date=posted_date,
+        application_url="https://jobright.ai/jobs/info/jobright-1",
+    )
+    direct = _job(
+        direct_board.source_id,
+        "direct-1",
+        company="Startup Corp",
+        posted_date=posted_date,
+        application_url="https://jobs.ashbyhq.com/startup/direct-1",
+    )
+    pipeline = FeedPipeline(
+        config=config,
+        database=database,
+        publisher=StubPublisher(),
+        feeds=(jobright_feed,),
+        direct_link_feeds=(direct_board,),
+        fetcher=StubFetcher(
+            {jobright_feed.source_id: [jobright], direct_board.source_id: [direct]}
+        ),
+    )
+    try:
+        stats = await pipeline.run()
+        assert stats.direct_link_boards_fetched == 1
+        jobs = await database.search_text("Startup Corp")
+        assert jobs[0].canonical_url == "https://jobs.ashbyhq.com/startup/direct-1"
+        assert await database.get_due_direct_ats_sources(
+            [direct_board.source_id],
+            stale_before=(datetime.now(UTC) - timedelta(hours=4)).isoformat(),
+        ) == set()
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_direct_link_cache_rejects_stale_location_and_ambiguous_matches(config_factory) -> None:
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    posted_date = datetime.now(UTC).date().isoformat()
+    direct = normalize_job_posting(
+        _job(
+            "github_direct",
+            "direct-1",
+            company="Startup Corp",
+            application_url="https://careers.startup.com/jobs/1",
+        ).to_job_posting()
+    )
+    jobright = normalize_job_posting(
+        _job(
+            "jobright_internships",
+            "jobright-1",
+            company="Startup Corp",
+            application_url="https://jobright.ai/jobs/info/jobright-1",
+        ).to_job_posting()
+    )
+    try:
+        await database.cache_direct_link(
+            job=direct,
+            source_id="github_direct",
+            source_ref="main/README.md",
+            posted_date=(datetime.now(UTC) - timedelta(days=4)).date().isoformat(),
+        )
+        assert await database.find_cached_direct_link(job=jobright, posted_date=posted_date) is None
+
+        await database.cache_direct_link(
+            job=direct,
+            source_id="github_direct",
+            source_ref="main/README.md",
+            posted_date=posted_date,
+        )
+        jobright.normalized_locations = ["seattle wa"]
+        assert await database.find_cached_direct_link(job=jobright, posted_date=posted_date) is None
+
+        jobright.normalized_locations = ["austin tx"]
+        duplicate_direct = normalize_job_posting(
+            _job(
+                "second_direct",
+                "direct-2",
+                company="Startup Corp",
+                application_url="https://jobs.startup.com/openings/2",
+            ).to_job_posting()
+        )
+        await database.cache_direct_link(
+            job=duplicate_direct,
+            source_id="second_direct",
+            source_ref="main/README.md",
+            posted_date=posted_date,
+        )
+        assert await database.find_cached_direct_link(job=jobright, posted_date=posted_date) is None
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_direct_link_cache_allows_same_year_when_only_one_source_names_season(
+    config_factory,
+) -> None:
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    posted_date = datetime.now(UTC).date().isoformat()
+    direct = normalize_job_posting(
+        _job(
+            "github_direct",
+            "direct-1",
+            company="Startup Corp",
+            application_url="https://careers.startup.com/jobs/1",
+        ).to_job_posting()
+    )
+    direct.season_term = "2027"
+    jobright = normalize_job_posting(
+        _job(
+            "jobright_internships",
+            "jobright-1",
+            company="Startup Corp",
+            application_url="https://jobright.ai/jobs/info/jobright-1",
+        ).to_job_posting()
+    )
+    jobright.season_term = "summer 2027"
+    try:
+        await database.cache_direct_link(
+            job=direct,
+            source_id="github_direct",
+            source_ref="main/README.md",
+            posted_date=posted_date,
+        )
+        assert await database.find_cached_direct_link(job=jobright, posted_date=posted_date) == (
+            "https://careers.startup.com/jobs/1"
+        )
+        direct.season_term = "winter 2027"
+        await database.cache_direct_link(
+            job=direct,
+            source_id="github_direct_winter",
+            source_ref="main/README.md",
+            posted_date=posted_date,
+        )
+        # The explicit winter copy is ignored for a summer Jobright role; the
+        # only remaining eligible direct URL is the year-only observation.
+        assert await database.find_cached_direct_link(job=jobright, posted_date=posted_date) == (
+            "https://careers.startup.com/jobs/1"
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_late_direct_observation_updates_canonical_without_touching_sent_delivery(
+    config_factory,
+) -> None:
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    jobright_feed = _feed("jobright_internships")
+    direct_feed = _feed("github_direct")
+    posted_date = datetime.now(UTC).date().isoformat()
+    jobright = _job(
+        jobright_feed.source_id,
+        "jobright-1",
+        company="Startup Corp",
+        posted_date=posted_date,
+        application_url="https://jobright.ai/jobs/info/jobright-1",
+    )
+    direct = _job(
+        direct_feed.source_id,
+        "direct-1",
+        company="Startup Corp",
+        posted_date=posted_date,
+        application_url="https://careers.startup.com/jobs/1",
+    )
+    fetcher = StubFetcher({jobright_feed.source_id: [jobright], direct_feed.source_id: []})
+    pipeline = FeedPipeline(
+        config=config,
+        database=database,
+        publisher=StubPublisher(),
+        feeds=(jobright_feed, direct_feed),
+        fetcher=fetcher,
+    )
+    try:
+        assert (await pipeline.run()).baseline_completed
+        original = (await database.search_text("Startup Corp"))[0]
+        delivery = database._connection.execute(  # noqa: SLF001 - sent-delivery fixture
+            "SELECT id FROM discord_deliveries WHERE canonical_id = ?", (original.id,)
+        ).fetchone()
+        await database.mark_delivery_sent(
+            delivery_id=int(delivery["id"]),
+            canonical_id=int(original.id or 0),
+            track=original.track,
+            channel_id=111,
+            message_id=777,
+        )
+
+        fetcher.snapshots[direct_feed.source_id] = [direct]
+        await pipeline.run()
+
+        updated = (await database.search_text("Startup Corp"))[0]
+        assert updated.canonical_url == "https://careers.startup.com/jobs/1"
+        post = database._connection.execute(  # noqa: SLF001 - sent-delivery assertion
+            "SELECT message_id FROM discord_posts WHERE canonical_id = ?", (updated.id,)
+        ).fetchone()
+        assert post["message_id"] == "777"
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_jobright_only_delivery_waits_five_minutes_without_new_fetches(config_factory) -> None:
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    feed = _feed("jobright_internships")
+    fetcher = StubFetcher({feed.source_id: [_job(feed.source_id, "baseline")]})
+    pipeline = FeedPipeline(
+        config=config,
+        database=database,
+        publisher=StubPublisher(),
+        feeds=(feed,),
+        fetcher=fetcher,
+    )
+    try:
+        assert (await pipeline.run()).baseline_completed
+        fetcher.snapshots[feed.source_id].append(_job(feed.source_id, "new"))
+        update = await pipeline.run()
+        assert update.deliveries_queued == 1
+        assert await database.get_delivery_counts() == {"pending": 1, "suppressed": 1}
+        assert await database.list_deliveries_for_send(111) == []
+
+        database._connection.execute(  # noqa: SLF001 - deferred-delivery fixture
+            "UPDATE discord_deliveries SET not_before = '' WHERE state = 'pending'"
+        )
+        database._connection.commit()  # noqa: SLF001 - deferred-delivery fixture
+        assert len(await database.list_deliveries_for_send(111)) == 1
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_existing_sqlite_database_adds_deferred_delivery_index(tmp_path) -> None:
+    """A deployed database may predate the deferred-delivery column."""
+    database_path = tmp_path / "legacy.db"
+    connection = sqlite3.connect(database_path)
+    connection.execute(
+        """
+        CREATE TABLE discord_deliveries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            canonical_id INTEGER NOT NULL,
+            channel_id TEXT NOT NULL,
+            state TEXT NOT NULL,
+            marker TEXT NOT NULL UNIQUE,
+            message_id TEXT,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            sent_at TEXT,
+            UNIQUE(canonical_id, channel_id)
+        )
+        """
+    )
+    connection.close()
+
+    database = Database(str(database_path))
+    try:
+        await database.initialize()
+        assert "not_before" in database._connection.column_names("discord_deliveries")  # noqa: SLF001
+        indexes = database._connection.execute("PRAGMA index_list(discord_deliveries)").fetchall()  # noqa: SLF001
+        assert any(index[1] == "idx_discord_deliveries_ready" for index in indexes)
+    finally:
+        await database.close()
 
 
 @pytest.mark.asyncio

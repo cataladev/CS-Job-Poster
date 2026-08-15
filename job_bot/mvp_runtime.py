@@ -28,7 +28,6 @@ class FeedDiscordClient(discord.Client):
         database: Database,
         pipeline: FeedPipeline,
         publisher: TrackChannelPublisher,
-        direct_ats_pipeline: FeedPipeline | None = None,
     ) -> None:
         intents = discord.Intents.default()
         intents.message_content = False
@@ -36,7 +35,6 @@ class FeedDiscordClient(discord.Client):
         super().__init__(intents=intents)
         self.config = config
         self.pipeline = pipeline
-        self.direct_ats_pipeline = direct_ats_pipeline
         self.logger = logging.getLogger(self.__class__.__name__)
         self.tree = app_commands.CommandTree(self)
         self.channel_configurator = JobChannelConfigurator(config, database)
@@ -77,12 +75,6 @@ class FeedDiscordClient(discord.Client):
             pipeline=self.pipeline,
             interval_seconds=self.config.poll_interval_seconds,
         )
-        if self.direct_ats_pipeline is not None:
-            self._ensure_poll_task(
-                name="direct_ats",
-                pipeline=self.direct_ats_pipeline,
-                interval_seconds=self.config.direct_ats_poll_interval_seconds,
-            )
 
     async def close(self) -> None:
         self._shutdown.set()
@@ -184,37 +176,27 @@ async def run_bot() -> None:
 
     publisher = TrackChannelPublisher(config, database)
     client: FeedDiscordClient
-    direct_ats_feeds = build_direct_ats_feeds(
+    direct_link_feeds = build_direct_ats_feeds(
         config.company_seed_path,
-        poll_interval_seconds=config.direct_ats_poll_interval_seconds,
+        poll_interval_seconds=14_400,
     )
     pipeline = FeedPipeline(
         config=config,
         database=database,
         publisher=publisher,
         feeds=FEEDS,
-    )
-    direct_ats_pipeline = (
-        FeedPipeline(
-            config=config,
-            database=database,
-            publisher=publisher,
-            feeds=direct_ats_feeds,
-        )
-        if direct_ats_feeds
-        else None
+        direct_link_feeds=direct_link_feeds,
     )
     logger.info(
-        "direct_ats_feeds_enabled count=%s poll_interval_seconds=%s",
-        len(direct_ats_feeds),
-        config.direct_ats_poll_interval_seconds,
+        "bounded_direct_link_resolver_enabled boards=%s cache_ttl_seconds=%s",
+        len(direct_link_feeds),
+        14_400,
     )
     client = FeedDiscordClient(
         config=config,
         database=database,
         pipeline=pipeline,
         publisher=publisher,
-        direct_ats_pipeline=direct_ats_pipeline,
     )
     publisher.bind_client(client)
     try:

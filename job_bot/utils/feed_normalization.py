@@ -304,6 +304,12 @@ def preferred_application_url(existing_url: str, candidate_url: str) -> str:
     return existing_url
 
 
+def is_aggregator_application_url(url: str) -> bool:
+    """Return whether a safe application URL belongs to an aggregator wrapper."""
+    decision = sanitize_application_url(url)
+    return bool(decision.url and decision.host.casefold() in _AGGREGATOR_APPLICATION_HOSTS)
+
+
 def location_scoped_identity_keys(
     identity_keys: set[str],
     *,
