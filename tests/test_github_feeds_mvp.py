@@ -25,6 +25,7 @@ def _jobright_card(
     seniority: str = "Intern",
     employment_type: str = "Internship",
     repost: bool = False,
+    original_url: str | None = None,
 ) -> dict[str, object]:
     return {
         "companyResult": {"companyName": "Example Corp"},
@@ -35,6 +36,7 @@ def _jobright_card(
             "jobLocation": "Austin, TX",
             "jobLocations": ["Austin, TX"],
             "applyLink": f"https://jobright.ai/jobs/info/{job_id}",
+            "originalUrl": original_url,
             "employmentType": employment_type,
             "internHireDate": "Summer 2027",
             "publishTime": "2026-08-14 13:39:51",
@@ -281,6 +283,34 @@ def test_jobright_parser_skips_native_reposts() -> None:
 
     assert [job.external_id for job in jobs] == ["fresh"]
     assert rejected == 1
+
+
+def test_jobright_parser_prefers_the_original_employer_application_url() -> None:
+    definition = FeedDefinition(
+        "jobright_internships",
+        "Jobright",
+        "jobright.ai",
+        "public",
+        "software-engineer-intern-jobs-in-united-states",
+        "internship",
+        parse_jobright_next_data,
+        fetch_url="https://jobright.ai/jobs/software-engineer-intern-jobs-in-united-states",
+        provider="jobright",
+    )
+    jobs, rejected = parse_jobright_public_cards(
+        [
+            _jobright_card(
+                "direct-apply",
+                original_url="https://jobs.example.com/roles/direct-apply?utm_source=jobright",
+            ),
+            _jobright_card("invalid-original", original_url="javascript:alert(1)"),
+        ],
+        definition,
+    )
+
+    assert rejected == 0
+    assert jobs[0].application_url == "https://jobs.example.com/roles/direct-apply"
+    assert jobs[1].application_url == "https://jobright.ai/jobs/info/invalid-original"
 
 
 @pytest.mark.asyncio
