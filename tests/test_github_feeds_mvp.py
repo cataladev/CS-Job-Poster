@@ -24,6 +24,7 @@ def _jobright_card(
     title: str = "Software Engineer Intern",
     seniority: str = "Intern",
     employment_type: str = "Internship",
+    repost: bool = False,
 ) -> dict[str, object]:
     return {
         "companyResult": {"companyName": "Example Corp"},
@@ -37,6 +38,7 @@ def _jobright_card(
             "employmentType": employment_type,
             "internHireDate": "Summer 2027",
             "publishTime": "2026-08-14 13:39:51",
+            "repost": repost,
         },
     }
 
@@ -258,6 +260,27 @@ def test_jobright_new_grad_parser_keeps_explicit_entry_level_and_engineer_one_ro
 
     assert rejected == 0
     assert [job.external_id for job in jobs] == ["entry-level-1", "engineer-one-1"]
+
+
+def test_jobright_parser_skips_native_reposts() -> None:
+    definition = FeedDefinition(
+        "jobright_internships",
+        "Jobright",
+        "jobright.ai",
+        "public",
+        "software-engineer-intern-jobs-in-united-states",
+        "internship",
+        parse_jobright_next_data,
+        fetch_url="https://jobright.ai/jobs/software-engineer-intern-jobs-in-united-states",
+        provider="jobright",
+    )
+    jobs, rejected = parse_jobright_public_cards(
+        [_jobright_card("fresh"), _jobright_card("reposted", repost=True)],
+        definition,
+    )
+
+    assert [job.external_id for job in jobs] == ["fresh"]
+    assert rejected == 1
 
 
 @pytest.mark.asyncio

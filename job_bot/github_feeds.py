@@ -492,6 +492,9 @@ def parse_jobright_public_cards(
         if not isinstance(job, Mapping) or not isinstance(company_data, Mapping):
             rejected += 1
             continue
+        if _jobright_is_repost(job):
+            rejected += 1
+            continue
 
         title = clean_feed_text(job.get("jobTitle"))
         company = clean_feed_text(company_data.get("companyName"))
@@ -553,6 +556,16 @@ def parse_jobright_public_cards(
     if not observations:
         raise ValueError(f"{definition.source_id} produced no active U.S. observations")
     return observations, rejected
+
+
+def _jobright_is_repost(job: Mapping[str, object]) -> bool:
+    """Honor Jobright's native repost marker before a role reaches Discord."""
+    value = job.get("repost")
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().casefold() in {"1", "true", "yes"}
+    return False
 
 
 def _jobright_page_props(

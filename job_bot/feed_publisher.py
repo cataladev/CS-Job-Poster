@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import csv
 import hashlib
 import logging
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import discord
 
@@ -13,6 +16,7 @@ from job_bot.database import Database
 from job_bot.models import AppConfig, CanonicalJob
 from job_bot.utils.feed_normalization import is_us_location, sanitize_application_url
 from job_bot.utils.http import AsyncHttpClient
+from job_bot.utils.normalization import normalize_company_name
 
 
 FALLBACK_COMPANY_THUMBNAIL_URL = (
@@ -25,6 +29,25 @@ def _truncate(value: object, limit: int) -> str:
     return text if len(text) <= limit else f"{text[: limit - 1]}…"
 
 
+def _priority_companies(seed_path: str) -> set[str]:
+    """Use the curated seed's existing hot-company tier for daily digest flair."""
+    try:
+        with Path(seed_path).open(encoding="utf-8", newline="") as handle:
+            rows = csv.DictReader(handle)
+            return {
+                normalize_company_name(company)
+                for row in rows
+                if (company := str(row.get("company") or "").strip())
+                and (
+                    company.startswith("🔥")
+                    or str(row.get("tier") or "").casefold() == "t1"
+                    or "big_tech" in str(row.get("categories") or "").casefold()
+                )
+            }
+    except OSError:
+        return set()
+
+
 class TrackChannelPublisher:
     def __init__(self, config: AppConfig, database: Database) -> None:
         self.config = config
@@ -33,6 +56,7 @@ class TrackChannelPublisher:
         self.client: discord.Client | None = None
         self.logger = logging.getLogger(self.__class__.__name__)
         self._logo_cache: dict[str, str] = {}
+        self._priority_companies = _priority_companies(config.company_seed_path)
         # The core feeds and the slower direct-ATS sweep run independently. Keep
         # the stateful pending-delivery claim/send flow single-file so concurrent
         # collectors cannot read the same pending delivery and post it twice.
@@ -85,7 +109,7 @@ class TrackChannelPublisher:
         """Avoid summarizing historical posts after a deployment or upgrade."""
         if await self.database.get_digest_cursor(channel_id) is not None:
             return
-        await self.database.set_digest_cursor(channel_id, datetime.now(UTC).isoformat())
+        await self.database.set_digest_cursor(channel_id, self._now().isoformat())
 
     async def _publish_digest_if_due(self, channel_id: int) -> None:
         cursor = await self.database.get_digest_cursor(channel_id)
@@ -101,8 +125,9 @@ class TrackChannelPublisher:
         if started_at.tzinfo is None:
             started_at = started_at.replace(tzinfo=UTC)
 
-        now = datetime.now(UTC)
-        if (now - started_at).total_seconds() < self.config.digest_interval_seconds:
+        now = self._now()
+        scheduled_at = self._daily_digest_at(now)
+        if now < scheduled_at or started_at >= scheduled_at:
             return
 
         deliveries = await self.database.list_sent_deliveries_since(
@@ -119,11 +144,11 @@ class TrackChannelPublisher:
         if any(str(delivery["track"]) != track for delivery in deliveries):
             raise RuntimeError("A job digest channel must contain one track only")
 
-        marker = self._digest_marker(channel_id, started_at)
+        marker = self._digest_marker(channel_id, scheduled_at)
         existing_message_id = await self._find_existing_digest_marker(
             channel,
             marker=marker,
-            after=started_at - timedelta(minutes=5),
+            after=scheduled_at - timedelta(minutes=5),
         )
         if existing_message_id is not None:
             await self.database.set_digest_cursor(channel_id, now.isoformat())
@@ -143,6 +168,7 @@ class TrackChannelPublisher:
                 channel=channel,
                 marker=marker,
                 started_at=started_at,
+                scheduled_at=scheduled_at,
             ),
             allowed_mentions=(
                 discord.AllowedMentions(roles=[discord.Object(id=role_id)])
@@ -158,6 +184,28 @@ class TrackChannelPublisher:
             len(deliveries),
             message.id,
         )
+
+    def _now(self) -> datetime:
+        return datetime.now(UTC)
+
+    def _digest_timezone(self) -> ZoneInfo:
+        try:
+            return ZoneInfo(self.config.digest_timezone)
+        except ZoneInfoNotFoundError:
+            self.logger.warning(
+                "digest_timezone_invalid timezone=%s; using America/New_York",
+                self.config.digest_timezone,
+            )
+            return ZoneInfo("America/New_York")
+
+    def _daily_digest_at(self, now: datetime) -> datetime:
+        local_now = now.astimezone(self._digest_timezone())
+        return local_now.replace(
+            hour=self.config.digest_hour_local,
+            minute=0,
+            second=0,
+            microsecond=0,
+        ).astimezone(UTC)
 
     async def _publish_channel(
         self,
@@ -349,33 +397,48 @@ class TrackChannelPublisher:
         channel: Any,
         marker: str,
         started_at: datetime,
+        scheduled_at: datetime,
     ) -> discord.Embed:
         track = str(deliveries[0]["track"])
         track_label = track.replace("_", " ").title()
         guild_id = getattr(getattr(channel, "guild", None), "id", None)
-        visible_deliveries = deliveries[:20]
+        visible_deliveries = deliveries[:12]
         entries = []
+        priority_count = 0
         for delivery in visible_deliveries:
-            title = _truncate(delivery["title"], 150)
-            company = _truncate(delivery["company"], 80)
-            location = _truncate(delivery["location"], 80)
+            title = _truncate(delivery["title"], 110)
+            company = _truncate(delivery["company"], 60)
+            location = _truncate(delivery["location"], 70)
+            is_priority = normalize_company_name(company) in self._priority_companies
+            badge = "🔥 " if is_priority else ""
+            priority_count += int(is_priority)
             message_id = delivery["message_id"]
             if guild_id is not None and message_id:
                 url = f"https://discord.com/channels/{guild_id}/{channel.id}/{message_id}"
             else:
                 url = str(delivery["canonical_url"])
-            entries.append(f"• [{company} — {title}]({url})\n  {location}")
+            cycle = _truncate(delivery["season_term"] or "Cycle TBA", 40)
+            entries.append(f"{badge}[{company} — {title}]({url})\n> 📍 {location}  •  {cycle}")
 
         hidden_count = len(deliveries) - len(visible_deliveries)
         if hidden_count:
-            entries.append(f"• …and {hidden_count} more in this channel.")
-        elapsed_hours = max(1, round((datetime.now(UTC) - started_at).total_seconds() / 3600))
+            entries.append(f"*+ {hidden_count} more roles in this drop.*")
+        local_zone = self._digest_timezone()
+        local_started_at = started_at.astimezone(local_zone)
+        local_scheduled_at = scheduled_at.astimezone(local_zone)
+        window_start = local_started_at.strftime("%b %d, %-I:%M %p %Z")
+        digest_day = local_scheduled_at.strftime("%a, %b %-d")
+        highlight = f" · 🔥 {priority_count} priority" if priority_count else ""
         embed = discord.Embed(
-            title=f"{track_label} job digest",
-            description="\n".join(entries),
+            title=f"{track_label} Daily Brief — {digest_day}",
+            description=(
+                f"**{len(deliveries)} fresh {track_label.casefold()} role(s)**{highlight}\n"
+                f"*Since {window_start}*\n\n"
+                + "\n\n".join(entries)
+            ),
             color=discord.Color.blurple(),
         )
-        embed.set_footer(text=f"Job Bot • {len(deliveries)} new role(s) in the last {elapsed_hours}h • {marker}")
+        embed.set_footer(text=f"Job Bot • Daily 4 PM ET drop • {marker}")
         return embed
 
     async def _resolve_channel(self, channel_id: int) -> Any:

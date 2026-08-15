@@ -209,6 +209,8 @@ class AppConfig:
     poll_interval_seconds: int = 300
     recent_catchup_hours: int = 48
     digest_interval_seconds: int = 14_400
+    digest_hour_local: int = 16
+    digest_timezone: str = "America/New_York"
     direct_ats_poll_interval_seconds: int = 900
     discord_internship_alert_role_id: Optional[int] = None
     discord_new_grad_alert_role_id: Optional[int] = None

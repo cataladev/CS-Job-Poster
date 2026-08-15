@@ -33,6 +33,8 @@ def test_load_config_defaults_to_five_minute_poll(monkeypatch, tmp_path) -> None
     assert config.max_job_age_hours == 72
     assert config.poll_interval_seconds == 300
     assert config.digest_interval_seconds == 14_400
+    assert config.digest_hour_local == 16
+    assert config.digest_timezone == "America/New_York"
     assert config.discord_internship_alert_role_id is None
     assert config.discord_new_grad_alert_role_id is None
     assert config.direct_ats_poll_interval_seconds == 900

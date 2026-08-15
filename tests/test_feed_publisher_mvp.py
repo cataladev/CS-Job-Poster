@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import discord
 import pytest
@@ -64,6 +65,16 @@ class FakeClient:
         return self.channels.get(channel_id)
 
 
+def test_daily_digest_is_scheduled_for_four_pm_new_york_time(config_factory) -> None:
+    publisher = TrackChannelPublisher(config_factory(), Database(":memory:"))
+
+    summer = publisher._daily_digest_at(datetime(2026, 8, 15, 18, tzinfo=UTC))
+    winter = publisher._daily_digest_at(datetime(2026, 12, 15, 18, tzinfo=UTC))
+
+    assert summer == datetime(2026, 8, 15, 20, tzinfo=UTC)
+    assert winter == datetime(2026, 12, 15, 21, tzinfo=UTC)
+
+
 async def _create_pending_delivery(
     database: Database,
     *,
@@ -71,6 +82,7 @@ async def _create_pending_delivery(
     channel_id: int = 111,
     external_id: str = "job-1",
     location: str = "Austin, TX",
+    company: str = "Example Corp",
     raw_data: dict | None = None,
 ) -> None:
     title = "Software Engineer Intern" if track == "internship" else "Software Engineer"
@@ -79,7 +91,7 @@ async def _create_pending_delivery(
         source_label="Source",
         source_url="https://github.com/owner/source",
         external_id=external_id,
-        company="Example Corp",
+        company=company,
         title=title,
         locations=[location],
         application_url=sanitize_application_url(
@@ -314,15 +326,25 @@ async def test_delivery_uses_source_company_logo_thumbnail(config_factory) -> No
 @pytest.mark.asyncio
 async def test_periodic_role_digest_links_back_to_individual_job_messages(config_factory) -> None:
     config = config_factory()
-    config.digest_interval_seconds = 900
     config.discord_internship_alert_role_id = 555
     database = Database(config.sqlite_db_path)
     await database.initialize()
     try:
-        await _create_pending_delivery(database, external_id="job-1", location="Austin, TX")
+        await _create_pending_delivery(
+            database,
+            external_id="job-1",
+            location="Austin, TX",
+            company="Amazon",
+        )
         await _create_pending_delivery(database, external_id="job-2", location="Boston, MA")
         channel = FakeChannel([])
         publisher = TrackChannelPublisher(config, database)
+        publisher._priority_companies = {"amazon"}
+        local_now = datetime.now(ZoneInfo("America/New_York")).replace(
+            hour=16, minute=5, second=0, microsecond=0
+        )
+        digest_now = local_now.astimezone(UTC)
+        publisher._now = lambda: digest_now  # type: ignore[method-assign]
         publisher.bind_client(FakeClient(channel))  # type: ignore[arg-type]
 
         sent, reconciled = await publisher.publish_pending()
@@ -330,13 +352,14 @@ async def test_periodic_role_digest_links_back_to_individual_job_messages(config
         assert len(channel.sent) == 2
         assert channel.contents == [None, None]
 
-        cursor = (datetime.now(UTC) - timedelta(hours=4)).isoformat()
+        cursor = (publisher._daily_digest_at(digest_now) - timedelta(days=1)).isoformat()
         await database.set_digest_cursor(111, cursor)
 
         assert await publisher.publish_pending() == (0, 0)
         assert len(channel.sent) == 3
         digest = channel.sent[-1]
-        assert digest.title == "Internship job digest"
+        assert digest.title.startswith("Internship Daily Brief")
+        assert "🔥 [Amazon" in digest.description
         assert "Example Corp" in digest.description
         assert "https://discord.com/channels/123/111/1000" in digest.description
         assert channel.contents[-1] == "<@&555>"
@@ -351,7 +374,6 @@ async def test_periodic_role_digest_links_back_to_individual_job_messages(config
 @pytest.mark.asyncio
 async def test_digest_role_ping_requires_mention_everyone_permission(config_factory) -> None:
     config = config_factory()
-    config.digest_interval_seconds = 900
     config.discord_internship_alert_role_id = 555
     database = Database(config.sqlite_db_path)
     await database.initialize()
@@ -366,10 +388,15 @@ async def test_digest_role_ping_requires_mention_everyone_permission(config_fact
         )
         channel = FakeChannel([], permissions=permissions)
         publisher = TrackChannelPublisher(config, database)
+        local_now = datetime.now(ZoneInfo("America/New_York")).replace(
+            hour=16, minute=5, second=0, microsecond=0
+        )
+        digest_now = local_now.astimezone(UTC)
+        publisher._now = lambda: digest_now  # type: ignore[method-assign]
         publisher.bind_client(FakeClient(channel))  # type: ignore[arg-type]
 
         assert await publisher.publish_pending() == (1, 0)
-        expired_cursor = (datetime.now(UTC) - timedelta(hours=4)).isoformat()
+        expired_cursor = (publisher._daily_digest_at(digest_now) - timedelta(days=1)).isoformat()
         await database.set_digest_cursor(111, expired_cursor)
 
         assert await publisher.publish_pending() == (0, 0)
@@ -384,17 +411,20 @@ async def test_digest_marker_reconciles_after_cursor_update_is_interrupted(
     config_factory,
 ) -> None:
     config = config_factory()
-    config.digest_interval_seconds = 900
     database = Database(config.sqlite_db_path)
     await database.initialize()
     try:
         await _create_pending_delivery(database)
-        cursor = (datetime.now(UTC) - timedelta(hours=4)).isoformat()
-        await database.set_digest_cursor(111, cursor)
-        started_at = datetime.fromisoformat(cursor)
         publisher = TrackChannelPublisher(config, database)
-        marker = publisher._digest_marker(111, started_at)
-        existing_digest = discord.Embed(title="Internship job digest")
+        local_now = datetime.now(ZoneInfo("America/New_York")).replace(
+            hour=16, minute=5, second=0, microsecond=0
+        )
+        digest_now = local_now.astimezone(UTC)
+        publisher._now = lambda: digest_now  # type: ignore[method-assign]
+        cursor = (publisher._daily_digest_at(digest_now) - timedelta(days=1)).isoformat()
+        await database.set_digest_cursor(111, cursor)
+        marker = publisher._digest_marker(111, publisher._daily_digest_at(digest_now))
+        existing_digest = discord.Embed(title="Internship Daily Brief")
         existing_digest.set_footer(text=f"Job Bot • {marker}")
         existing_message = SimpleNamespace(
             id=777,
