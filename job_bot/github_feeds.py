@@ -498,11 +498,10 @@ def parse_jobright_public_cards(
 
         title = clean_feed_text(job.get("jobTitle"))
         company = clean_feed_text(company_data.get("companyName"))
-        # Jobright exposes the employer destination as ``originalUrl`` for
-        # listings where it is available. Keep their wrapper only as a fallback.
-        application_url = _safe_url(job.get("originalUrl")) or _safe_url(
-            job.get("applyLink") or job.get("url")
-        )
+        # Keep Jobright as the canonical destination for its own listings. It
+        # provides the application handoff and does not require us to scrape or
+        # retain a user-authenticated employer URL.
+        application_url = _safe_url(job.get("applyLink") or job.get("url"))
         locations = _feed_locations(
             _sequence(job.get("jobLocations")) or (job.get("jobLocation"),),
             definition=definition,

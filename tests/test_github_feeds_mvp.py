@@ -285,7 +285,7 @@ def test_jobright_parser_skips_native_reposts() -> None:
     assert rejected == 1
 
 
-def test_jobright_parser_prefers_the_original_employer_application_url() -> None:
+def test_jobright_parser_keeps_jobright_as_the_primary_application_url() -> None:
     definition = FeedDefinition(
         "jobright_internships",
         "Jobright",
@@ -309,7 +309,7 @@ def test_jobright_parser_prefers_the_original_employer_application_url() -> None
     )
 
     assert rejected == 0
-    assert jobs[0].application_url == "https://jobs.example.com/roles/direct-apply"
+    assert jobs[0].application_url == "https://jobright.ai/jobs/info/direct-apply"
     assert jobs[1].application_url == "https://jobright.ai/jobs/info/invalid-original"
 
 
