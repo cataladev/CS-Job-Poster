@@ -48,7 +48,6 @@ class FeedRunStats:
 
 
 HttpClientFactory = Callable[..., AsyncHttpClient]
-JOBRIGHT_DELIVERY_WAIT = timedelta(minutes=5)
 DIRECT_ATS_CACHE_TTL = timedelta(hours=4)
 
 
@@ -234,11 +233,6 @@ class FeedPipeline:
                     ):
                         channel_id = None
                     delivery_suppressed = suppress_delivery or channel_id is None
-                    delivery_not_before = (
-                        (datetime.now(UTC) + JOBRIGHT_DELIVERY_WAIT).isoformat()
-                        if is_jobright and not resolved_direct_url and not delivery_suppressed
-                        else None
-                    )
                     payload = asdict(observation)
                     payload["raw_data"] = dict(job.raw_data)
                     ingest = await self.database.ingest_feed_job(
@@ -253,7 +247,6 @@ class FeedPipeline:
                         canonical_keys=canonical_keys,
                         channel_id=channel_id,
                         suppress_delivery=delivery_suppressed,
-                        delivery_not_before=delivery_not_before,
                     )
                     if not is_jobright:
                         await self.database.cache_direct_link(
