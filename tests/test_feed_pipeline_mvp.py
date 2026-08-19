@@ -362,7 +362,9 @@ async def test_late_direct_observation_updates_canonical_without_touching_sent_d
 
 
 @pytest.mark.asyncio
-async def test_jobright_only_delivery_waits_five_minutes_without_new_fetches(config_factory) -> None:
+async def test_jobright_only_delivery_is_immediately_ready_without_direct_match(
+    config_factory,
+) -> None:
     config = config_factory()
     database = Database(config.sqlite_db_path)
     await database.initialize()
@@ -381,12 +383,6 @@ async def test_jobright_only_delivery_waits_five_minutes_without_new_fetches(con
         update = await pipeline.run()
         assert update.deliveries_queued == 1
         assert await database.get_delivery_counts() == {"pending": 1, "suppressed": 1}
-        assert await database.list_deliveries_for_send(111) == []
-
-        database._connection.execute(  # noqa: SLF001 - deferred-delivery fixture
-            "UPDATE discord_deliveries SET not_before = '' WHERE state = 'pending'"
-        )
-        database._connection.commit()  # noqa: SLF001 - deferred-delivery fixture
         assert len(await database.list_deliveries_for_send(111)) == 1
     finally:
         await database.close()
