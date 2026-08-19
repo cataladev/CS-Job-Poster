@@ -247,7 +247,8 @@ async def test_missing_history_permission_fails_closed(config_factory) -> None:
         publisher = TrackChannelPublisher(config, database)
         publisher.bind_client(FakeClient(channel))  # type: ignore[arg-type]
 
-        assert await publisher.publish_pending() == (0, 0)
+        with pytest.raises(RuntimeError, match="Discord delivery blocked"):
+            await publisher.publish_pending()
 
         assert channel.sent == []
         assert await database.get_delivery_counts() == {"pending": 1}
@@ -468,7 +469,8 @@ async def test_digest_role_ping_requires_mention_everyone_permission(config_fact
         expired_cursor = (publisher._daily_digest_at(digest_now) - timedelta(days=1)).isoformat()
         await database.set_digest_cursor(111, expired_cursor)
 
-        assert await publisher.publish_pending() == (0, 0)
+        with pytest.raises(RuntimeError, match="Mention Everyone permission"):
+            await publisher.publish_pending()
         assert len(channel.sent) == 1
         assert await database.get_digest_cursor(111) == expired_cursor
     finally:

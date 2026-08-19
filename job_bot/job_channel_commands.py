@@ -127,6 +127,30 @@ def register_job_channel_commands(
 ) -> None:
     logger = logging.getLogger("job_channel_commands")
 
+    async def require_posting_guild(
+        interaction: discord.Interaction,
+        guild: discord.Guild,
+    ) -> bool:
+        try:
+            posting_guild_id = await publisher.configured_guild_id()
+        except RuntimeError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return False
+        if guild.id == posting_guild_id:
+            return True
+        await interaction.response.send_message(
+            "This bot's job feed is bound to a different server. Channel and alert "
+            "configuration can only be changed from the established posting server.",
+            ephemeral=True,
+        )
+        logger.warning(
+            "cross_guild_job_configuration_blocked attempted_guild=%s posting_guild=%s user=%s",
+            guild.id,
+            posting_guild_id,
+            interaction.user.id,
+        )
+        return False
+
     @tree.command(
         name="job-alert",
         description="Opt in or out of the configured internship or new-grad digest alert.",
@@ -233,6 +257,8 @@ def register_job_channel_commands(
                 ephemeral=True,
             )
             return
+        if not await require_posting_guild(interaction, guild):
+            return
 
         bot_member = guild.me
         if bot_member is None and interaction.client.user is not None:
@@ -303,6 +329,8 @@ def register_job_channel_commands(
             await interaction.response.send_message(
                 "This command must be used in a server.", ephemeral=True
             )
+            return
+        if not await require_posting_guild(interaction, guild):
             return
         bot_member = guild.me
         if bot_member is None and interaction.client.user is not None:
@@ -406,6 +434,8 @@ def register_job_channel_commands(
             await interaction.response.send_message(
                 "This command must be used in a server.", ephemeral=True
             )
+            return
+        if not await require_posting_guild(interaction, guild):
             return
         if role is not None:
             if role.guild.id != guild.id or role.is_default():

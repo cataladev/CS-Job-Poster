@@ -1827,6 +1827,151 @@ class Database:
                 self._connection.rollback()
                 raise
 
+    async def recover_misrouted_delivery_channels(
+        self,
+        *,
+        recovery_key: str,
+        source_channels: Mapping[str, int],
+        target_channels: Mapping[str, int],
+        replay_sent_after: str,
+    ) -> Dict[str, int]:
+        """Restore one accidental cross-server redirect exactly once.
+
+        Unsent deliveries are moved without changing suppression state. Messages
+        accepted by Discord after the redirect are requeued with a marker scoped
+        to the restored channel, so they can be delivered to the intended server
+        without ever duplicating a message in that channel.
+        """
+        tracks = sorted(set(source_channels).intersection(target_channels))
+        if not recovery_key or not tracks:
+            return {"channels_restored": 0, "deliveries_moved": 0, "deliveries_requeued": 0}
+
+        async with self._lock:
+            try:
+                completed = self._connection.execute(
+                    "SELECT value FROM app_state WHERE key = ?",
+                    (recovery_key,),
+                ).fetchone()
+                if completed and completed["value"] == "complete":
+                    return {
+                        "channels_restored": 0,
+                        "deliveries_moved": 0,
+                        "deliveries_requeued": 0,
+                    }
+
+                now = _utc_now()
+                channels_restored = 0
+                deliveries_moved = 0
+                deliveries_requeued = 0
+
+                for track in tracks:
+                    source_channel = str(source_channels[track])
+                    target_channel = str(target_channels[track])
+                    config_key = (
+                        "discord_channel_id"
+                        if track == "internship"
+                        else "discord_new_grad_channel_id"
+                    )
+                    cursor = self._connection.execute(
+                        """
+                        UPDATE runtime_config
+                        SET value = ?, updated_by_user_id = ?, updated_at = ?
+                        WHERE key = ? AND value = ?
+                        """,
+                        (
+                            target_channel,
+                            f"system:{recovery_key}",
+                            now,
+                            config_key,
+                            source_channel,
+                        ),
+                    )
+                    channels_restored += max(0, int(cursor.rowcount or 0))
+
+                    rows = self._connection.execute(
+                        """
+                        SELECT d.id, d.canonical_id, d.state, d.sent_at
+                        FROM discord_deliveries d
+                        JOIN canonical_jobs c ON c.id = d.canonical_id
+                        WHERE c.track = ?
+                          AND d.channel_id = ?
+                          AND (
+                              d.state IN ('suppressed', 'pending', 'sending', 'uncertain')
+                              OR (d.state = 'sent' AND d.sent_at >= ?)
+                          )
+                        ORDER BY d.id ASC
+                        """,
+                        (track, source_channel, replay_sent_after),
+                    ).fetchall()
+
+                    for row in rows:
+                        canonical_id = int(row["canonical_id"])
+                        target_post = self._connection.execute(
+                            """
+                            SELECT message_id, posted_at
+                            FROM discord_posts
+                            WHERE canonical_id = ? AND channel_id = ?
+                            """,
+                            (canonical_id, target_channel),
+                        ).fetchone()
+                        if target_post:
+                            state = "sent"
+                            message_id = str(target_post["message_id"])
+                            sent_at = str(target_post["posted_at"])
+                            last_error = None
+                        elif row["state"] == "suppressed":
+                            state = "suppressed"
+                            message_id = None
+                            sent_at = None
+                            last_error = "moved from an unintended Discord server"
+                        else:
+                            state = "pending"
+                            message_id = None
+                            sent_at = None
+                            last_error = "requeued after an unintended Discord server redirect"
+                            if row["state"] in {"sent", "sending", "uncertain"}:
+                                deliveries_requeued += 1
+
+                        self._connection.execute(
+                            """
+                            UPDATE discord_deliveries
+                            SET channel_id = ?, state = ?, marker = ?, message_id = ?,
+                                last_error = ?, not_before = '', updated_at = ?, sent_at = ?
+                            WHERE id = ?
+                            """,
+                            (
+                                target_channel,
+                                state,
+                                self._delivery_marker(canonical_id, target_channel),
+                                message_id,
+                                last_error,
+                                now,
+                                sent_at,
+                                row["id"],
+                            ),
+                        )
+                        deliveries_moved += 1
+
+                self._connection.execute(
+                    """
+                    INSERT INTO app_state (key, value, updated_at)
+                    VALUES (?, 'complete', ?)
+                    ON CONFLICT(key) DO UPDATE SET
+                        value = excluded.value,
+                        updated_at = excluded.updated_at
+                    """,
+                    (recovery_key, now),
+                )
+                self._connection.commit()
+                return {
+                    "channels_restored": channels_restored,
+                    "deliveries_moved": deliveries_moved,
+                    "deliveries_requeued": deliveries_requeued,
+                }
+            except Exception:
+                self._connection.rollback()
+                raise
+
     async def get_delivery_counts(self) -> Dict[str, int]:
         async with self._lock:
             rows = self._connection.execute(

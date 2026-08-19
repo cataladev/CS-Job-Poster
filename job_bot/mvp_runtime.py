@@ -20,6 +20,18 @@ from job_bot.job_channel_commands import (
 from job_bot.models import AppConfig
 
 
+CHANNEL_RECOVERY_KEY = "restore_established_job_channels_20260819_v1"
+MISROUTED_CHANNELS = {
+    "internship": 1539496312636969020,
+    "new_grad": 1539496313102540800,
+}
+ESTABLISHED_CHANNELS = {
+    "internship": 1537949209867583499,
+    "new_grad": 1537949230742900827,
+}
+CHANNEL_REDIRECTED_AT = "2026-08-19T04:48:46+00:00"
+
+
 class FeedDiscordClient(discord.Client):
     def __init__(
         self,
@@ -35,6 +47,7 @@ class FeedDiscordClient(discord.Client):
         super().__init__(intents=intents)
         self.config = config
         self.pipeline = pipeline
+        self.publisher = publisher
         self.logger = logging.getLogger(self.__class__.__name__)
         self.tree = app_commands.CommandTree(self)
         self.channel_configurator = JobChannelConfigurator(config, database)
@@ -51,9 +64,12 @@ class FeedDiscordClient(discord.Client):
         await self.tree.sync()
 
     async def on_ready(self) -> None:
+        posting_guild_id = await self.publisher.configured_guild_id()
         self.logger.info(
-            "posting_runtime_ready user=%s internship_channel=%s new_grad_channel=%s poll_interval_seconds=%s",
+            "posting_runtime_ready user=%s guild=%s internship_channel=%s "
+            "new_grad_channel=%s poll_interval_seconds=%s",
             self.user,
+            posting_guild_id,
             self.config.discord_channel_id,
             self.config.discord_new_grad_channel_id,
             self.config.poll_interval_seconds,
@@ -159,6 +175,21 @@ async def run_bot() -> None:
         logger.critical("Another posting runtime holds the database lock; refusing to start")
         await database.close()
         return
+
+    recovery = await database.recover_misrouted_delivery_channels(
+        recovery_key=CHANNEL_RECOVERY_KEY,
+        source_channels=MISROUTED_CHANNELS,
+        target_channels=ESTABLISHED_CHANNELS,
+        replay_sent_after=CHANNEL_REDIRECTED_AT,
+    )
+    if any(recovery.values()):
+        logger.warning(
+            "discord_channel_redirect_recovered channels_restored=%s deliveries_moved=%s "
+            "deliveries_requeued=%s",
+            recovery["channels_restored"],
+            recovery["deliveries_moved"],
+            recovery["deliveries_requeued"],
+        )
 
     runtime_config_rows = await database.list_runtime_config()
     apply_runtime_channel_overrides(

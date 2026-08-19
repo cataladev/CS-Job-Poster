@@ -22,24 +22,26 @@ from job_bot.utils.feed_normalization import role_signature
 from job_bot.utils.normalization import normalize_job_posting
 
 
-async def _ingest_new_grad(
+async def _ingest_job(
     database: Database,
     *,
     source_id: str,
     external_id: str,
     channel_id: int | None,
     suppress: bool,
+    track: str = "new_grad",
 ):
+    title = "Software Engineer Intern" if track == "internship" else "Software Engineer"
     observation = JobObservation(
         source_id=source_id,
         source_label=source_id,
         source_url=f"https://github.com/{source_id}/jobs",
         external_id=external_id,
         company="Example Corp",
-        title="Software Engineer",
+        title=title,
         locations=["Austin, TX"],
-        application_url="https://jobs.example.com/new-grad-1",
-        track="new_grad",
+        application_url=f"https://jobs.example.com/{external_id}",
+        track=track,
         cycle="2027",
     )
     job = normalize_job_posting(observation.to_job_posting())
@@ -111,7 +113,7 @@ async def test_admin_configuration_persists_and_moves_pending_track_delivery(
     database = Database(config.sqlite_db_path)
     await database.initialize()
     try:
-        await _ingest_new_grad(
+        await _ingest_job(
             database,
             source_id="source-a",
             external_id="grad-a",
@@ -305,16 +307,36 @@ async def test_admin_can_create_and_configure_standard_job_channels(config_facto
     tree = app_commands.CommandTree(client)
     guild = FakeGuild()
     response = FakeResponse()
+    configured_channels = {
+        channel_id: SimpleNamespace(
+            guild=guild,
+            send=object(),
+            history=object(),
+        )
+        for channel_id in (config.discord_channel_id, config.discord_new_grad_channel_id)
+    }
+
+    class FakeClient:
+        user = SimpleNamespace(id=999)
+
+        def get_channel(self, channel_id):
+            return configured_channels.get(channel_id)
+
+        async def fetch_channel(self, channel_id):
+            return configured_channels.get(channel_id)
+
     interaction = SimpleNamespace(
         guild=guild,
         user=SimpleNamespace(id=42),
         response=response,
     )
     try:
+        publisher = TrackChannelPublisher(config, database)
+        publisher.bind_client(FakeClient())  # type: ignore[arg-type]
         register_job_channel_commands(
             tree,
             configurator=JobChannelConfigurator(config, database),
-            publisher=TrackChannelPublisher(config, database),
+            publisher=publisher,
         )
         command = tree.get_command("create-job-channels")
         assert command is not None
@@ -328,6 +350,76 @@ async def test_admin_can_create_and_configure_standard_job_channels(config_facto
         assert config.discord_channel_id == 700
         assert config.discord_new_grad_channel_id == 701
         assert "Configured #internship-jobs and #new-grad-jobs" in response.messages[-1][0]
+    finally:
+        await client.close()
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_admin_cannot_redirect_job_channels_from_another_server(
+    config_factory,
+) -> None:
+    class FakeResponse:
+        def __init__(self) -> None:
+            self.messages = []
+
+        async def send_message(self, message, *, ephemeral):
+            self.messages.append((message, ephemeral))
+
+    class FakeClient:
+        user = SimpleNamespace(id=999)
+
+        def __init__(self, posting_guild) -> None:
+            self.channels = {
+                channel_id: SimpleNamespace(
+                    guild=posting_guild,
+                    send=object(),
+                    history=object(),
+                )
+                for channel_id in (111, 222)
+            }
+
+        def get_channel(self, channel_id):
+            return self.channels.get(channel_id)
+
+        async def fetch_channel(self, channel_id):
+            return self.channels.get(channel_id)
+
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    client = discord.Client(intents=discord.Intents.default())
+    tree = app_commands.CommandTree(client)
+    posting_guild = SimpleNamespace(id=999)
+    attempted_guild = SimpleNamespace(
+        id=123,
+        me=SimpleNamespace(guild_permissions=SimpleNamespace(manage_channels=True)),
+        text_channels=[],
+    )
+    response = FakeResponse()
+    interaction = SimpleNamespace(
+        guild=attempted_guild,
+        user=SimpleNamespace(id=42),
+        response=response,
+    )
+    try:
+        publisher = TrackChannelPublisher(config, database)
+        publisher.bind_client(FakeClient(posting_guild))  # type: ignore[arg-type]
+        register_job_channel_commands(
+            tree,
+            configurator=JobChannelConfigurator(config, database),
+            publisher=publisher,
+        )
+        command = tree.get_command("create-job-channels")
+        assert command is not None
+
+        await command.callback(interaction, None)  # type: ignore[arg-type]
+
+        assert attempted_guild.text_channels == []
+        assert config.discord_channel_id == 111
+        assert config.discord_new_grad_channel_id == 222
+        assert "bound to a different server" in response.messages[-1][0]
+        assert await database.list_runtime_config() == []
     finally:
         await client.close()
         await database.close()
@@ -361,7 +453,7 @@ async def test_sent_job_is_not_reposted_after_channel_change(config_factory) -> 
     database = Database(config.sqlite_db_path)
     await database.initialize()
     try:
-        first = await _ingest_new_grad(
+        first = await _ingest_job(
             database,
             source_id="source-a",
             external_id="grad-a",
@@ -383,7 +475,7 @@ async def test_sent_job_is_not_reposted_after_channel_change(config_factory) -> 
             updated_by_user_id="42",
         )
 
-        duplicate = await _ingest_new_grad(
+        duplicate = await _ingest_job(
             database,
             source_id="source-b",
             external_id="grad-b",
@@ -394,5 +486,89 @@ async def test_sent_job_is_not_reposted_after_channel_change(config_factory) -> 
         assert duplicate.canonical_id == first.canonical_id
         assert await database.list_delivery_channel_ids_for_send() == []
         assert await database.get_delivery_counts() == {"sent": 1}
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_misrouted_channel_recovery_restores_and_replays_exactly_once(
+    config_factory,
+) -> None:
+    wrong_channels = {"internship": 700, "new_grad": 701}
+    restored_channels = {"internship": 800, "new_grad": 801}
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    try:
+        await database.set_runtime_config_value(
+            key="discord_channel_id",
+            value=str(wrong_channels["internship"]),
+            updated_by_user_id="42",
+        )
+        await database.set_runtime_config_value(
+            key="discord_new_grad_channel_id",
+            value=str(wrong_channels["new_grad"]),
+            updated_by_user_id="42",
+        )
+        internship = await _ingest_job(
+            database,
+            source_id="source-a",
+            external_id="internship-a",
+            channel_id=wrong_channels["internship"],
+            suppress=False,
+            track="internship",
+        )
+        await _ingest_job(
+            database,
+            source_id="source-b",
+            external_id="new-grad-a",
+            channel_id=wrong_channels["new_grad"],
+            suppress=False,
+        )
+        sent_delivery = (
+            await database.list_deliveries_for_send(wrong_channels["internship"])
+        )[0]
+        await database.mark_delivery_sent(
+            delivery_id=int(sent_delivery["id"]),
+            canonical_id=internship.canonical_id,
+            track="internship",
+            channel_id=wrong_channels["internship"],
+            message_id=999,
+        )
+
+        recovery = await database.recover_misrouted_delivery_channels(
+            recovery_key="test-channel-recovery-v1",
+            source_channels=wrong_channels,
+            target_channels=restored_channels,
+            replay_sent_after="2000-01-01T00:00:00+00:00",
+        )
+
+        assert recovery == {
+            "channels_restored": 2,
+            "deliveries_moved": 2,
+            "deliveries_requeued": 1,
+        }
+        assert (await database.get_runtime_config_value("discord_channel_id"))["value"] == "800"
+        assert (
+            await database.get_runtime_config_value("discord_new_grad_channel_id")
+        )["value"] == "801"
+        assert await database.list_deliveries_for_send(700) == []
+        assert await database.list_deliveries_for_send(701) == []
+        assert len(await database.list_deliveries_for_send(800)) == 1
+        assert len(await database.list_deliveries_for_send(801)) == 1
+        assert await database.get_delivery_counts() == {"pending": 2}
+
+        repeated = await database.recover_misrouted_delivery_channels(
+            recovery_key="test-channel-recovery-v1",
+            source_channels=wrong_channels,
+            target_channels=restored_channels,
+            replay_sent_after="2000-01-01T00:00:00+00:00",
+        )
+        assert repeated == {
+            "channels_restored": 0,
+            "deliveries_moved": 0,
+            "deliveries_requeued": 0,
+        }
+        assert await database.get_delivery_counts() == {"pending": 2}
     finally:
         await database.close()
