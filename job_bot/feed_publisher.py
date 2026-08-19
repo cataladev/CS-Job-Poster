@@ -105,6 +105,7 @@ class TrackChannelPublisher:
             return 0, 0
         sent = 0
         reconciled = 0
+        blocked_channels: list[tuple[int, str]] = []
         channel_ids = set(await self.database.list_delivery_channel_ids_for_send())
         channel_ids.add(self.config.discord_channel_id)
         if (
@@ -131,10 +132,35 @@ class TrackChannelPublisher:
                         channel_id,
                         exc,
                     )
+                    blocked_channels.append((channel_id, str(exc)))
                     continue
                 sent += channel_sent
                 reconciled += channel_reconciled
+        if blocked_channels:
+            summary = "; ".join(
+                f"{channel_id}: {error}" for channel_id, error in blocked_channels
+            )
+            raise RuntimeError(f"Discord delivery blocked for channel(s): {summary}")
         return sent, reconciled
+
+    async def configured_guild_id(self) -> int:
+        """Resolve the one Discord server allowed to mutate feed routing."""
+        if self.client is None:
+            raise RuntimeError("Discord client is not ready")
+        channel_ids = {self.config.discord_channel_id}
+        if self.config.discord_new_grad_channel_id is not None:
+            channel_ids.add(self.config.discord_new_grad_channel_id)
+        guild_ids: set[int] = set()
+        for channel_id in channel_ids:
+            channel = await self._resolve_channel(channel_id)
+            guild = getattr(channel, "guild", None)
+            guild_id = getattr(guild, "id", None)
+            if guild_id is None:
+                raise RuntimeError(f"Configured channel {channel_id} is not attached to a server")
+            guild_ids.add(int(guild_id))
+        if len(guild_ids) != 1:
+            raise RuntimeError("Configured job channels must belong to one Discord server")
+        return next(iter(guild_ids))
 
     async def _initialize_digest_cursor(self, channel_id: int) -> None:
         """Avoid summarizing historical posts after a deployment or upgrade."""
@@ -272,9 +298,10 @@ class TrackChannelPublisher:
                 )
                 reconciled += 1
                 self.logger.info(
-                    "delivery_reconciled delivery=%s canonical=%s message=%s",
+                    "delivery_reconciled delivery=%s canonical=%s channel=%s message=%s",
                     delivery["id"],
                     canonical_id,
+                    channel_id,
                     existing_message_id,
                 )
                 continue
@@ -321,9 +348,13 @@ class TrackChannelPublisher:
             except (discord.HTTPException, asyncio.TimeoutError) as exc:
                 await self.database.mark_delivery_uncertain(int(delivery["id"]), str(exc))
                 self.logger.warning(
-                    "delivery_uncertain delivery=%s canonical=%s error=%s",
+                    "delivery_uncertain delivery=%s canonical=%s channel=%s company=%r "
+                    "title=%r error=%s",
                     delivery["id"],
                     canonical_id,
+                    channel_id,
+                    job.company,
+                    job.title,
                     exc,
                 )
                 continue
@@ -338,9 +369,12 @@ class TrackChannelPublisher:
             existing_markers[marker] = int(message.id)
             sent += 1
             self.logger.info(
-                "delivery_sent delivery=%s canonical=%s message=%s",
+                "delivery_sent delivery=%s canonical=%s channel=%s company=%r title=%r message=%s",
                 delivery["id"],
                 canonical_id,
+                channel_id,
+                job.company,
+                job.title,
                 message.id,
             )
             if self.config.publish_delay_seconds > 0:

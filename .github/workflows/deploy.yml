@@ -53,7 +53,7 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     needs: test
-    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    if: github.ref == 'refs/heads/main'
     steps:
       - name: Start SSH agent
         uses: webfactory/ssh-agent@v0.9.0
@@ -81,4 +81,4 @@ jobs:
           ssh-keyscan -p "${DEPLOY_PORT}" -H "${DEPLOY_HOST}" >> ~/.ssh/known_hosts
 
           ssh -p "${DEPLOY_PORT}" "${DEPLOY_USER}@${DEPLOY_HOST}" \
-            "sudo systemctl start '${DEPLOY_AUTO_UPDATE_UNIT}' && sudo systemctl show '${DEPLOY_AUTO_UPDATE_UNIT}' --property=Result,ExecMainStatus,ActiveState,SubState --no-pager && sudo journalctl -u '${DEPLOY_AUTO_UPDATE_UNIT}' -n 50 --no-pager && sudo systemctl show '${DEPLOY_SERVICE_UNIT}' --property=Result,ExecMainStatus,ActiveState,SubState --no-pager && sudo journalctl -u '${DEPLOY_SERVICE_UNIT}' --since '2026-08-14 00:00:00' --no-pager | grep -E 'posting_runtime_ready|job_channel_configured|job_channels_created_or_configured|new_grad_channel_unconfigured'"
+            "sudo systemctl start '${DEPLOY_AUTO_UPDATE_UNIT}' && sudo systemctl show '${DEPLOY_AUTO_UPDATE_UNIT}' --property=Result,ExecMainStatus,ActiveState,SubState --no-pager && sudo journalctl -u '${DEPLOY_AUTO_UPDATE_UNIT}' -n 50 --no-pager && sudo systemctl show '${DEPLOY_SERVICE_UNIT}' --property=Result,ExecMainStatus,ActiveState,SubState --no-pager && sudo journalctl -u '${DEPLOY_SERVICE_UNIT}' -n 100 --no-pager"
