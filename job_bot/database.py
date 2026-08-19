@@ -417,6 +417,16 @@ CREATE TABLE IF NOT EXISTS app_state (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS company_target_subscriptions (
+    guild_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    track TEXT NOT NULL CHECK (track IN ('internship', 'new_grad')),
+    company TEXT NOT NULL,
+    company_key TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (guild_id, user_id, track, company_key)
+);
+
 CREATE TABLE IF NOT EXISTS feed_observations (
     source_id TEXT NOT NULL,
     external_id TEXT NOT NULL,
@@ -498,6 +508,9 @@ CREATE INDEX IF NOT EXISTS idx_process_activity_events_user_type
 
 CREATE INDEX IF NOT EXISTS idx_feed_observations_canonical
     ON feed_observations(canonical_id, source_id);
+
+CREATE INDEX IF NOT EXISTS idx_company_target_subscriptions_lookup
+    ON company_target_subscriptions(guild_id, track, company_key, created_at);
 
 CREATE INDEX IF NOT EXISTS idx_feed_canonical_match
     ON canonical_jobs(track, normalized_company, season_term);
@@ -2237,6 +2250,116 @@ class Database:
                 ORDER BY key ASC
                 """
             ).fetchall()
+
+    async def toggle_company_target_subscription(
+        self,
+        *,
+        guild_id: int,
+        user_id: int,
+        track: str,
+        company: str,
+        company_key: str,
+        max_targets_per_user: int = 50,
+        max_subscribers_per_target: int = 50,
+    ) -> bool:
+        """Toggle a target subscription and return whether it is enabled afterward."""
+        if track not in {"internship", "new_grad"}:
+            raise ValueError("Track must be internship or new_grad.")
+        if guild_id <= 0 or user_id <= 0:
+            raise ValueError("Guild and user IDs must be positive.")
+        if not company.strip() or not company_key.strip():
+            raise ValueError("Company must not be empty.")
+
+        async with self._lock:
+            try:
+                key = (str(guild_id), str(user_id), track, company_key)
+                existing = self._connection.execute(
+                    """
+                    SELECT 1
+                    FROM company_target_subscriptions
+                    WHERE guild_id = ? AND user_id = ? AND track = ? AND company_key = ?
+                    """,
+                    key,
+                ).fetchone()
+                if existing:
+                    self._connection.execute(
+                        """
+                        DELETE FROM company_target_subscriptions
+                        WHERE guild_id = ? AND user_id = ? AND track = ? AND company_key = ?
+                        """,
+                        key,
+                    )
+                    self._connection.commit()
+                    return False
+
+                user_count = self._connection.execute(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM company_target_subscriptions
+                    WHERE guild_id = ? AND user_id = ?
+                    """,
+                    (str(guild_id), str(user_id)),
+                ).fetchone()
+                if user_count and int(user_count["count"]) >= max_targets_per_user:
+                    raise ValueError(
+                        f"You can target at most {max_targets_per_user} company/track combinations."
+                    )
+
+                subscriber_count = self._connection.execute(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM company_target_subscriptions
+                    WHERE guild_id = ? AND track = ? AND company_key = ?
+                    """,
+                    (str(guild_id), track, company_key),
+                ).fetchone()
+                if (
+                    subscriber_count
+                    and int(subscriber_count["count"]) >= max_subscribers_per_target
+                ):
+                    raise ValueError(
+                        "That company and track already has the maximum number of subscribers."
+                    )
+
+                self._connection.execute(
+                    """
+                    INSERT INTO company_target_subscriptions (
+                        guild_id, user_id, track, company, company_key, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(guild_id),
+                        str(user_id),
+                        track,
+                        company,
+                        company_key,
+                        _utc_now(),
+                    ),
+                )
+                self._connection.commit()
+                return True
+            except Exception:
+                self._connection.rollback()
+                raise
+
+    async def list_company_target_subscriber_ids(
+        self,
+        *,
+        guild_id: int,
+        track: str,
+        company_key: str,
+    ) -> List[int]:
+        async with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT user_id
+                FROM company_target_subscriptions
+                WHERE guild_id = ? AND track = ? AND company_key = ?
+                ORDER BY created_at ASC, user_id ASC
+                """,
+                (str(guild_id), track, company_key),
+            ).fetchall()
+        return [int(row["user_id"]) for row in rows]
 
     async def claim_command_receipt(
         self,

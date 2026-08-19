@@ -15,6 +15,7 @@ from job_bot.config import (
 from job_bot.database import Database
 from job_bot.feed_publisher import TrackChannelPublisher
 from job_bot.models import AppConfig
+from job_bot.utils.normalization import direct_link_company_key
 
 
 TRACK_CONFIG_KEYS = {
@@ -139,8 +140,8 @@ def register_job_channel_commands(
         if guild.id == posting_guild_id:
             return True
         await interaction.response.send_message(
-            "This bot's job feed is bound to a different server. Channel and alert "
-            "configuration can only be changed from the established posting server.",
+            "This bot's job feed is bound to a different server. Job-feed settings "
+            "and subscriptions can only be changed from the established posting server.",
             ephemeral=True,
         )
         logger.warning(
@@ -226,6 +227,83 @@ def register_job_channel_commands(
             action,
             interaction.user.id,
             role.id,
+        )
+
+    @tree.command(
+        name="target",
+        description="Toggle an instant alert when one company posts a job.",
+    )
+    @app_commands.guild_only()
+    @app_commands.describe(
+        company="Company to watch, such as NVIDIA, Palantir, or Microsoft.",
+        track="Whether to watch internship or new-grad jobs.",
+    )
+    @app_commands.choices(
+        track=[
+            app_commands.Choice(name="Internships", value="internship"),
+            app_commands.Choice(name="New grad", value="new_grad"),
+        ]
+    )
+    async def target(
+        interaction: discord.Interaction,
+        company: str,
+        track: app_commands.Choice[str],
+    ) -> None:
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message(
+                "This command must be used in a server.", ephemeral=True
+            )
+            return
+        if not await require_posting_guild(interaction, guild):
+            return
+
+        display_company = " ".join(company.split()).strip()
+        company_key = direct_link_company_key(display_company)
+        if not display_company or not company_key:
+            await interaction.response.send_message(
+                "Enter a company name to target.", ephemeral=True
+            )
+            return
+        if len(display_company) > 80:
+            await interaction.response.send_message(
+                "Company names must be 80 characters or fewer.", ephemeral=True
+            )
+            return
+
+        try:
+            enabled = await configurator.database.toggle_company_target_subscription(
+                guild_id=guild.id,
+                user_id=interaction.user.id,
+                track=track.value,
+                company=display_company,
+                company_key=company_key,
+            )
+        except ValueError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
+
+        safe_company = discord.utils.escape_mentions(
+            discord.utils.escape_markdown(display_company)
+        )
+        track_label = TRACK_LABELS[track.value].lower()
+        if enabled:
+            message = (
+                f"Target set for **{safe_company}** {track_label} jobs. "
+                "You'll be mentioned on each new matching post."
+            )
+            action = "enabled"
+        else:
+            message = f"Target removed for **{safe_company}** {track_label} jobs."
+            action = "disabled"
+        await interaction.response.send_message(message, ephemeral=True)
+        logger.info(
+            "company_target_subscription track=%s action=%s guild=%s user=%s company_key=%s",
+            track.value,
+            action,
+            guild.id,
+            interaction.user.id,
+            company_key,
         )
 
     @tree.command(

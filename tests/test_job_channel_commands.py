@@ -100,6 +100,13 @@ async def test_admin_slash_command_is_registered(config_factory) -> None:
     assert opt_in_command is not None
     assert opt_in_command.default_permissions is None
     assert [parameter.name for parameter in opt_in_command.parameters] == ["track"]
+    target_command = tree.get_command("target")
+    assert target_command is not None
+    assert target_command.default_permissions is None
+    assert [parameter.name for parameter in target_command.parameters] == [
+        "company",
+        "track",
+    ]
     await client.close()
     await database.close()
 
@@ -257,6 +264,136 @@ async def test_member_can_toggle_configured_digest_alert_role(config_factory) ->
         assert "will no longer receive internship digest pings" in response.messages[-1][0]
     finally:
         await client.close()
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_member_can_toggle_company_target_for_each_track(config_factory) -> None:
+    class FakeResponse:
+        def __init__(self) -> None:
+            self.messages = []
+
+        async def send_message(self, message, *, ephemeral):
+            self.messages.append((message, ephemeral))
+
+    guild = SimpleNamespace(id=123)
+
+    class FakeClient:
+        user = SimpleNamespace(id=999)
+
+        def __init__(self) -> None:
+            self.channels = {
+                channel_id: SimpleNamespace(
+                    guild=guild,
+                    send=object(),
+                    history=object(),
+                )
+                for channel_id in (111, 222)
+            }
+
+        def get_channel(self, channel_id):
+            return self.channels.get(channel_id)
+
+        async def fetch_channel(self, channel_id):
+            return self.channels.get(channel_id)
+
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    client = discord.Client(intents=discord.Intents.default())
+    tree = app_commands.CommandTree(client)
+    response = FakeResponse()
+    interaction = SimpleNamespace(
+        guild=guild,
+        user=SimpleNamespace(id=42),
+        response=response,
+    )
+    try:
+        publisher = TrackChannelPublisher(config, database)
+        publisher.bind_client(FakeClient())  # type: ignore[arg-type]
+        register_job_channel_commands(
+            tree,
+            configurator=JobChannelConfigurator(config, database),
+            publisher=publisher,
+        )
+        command = tree.get_command("target")
+        assert command is not None
+        internship = app_commands.Choice(name="Internships", value="internship")
+        new_grad = app_commands.Choice(name="New grad", value="new_grad")
+
+        await command.callback(interaction, "Palantir Technologies", internship)  # type: ignore[arg-type]
+        assert await database.list_company_target_subscriber_ids(
+            guild_id=123,
+            track="internship",
+            company_key="palantir",
+        ) == [42]
+        assert "Target set" in response.messages[-1][0]
+
+        await command.callback(interaction, "Palantir", new_grad)  # type: ignore[arg-type]
+        assert await database.list_company_target_subscriber_ids(
+            guild_id=123,
+            track="new_grad",
+            company_key="palantir",
+        ) == [42]
+
+        await command.callback(interaction, "Palantir", internship)  # type: ignore[arg-type]
+        assert await database.list_company_target_subscriber_ids(
+            guild_id=123,
+            track="internship",
+            company_key="palantir",
+        ) == []
+        assert "Target removed" in response.messages[-1][0]
+    finally:
+        await client.close()
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_company_target_subscription_limits_are_enforced(config_factory) -> None:
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    try:
+        assert await database.toggle_company_target_subscription(
+            guild_id=123,
+            user_id=1,
+            track="internship",
+            company="Example",
+            company_key="example",
+            max_targets_per_user=1,
+            max_subscribers_per_target=1,
+        )
+        with pytest.raises(ValueError, match="at most 1"):
+            await database.toggle_company_target_subscription(
+                guild_id=123,
+                user_id=1,
+                track="new_grad",
+                company="Another",
+                company_key="another",
+                max_targets_per_user=1,
+                max_subscribers_per_target=1,
+            )
+        with pytest.raises(ValueError, match="maximum number of subscribers"):
+            await database.toggle_company_target_subscription(
+                guild_id=123,
+                user_id=2,
+                track="internship",
+                company="Example",
+                company_key="example",
+                max_targets_per_user=1,
+                max_subscribers_per_target=1,
+            )
+
+        assert not await database.toggle_company_target_subscription(
+            guild_id=123,
+            user_id=1,
+            track="internship",
+            company="Example",
+            company_key="example",
+            max_targets_per_user=1,
+            max_subscribers_per_target=1,
+        )
+    finally:
         await database.close()
 
 
