@@ -38,6 +38,7 @@ DIRECT_LINK_COMPANY_ALIASES = {
     "amazon web services aws": "amazon",
     "magna international": "magna",
     "nvidia ai": "nvidia",
+    "palantir technologies": "palantir",
     "sony electronics": "sony",
 }
 TITLE_SYNONYMS = {

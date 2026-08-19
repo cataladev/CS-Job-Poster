@@ -6,7 +6,7 @@ The bot polls ten U.S. aggregator surfaces (eight from five GitHub repositories 
 public Jobright listings) plus direct, public employer ATS boards. It combines every
 successful snapshot, removes duplicates across sources, and publishes newly added roles
 to separate internship and new-grad Discord channels. Its MVP commands configure posting
-channels and optional digest-alert roles.
+channels, optional digest-alert roles, and personal company targets.
 
 ## Runtime behavior
 
@@ -19,7 +19,7 @@ channels and optional digest-alert roles.
 - Direct boards are filtered to internship and new-grad signals before ingestion; a
   board with no matching roles is a healthy empty result, not a failed source.
 - Posts each newly discovered role immediately to its configured track channel,
-  without a role mention.
+  with direct mentions only for members targeting that company and track.
 - Sends one digest per track every four hours by default. Each digest links back to
   the original Discord job posts and can optionally ping a track-specific role.
 - Records the first complete inventory silently and posts only later additions.
@@ -37,7 +37,7 @@ channels and optional digest-alert roles.
 - Never treats an upstream edit to an existing source row as a new job.
 
 The executable entrypoint is `bot.py`. It starts a minimal `discord.Client` without
-Message Content Intent and exposes two admin-only slash commands. The legacy text
+Message Content Intent and exposes focused setup and subscription slash commands. The legacy text
 command modules are retained only for data compatibility and are not connected to
 the runtime.
 
@@ -147,6 +147,20 @@ Members can then opt themselves in or out without administrator access:
 The bot must have **Manage Roles**, and its highest role must sit above both opt-in
 roles. Role mentions still happen only in the track digest, never on individual job
 posts.
+
+Members can also target a company for immediate, track-specific alerts:
+
+```text
+/target company:<company> track:<Internships|New grad>
+```
+
+Running the same company and track again removes the target. Internship and new-grad
+targets are independent. When a matching job is posted, the member is mentioned on
+that one duplicate-safe job message; retries and timeout reconciliation cannot create
+another ping. Company aliases such as `Palantir Technologies`/`Palantir` and
+`NVIDIA AI`/`NVIDIA` share a target. Each member can keep up to 50 company/track
+targets, and each company/track alert supports up to 50 members so the Discord message
+stays below its content limit.
 
 ## Configuration
 
