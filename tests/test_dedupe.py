@@ -10,6 +10,14 @@ def test_normalize_location_matches_greenhouse_country_verbose_format() -> None:
     assert normalize_location("Seattle, Washington, United States") == "seattle wa"
 
 
+def test_normalize_location_matches_country_first_format() -> None:
+    assert normalize_location("United States, Washington, Redmond") == "redmond wa"
+    assert (
+        normalize_location("United States, California, Mountain View")
+        == "mountain view ca"
+    )
+
+
 @pytest.mark.asyncio
 async def test_cross_platform_duplicate_detected(config_factory) -> None:
     config = config_factory()

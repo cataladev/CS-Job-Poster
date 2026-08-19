@@ -187,7 +187,7 @@ def _us_locations(
 ) -> list[str]:
     cleaned: list[str] = []
     for location in locations:
-        for fragment in re.split(r"\s*(?:\||;|\r?\n)\s*", str(location or "")):
+        for fragment in re.split(r"\s*(?:\||;|·|\r?\n)\s*", str(location or "")):
             value = clean_feed_text(fragment)
             if value:
                 cleaned.append(value)

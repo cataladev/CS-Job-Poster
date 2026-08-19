@@ -175,6 +175,19 @@ def normalize_location(location: str) -> str:
     value = value.replace("–", "-").replace("—", "-")
     if value in LOCATION_ALIASES:
         return LOCATION_ALIASES[value]
+    # ApplyGuy and a few employer APIs emit locations country-first, e.g.
+    # ``United States, Washington, Redmond``. Convert that representation to
+    # the same city/state identity used by repository rows such as
+    # ``Redmond, WA`` so one requisition cannot become two Discord posts.
+    country_first = [part.strip() for part in value.split(",")]
+    if (
+        len(country_first) >= 3
+        and country_first[0] in {"united states", "usa", "us", "u.s."}
+        and country_first[1] in US_STATE_NAME_TO_CODE
+    ):
+        city = " ".join(country_first[2:]).strip()
+        if city:
+            return f"{city} {US_STATE_NAME_TO_CODE[country_first[1]]}"
     value = re.sub(r"[^a-z0-9\s,]+", " ", value)
     value = collapse_whitespace(value.replace(",", " "))
     # Greenhouse and similar boards commonly format a U.S. city as
