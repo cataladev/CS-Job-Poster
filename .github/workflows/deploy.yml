@@ -53,7 +53,7 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     needs: test
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     steps:
       - name: Start SSH agent
         uses: webfactory/ssh-agent@v0.9.0
@@ -81,4 +81,4 @@ jobs:
           ssh-keyscan -p "${DEPLOY_PORT}" -H "${DEPLOY_HOST}" >> ~/.ssh/known_hosts
 
           ssh -p "${DEPLOY_PORT}" "${DEPLOY_USER}@${DEPLOY_HOST}" \
-            "sudo systemctl start '${DEPLOY_AUTO_UPDATE_UNIT}' && sudo systemctl show '${DEPLOY_AUTO_UPDATE_UNIT}' --property=Result,ExecMainStatus,ActiveState,SubState --no-pager && sudo journalctl -u '${DEPLOY_AUTO_UPDATE_UNIT}' -n 50 --no-pager && sudo systemctl show '${DEPLOY_SERVICE_UNIT}' --property=Result,ExecMainStatus,ActiveState,SubState --no-pager && sudo journalctl -u '${DEPLOY_SERVICE_UNIT}' -n 100 --no-pager"
+            "sudo systemctl start '${DEPLOY_AUTO_UPDATE_UNIT}' && sudo systemctl show '${DEPLOY_AUTO_UPDATE_UNIT}' --property=Result,ExecMainStatus,ActiveState,SubState --no-pager && sudo journalctl -u '${DEPLOY_AUTO_UPDATE_UNIT}' -n 50 --no-pager && sudo systemctl show '${DEPLOY_SERVICE_UNIT}' --property=Result,ExecMainStatus,ActiveState,SubState --no-pager && sudo journalctl -u '${DEPLOY_SERVICE_UNIT}' -n 100 --no-pager && id && if test -r /etc/job-bot/job-bot.env; then echo runtime_env_readable=true; else echo runtime_env_readable=false; fi"
