@@ -35,7 +35,11 @@ _US_STATE_CODE = re.compile(rf"(?:,\s*|\b)(?:{_US_STATE_CODES})\b")
 _FOREIGN = re.compile(
     r"\b(?:Canada|Canadian|Toronto|Vancouver|Montreal|Calgary|Ottawa|Edmonton|Kitchener|"
     r"United Kingdom|UK|London|India|Germany|France|Ireland|Poland|Singapore|Australia|"
-    r"Netherlands|Spain|Sweden|Mexico|Brazil|China|Japan|Taiwan|Israel)\b",
+    r"Netherlands|Spain|Sweden|(?<!New\s)Mexico|Brazil|China|Japan|Taiwan|Israel|Italy|"
+    r"Vietnam|Philippines|Pakistan|Bangladesh|Indonesia|Malaysia|Thailand|South Korea|"
+    r"New Zealand|Portugal|Romania|Ukraine|Russia|Austria|Belgium|Denmark|Finland|Norway|"
+    r"Switzerland|Czechia|Czech Republic|Hungary|Greece|Turkey|United Arab Emirates|UAE|"
+    r"South Africa|Argentina|Chile|Colombia|Peru)\b",
     re.IGNORECASE,
 )
 _CANADIAN_PROVINCE = re.compile(r"(?:,\s*|\b)(?:AB|BC|MB|NB|NL|NS|NT|NU|ON|PE|QC|SK|YT)\b")
@@ -46,6 +50,31 @@ _FOREIGN_URL = re.compile(
 )
 _GENERIC_TRUSTED_LOCATION = re.compile(
     r"^(?:remote|hybrid|virtual|multiple locations?|various locations?|not specified|nationwide)$",
+    re.IGNORECASE,
+)
+
+# Some aggregators occasionally attach a U.S. state abbreviation to a foreign
+# city. A location like ``Dresden, TN`` therefore looks valid in isolation even
+# when the role title says ``... - Germany``. Recognize only explicit title-like
+# location suffixes; a U.S.-based role that merely supports an APAC product must
+# remain eligible.
+_FOREIGN_ROLE_COUNTRIES = (
+    r"Argentina|Australia|Austria|Bangladesh|Belarus|Belgium|Bolivia|Brazil|Bulgaria|"
+    r"Cambodia|Cameroon|Canada|Chile|China|Colombia|Costa Rica|Croatia|Cyprus|"
+    r"Czechia|Czech Republic|Denmark|Ecuador|Egypt|Estonia|Ethiopia|Finland|France|"
+    r"Germany|Ghana|Greece|Hong Kong|Hungary|Iceland|India|Indonesia|Iran|Iraq|Ireland|"
+    r"Israel|Italy|Japan|Kazakhstan|Kenya|Kuwait|Latvia|Lebanon|Lithuania|Luxembourg|"
+    r"Malaysia|Malta|Mexico|Moldova|Monaco|Mongolia|Montenegro|Morocco|Myanmar|Nepal|"
+    r"Netherlands|New Zealand|Nigeria|North Korea|North Macedonia|Norway|Oman|Pakistan|"
+    r"Panama|Paraguay|Peru|Philippines|Poland|Portugal|Qatar|Romania|Russia|Saudi Arabia|"
+    r"Serbia|Singapore|Slovakia|Slovenia|South Africa|South Korea|Spain|Sri Lanka|"
+    r"Sweden|Switzerland|Taiwan|Thailand|Tunisia|Turkey|Ukraine|United Arab Emirates|"
+    r"UAE|United Kingdom|UK|Uruguay|Venezuela|Vietnam"
+)
+_FOREIGN_ROLE_LOCATION = re.compile(
+    rf"(?:^|[-–—,:]|\(|\[|\b(?:in|based\s+in|located\s+in|location\s*[:=-])\s+)"
+    rf"\s*(?:{_FOREIGN_ROLE_COUNTRIES})"
+    rf"(?:\s*\)|\s*\]|\s*[-–—,/]+\s*(?:remote|hybrid|onsite|on-site))?\s*$",
     re.IGNORECASE,
 )
 
@@ -239,7 +268,9 @@ def is_us_location(location: str, *, trusted_us: bool, context: str = "") -> boo
     foreign = bool(_FOREIGN.search(location) or _CANADIAN_PROVINCE.search(location))
     if foreign:
         return False
-    if _FOREIGN_URL.search(context) and not (explicit_us or state_code):
+    # A country-scoped application path is contradictory evidence even if an
+    # aggregator supplied a U.S.-looking state code.
+    if _FOREIGN_URL.search(context):
         return False
     if explicit_us or state_code:
         return True
@@ -248,6 +279,11 @@ def is_us_location(location: str, *, trusted_us: bool, context: str = "") -> boo
     # A feed's U.S. scope may disambiguate only genuinely generic labels. It must
     # never turn an unknown city/country such as "Asti, Italy" into a U.S. role.
     return trusted_us and bool(_GENERIC_TRUSTED_LOCATION.fullmatch(location.strip()))
+
+
+def has_explicit_foreign_role_location(title: str) -> bool:
+    """Return whether a role title explicitly ends with a foreign location."""
+    return bool(_FOREIGN_ROLE_LOCATION.search(clean_feed_text(title)))
 
 
 def external_identity_keys(url: str, *, company: str = "") -> set[str]:

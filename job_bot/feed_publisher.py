@@ -14,7 +14,11 @@ import discord
 from job_bot.branding import BrandingResolver
 from job_bot.database import Database
 from job_bot.models import AppConfig, CanonicalJob
-from job_bot.utils.feed_normalization import is_us_location, sanitize_application_url
+from job_bot.utils.feed_normalization import (
+    has_explicit_foreign_role_location,
+    is_us_location,
+    sanitize_application_url,
+)
 from job_bot.utils.http import AsyncHttpClient
 from job_bot.utils.normalization import direct_link_company_key, normalize_company_name
 
@@ -309,13 +313,17 @@ class TrackChannelPublisher:
             location_parts = [
                 part.strip() for part in job.location.split("|") if part.strip()
             ]
-            if not location_parts or not all(
-                is_us_location(
-                    location,
-                    trusted_us=False,
-                    context=job.canonical_url,
+            if (
+                has_explicit_foreign_role_location(job.title)
+                or not location_parts
+                or not all(
+                    is_us_location(
+                        location,
+                        trusted_us=False,
+                        context=job.canonical_url,
+                    )
+                    for location in location_parts
                 )
-                for location in location_parts
             ):
                 await self.database.mark_delivery_suppressed(
                     int(delivery["id"]),
