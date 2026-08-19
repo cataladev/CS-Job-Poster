@@ -284,6 +284,30 @@ async def test_publisher_suppresses_non_us_pending_delivery(config_factory) -> N
 
 
 @pytest.mark.asyncio
+async def test_publisher_suppresses_foreign_title_despite_us_state_code(
+    config_factory,
+) -> None:
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    try:
+        await _create_pending_delivery(
+            database,
+            location="Dresden, TN",
+            title="2026 Software Dev Engineer Intern - Germany",
+        )
+        channel = FakeChannel([])
+        publisher = TrackChannelPublisher(config, database)
+        publisher.bind_client(FakeClient(channel))  # type: ignore[arg-type]
+
+        assert await publisher.publish_pending() == (0, 0)
+        assert channel.sent == []
+        assert await database.get_delivery_counts() == {"suppressed": 1}
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_missing_history_permission_fails_closed(config_factory) -> None:
     config = config_factory()
     database = Database(config.sqlite_db_path)

@@ -13,6 +13,7 @@ from job_bot.github_feeds import FEEDS, FeedDefinition, FeedFetchResult, GitHubF
 from job_bot.models import AppConfig
 from job_bot.utils.feed_normalization import (
     external_identity_keys,
+    has_explicit_foreign_role_location,
     is_us_location,
     location_scoped_identity_keys,
 )
@@ -168,13 +169,17 @@ class FeedPipeline:
                 source_merged = 0
 
                 for observation in result.observations:
-                    if not observation.locations or not all(
-                        is_us_location(
-                            location,
-                            trusted_us=False,
-                            context=observation.application_url,
+                    if (
+                        has_explicit_foreign_role_location(observation.title)
+                        or not observation.locations
+                        or not all(
+                            is_us_location(
+                                location,
+                                trusted_us=False,
+                                context=observation.application_url,
+                            )
+                            for location in observation.locations
                         )
-                        for location in observation.locations
                     ):
                         stats.rejected += 1
                         self.logger.warning(

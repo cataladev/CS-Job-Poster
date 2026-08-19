@@ -672,6 +672,44 @@ async def test_pipeline_rejects_non_us_observation_before_ingestion(config_facto
 
 
 @pytest.mark.asyncio
+async def test_pipeline_rejects_foreign_title_when_location_has_bad_us_state_code(
+    config_factory,
+) -> None:
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    feed = _feed("one")
+    fetcher = StubFetcher(
+        {
+            "one": [
+                _job(
+                    "one",
+                    "germany-mislabeled",
+                    location="Dresden, TN",
+                    title="2026 Software Dev Engineer Intern - Germany",
+                )
+            ]
+        }
+    )
+    pipeline = FeedPipeline(
+        config=config,
+        database=database,
+        publisher=StubPublisher(),
+        feeds=(feed,),
+        fetcher=fetcher,
+    )
+    try:
+        result = await pipeline.run()
+
+        assert result.baseline_completed
+        assert result.rejected == 1
+        assert result.canonical_created == 0
+        assert await database.get_delivery_counts() == {}
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_partial_baseline_never_queues_jobs(config_factory) -> None:
     config = config_factory()
     database = Database(config.sqlite_db_path)
