@@ -2,15 +2,17 @@
 
 A focused Discord publisher for curated U.S. internships and new-grad roles.
 
-The bot polls ten U.S. aggregator surfaces (eight from five GitHub repositories and two
-public Jobright listings) plus direct, public employer ATS boards. It combines every
-successful snapshot, removes duplicates across sources, and publishes newly added roles
-to separate internship and new-grad Discord channels. Its MVP commands configure posting
-channels and optional digest-alert roles.
+The bot polls U.S. aggregator surfaces, direct public employer ATS boards, and
+first-party company careers APIs. It combines every successful snapshot, removes
+duplicates across sources, and publishes newly added roles to separate internship and
+new-grad Discord channels. Its MVP commands configure posting channels and optional
+digest-alert roles.
 
 ## Runtime behavior
 
 - Polls every five minutes by default.
+- Polls registered first-party company APIs independently every hour by default; IBM is
+  the first registered company source.
 - Runs the GitHub and Jobright core feeds in their own five-minute loop, so a slow
   direct-employer sweep cannot delay new internship or new-grad Discord posts.
 - Derives 309 unique direct employer boards from the bundled company seed: Greenhouse,
@@ -63,6 +65,11 @@ the runtime requests that public API only if its local result is more than four 
 then uses an unambiguous direct match while retaining Jobright as fallback. This avoids
 polling every employer board on every cycle and does not use HTML rendering or login-only
 endpoints.
+
+First-party company sources live under `job_bot/company_sources/companies/`. They fetch
+company-owned careers APIs independently of Jobright, adapt results to the shared
+`JobObservation` contract, and enter the same normalization, deduplication, PostgreSQL
+outbox, and Discord delivery path. Each source receives a silent first baseline.
 
 The fixed feed definitions live in `job_bot/github_feeds.py`. `config/sources.yaml`
 is deliberately not a runtime switchboard for the MVP. The Jobright integration derives
@@ -164,6 +171,7 @@ Optional runtime settings:
 ```dotenv
 POLL_INTERVAL_SECONDS=300
 DIRECT_ATS_POLL_INTERVAL_SECONDS=900
+COMPANY_SOURCE_POLL_INTERVAL_SECONDS=3600
 DIGEST_INTERVAL_SECONDS=14400
 DISCORD_INTERNSHIP_ALERT_ROLE_ID=
 DISCORD_NEW_GRAD_ALERT_ROLE_ID=
@@ -177,7 +185,9 @@ USER_AGENT=cs-job-poster/2.0
 ```
 
 `POLL_INTERVAL_SECONDS` has a minimum of 30 seconds; `DIRECT_ATS_POLL_INTERVAL_SECONDS`
-has a minimum of five minutes; `DIGEST_INTERVAL_SECONDS` has a minimum of 15 minutes.
+and `COMPANY_SOURCE_POLL_INTERVAL_SECONDS` have a minimum of five minutes;
+`DIGEST_INTERVAL_SECONDS` has a minimum of 15 minutes. First-party company API
+sources run independently of Jobright and default to an hourly collection cycle.
 The alert-role environment values are optional and can be overridden live with
 `/set-job-alert-role`. `RECENT_CATCHUP_HOURS` is a one-time upgrade bridge: an
 already-baselined deployment queues suppressed roles whose source date falls in that
@@ -246,7 +256,22 @@ post editing, branding, and enrichment.
   repository fetching, and schema adapters.
 - `job_bot/utils/feed_normalization.py` — location handling, link safety, ATS keys.
 - `job_bot/feed_pipeline.py` — concurrent collection, silent baselines, ingestion.
+- `job_bot/company_sources/` — first-party company API adapters, registry, runner, and
+  independent collection pipeline.
 - `job_bot/database.py` — observations, canonical merging, delivery outbox.
 - `job_bot/feed_publisher.py` — Discord embeds and marker reconciliation.
 - `job_bot/job_channel_commands.py` — persisted admin-only channel configuration.
 - `job_bot/mvp_runtime.py` — one-client scheduler, slash commands, and process lock.
+
+Run a read-only live IBM smoke test without a database or Discord connection:
+
+```bash
+.venv/bin/python scripts/smoke_ibm_source.py --show 10
+```
+
+Run the live IBM source twice through normalization, dedupe, and the configured
+development PostgreSQL database without connecting to Discord:
+
+```bash
+.venv/bin/python scripts/test_ibm_database_workflow.py --runs 2
+```
