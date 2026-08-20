@@ -104,3 +104,8 @@ def test_feed_outbox_migration_preserves_and_seeds_existing_posts(monkeypatch) -
                 "SELECT to_regclass('public.company_target_subscriptions')"
             )
             assert cursor.fetchone() == ("company_target_subscriptions",)
+
+            cursor.execute(
+                "SELECT to_regclass('public.location_target_subscriptions')"
+            )
+            assert cursor.fetchone() == ("location_target_subscriptions",)

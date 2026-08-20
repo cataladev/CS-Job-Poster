@@ -162,6 +162,21 @@ another ping. Company aliases such as `Palantir Technologies`/`Palantir` and
 targets, and each company/track alert supports up to 50 members so the Discord message
 stays below its content limit.
 
+Members can target a U.S. city/state, a whole state, or U.S.-remote roles separately
+for each track:
+
+```text
+/target-location track:<Internships|New grad> location:<Boulder, CO>
+```
+
+Running the same normalized location and track again removes the target. Equivalent
+forms such as `Boulder, CO` and `Boulder, Colorado, United States` share one target;
+`Colorado` matches jobs anywhere in the state, and `Remote` matches U.S.-remote jobs.
+Ambiguous bare city names are rejected. If a member matches both a company target and
+a location target for the same job, the bot mentions them only once on the original
+duplicate-safe post. Location targets use the same 50-target-per-member and
+50-members-per-target limits as company alerts.
+
 ## Configuration
 
 Copy `.env.example` to `.env`. These values are required for production:
