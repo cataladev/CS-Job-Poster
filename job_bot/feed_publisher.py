@@ -349,10 +349,22 @@ class TrackChannelPublisher:
                 raise RuntimeError(
                     f"Configured channel {channel_id} is not attached to a server"
                 )
-            subscriber_ids = await self.database.list_company_target_subscriber_ids(
-                guild_id=int(guild_id),
-                track=job.track,
-                company_key=direct_link_company_key(job.company),
+            company_subscriber_ids = (
+                await self.database.list_company_target_subscriber_ids(
+                    guild_id=int(guild_id),
+                    track=job.track,
+                    company_key=direct_link_company_key(job.company),
+                )
+            )
+            location_subscriber_ids = (
+                await self.database.list_location_target_subscriber_ids(
+                    guild_id=int(guild_id),
+                    track=job.track,
+                    normalized_locations=job.normalized_locations,
+                )
+            )
+            subscriber_ids = list(
+                dict.fromkeys([*company_subscriber_ids, *location_subscriber_ids])
             )
             target_content, allowed_mentions = self._target_mentions(subscriber_ids)
             await self.database.mark_delivery_sending(int(delivery["id"]))
@@ -392,7 +404,8 @@ class TrackChannelPublisher:
             sent += 1
             self.logger.info(
                 "delivery_sent delivery=%s canonical=%s channel=%s company=%r title=%r "
-                "message=%s target_subscribers=%s",
+                "message=%s target_subscribers=%s company_target_subscribers=%s "
+                "location_target_subscribers=%s",
                 delivery["id"],
                 canonical_id,
                 channel_id,
@@ -400,6 +413,8 @@ class TrackChannelPublisher:
                 job.title,
                 message.id,
                 len(subscriber_ids),
+                len(company_subscriber_ids),
+                len(location_subscriber_ids),
             )
             if self.config.publish_delay_seconds > 0:
                 await asyncio.sleep(self.config.publish_delay_seconds)

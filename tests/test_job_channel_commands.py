@@ -107,6 +107,13 @@ async def test_admin_slash_command_is_registered(config_factory) -> None:
         "company",
         "track",
     ]
+    location_target_command = tree.get_command("target-location")
+    assert location_target_command is not None
+    assert location_target_command.default_permissions is None
+    assert [parameter.name for parameter in location_target_command.parameters] == [
+        "track",
+        "location",
+    ]
     await client.close()
     await database.close()
 
@@ -268,7 +275,9 @@ async def test_member_can_toggle_configured_digest_alert_role(config_factory) ->
 
 
 @pytest.mark.asyncio
-async def test_member_can_toggle_company_target_for_each_track(config_factory) -> None:
+async def test_member_can_toggle_company_and_location_targets_for_each_track(
+    config_factory,
+) -> None:
     class FakeResponse:
         def __init__(self) -> None:
             self.messages = []
@@ -343,13 +352,64 @@ async def test_member_can_toggle_company_target_for_each_track(config_factory) -
             company_key="palantir",
         ) == []
         assert "Target removed" in response.messages[-1][0]
+
+        location_command = tree.get_command("target-location")
+        assert location_command is not None
+        await location_command.callback(  # type: ignore[arg-type]
+            interaction,
+            new_grad,
+            "Boulder, Colorado, United States",
+        )
+        assert await database.list_location_target_subscriber_ids(
+            guild_id=123,
+            track="new_grad",
+            normalized_locations=["boulder co"],
+        ) == [42]
+        assert "Location target set" in response.messages[-1][0]
+
+        await location_command.callback(  # type: ignore[arg-type]
+            interaction,
+            new_grad,
+            "Boulder, CO",
+        )
+        assert await database.list_location_target_subscriber_ids(
+            guild_id=123,
+            track="new_grad",
+            normalized_locations=["boulder co"],
+        ) == []
+        assert "Location target removed" in response.messages[-1][0]
+
+        await location_command.callback(  # type: ignore[arg-type]
+            interaction,
+            internship,
+            "boulder, co",
+        )
+        assert await database.list_location_target_subscriber_ids(
+            guild_id=123,
+            track="internship",
+            normalized_locations=["boulder co"],
+        ) == [42]
+
+        await location_command.callback(  # type: ignore[arg-type]
+            interaction,
+            internship,
+            "Boulder",
+        )
+        assert "unambiguous U.S. location" in response.messages[-1][0]
+
+        await location_command.callback(  # type: ignore[arg-type]
+            interaction,
+            internship,
+            "Remote in Canada",
+        )
+        assert "unambiguous U.S. location" in response.messages[-1][0]
     finally:
         await client.close()
         await database.close()
 
 
 @pytest.mark.asyncio
-async def test_company_target_subscription_limits_are_enforced(config_factory) -> None:
+async def test_target_subscription_limits_are_enforced(config_factory) -> None:
     config = config_factory()
     database = Database(config.sqlite_db_path)
     await database.initialize()
@@ -393,6 +453,26 @@ async def test_company_target_subscription_limits_are_enforced(config_factory) -
             max_targets_per_user=1,
             max_subscribers_per_target=1,
         )
+
+        assert await database.toggle_location_target_subscription(
+            guild_id=123,
+            user_id=1,
+            track="internship",
+            location="Boulder, CO",
+            location_key="boulder co",
+            max_targets_per_user=1,
+            max_subscribers_per_target=1,
+        )
+        with pytest.raises(ValueError, match="location/track"):
+            await database.toggle_location_target_subscription(
+                guild_id=123,
+                user_id=1,
+                track="new_grad",
+                location="Austin, TX",
+                location_key="austin tx",
+                max_targets_per_user=1,
+                max_subscribers_per_target=1,
+            )
     finally:
         await database.close()
 

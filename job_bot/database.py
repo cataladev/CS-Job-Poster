@@ -17,7 +17,11 @@ from job_bot.utils.feed_normalization import (
     role_title_key,
     sanitize_application_url,
 )
-from job_bot.utils.normalization import direct_link_company_key, normalize_company_name
+from job_bot.utils.normalization import (
+    direct_link_company_key,
+    location_target_matches,
+    normalize_company_name,
+)
 
 try:
     import psycopg
@@ -427,6 +431,16 @@ CREATE TABLE IF NOT EXISTS company_target_subscriptions (
     PRIMARY KEY (guild_id, user_id, track, company_key)
 );
 
+CREATE TABLE IF NOT EXISTS location_target_subscriptions (
+    guild_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    track TEXT NOT NULL CHECK (track IN ('internship', 'new_grad')),
+    location TEXT NOT NULL,
+    location_key TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (guild_id, user_id, track, location_key)
+);
+
 CREATE TABLE IF NOT EXISTS feed_observations (
     source_id TEXT NOT NULL,
     external_id TEXT NOT NULL,
@@ -511,6 +525,9 @@ CREATE INDEX IF NOT EXISTS idx_feed_observations_canonical
 
 CREATE INDEX IF NOT EXISTS idx_company_target_subscriptions_lookup
     ON company_target_subscriptions(guild_id, track, company_key, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_location_target_subscriptions_lookup
+    ON location_target_subscriptions(guild_id, track, location_key, created_at);
 
 CREATE INDEX IF NOT EXISTS idx_feed_canonical_match
     ON canonical_jobs(track, normalized_company, season_term);
@@ -2360,6 +2377,137 @@ class Database:
                 (str(guild_id), track, company_key),
             ).fetchall()
         return [int(row["user_id"]) for row in rows]
+
+    async def toggle_location_target_subscription(
+        self,
+        *,
+        guild_id: int,
+        user_id: int,
+        track: str,
+        location: str,
+        location_key: str,
+        max_targets_per_user: int = 50,
+        max_subscribers_per_target: int = 50,
+    ) -> bool:
+        """Toggle a location target and return whether it is enabled afterward."""
+        if track not in {"internship", "new_grad"}:
+            raise ValueError("Track must be internship or new_grad.")
+        if guild_id <= 0 or user_id <= 0:
+            raise ValueError("Guild and user IDs must be positive.")
+        if not location.strip() or not location_key.strip():
+            raise ValueError("Location must not be empty.")
+
+        async with self._lock:
+            try:
+                key = (str(guild_id), str(user_id), track, location_key)
+                existing = self._connection.execute(
+                    """
+                    SELECT 1
+                    FROM location_target_subscriptions
+                    WHERE guild_id = ? AND user_id = ? AND track = ? AND location_key = ?
+                    """,
+                    key,
+                ).fetchone()
+                if existing:
+                    self._connection.execute(
+                        """
+                        DELETE FROM location_target_subscriptions
+                        WHERE guild_id = ? AND user_id = ? AND track = ? AND location_key = ?
+                        """,
+                        key,
+                    )
+                    self._connection.commit()
+                    return False
+
+                user_count = self._connection.execute(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM location_target_subscriptions
+                    WHERE guild_id = ? AND user_id = ?
+                    """,
+                    (str(guild_id), str(user_id)),
+                ).fetchone()
+                if user_count and int(user_count["count"]) >= max_targets_per_user:
+                    raise ValueError(
+                        f"You can target at most {max_targets_per_user} location/track combinations."
+                    )
+
+                subscriber_count = self._connection.execute(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM location_target_subscriptions
+                    WHERE guild_id = ? AND track = ? AND location_key = ?
+                    """,
+                    (str(guild_id), track, location_key),
+                ).fetchone()
+                if (
+                    subscriber_count
+                    and int(subscriber_count["count"]) >= max_subscribers_per_target
+                ):
+                    raise ValueError(
+                        "That location and track already has the maximum number of subscribers."
+                    )
+
+                self._connection.execute(
+                    """
+                    INSERT INTO location_target_subscriptions (
+                        guild_id, user_id, track, location, location_key, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(guild_id),
+                        str(user_id),
+                        track,
+                        location,
+                        location_key,
+                        _utc_now(),
+                    ),
+                )
+                self._connection.commit()
+                return True
+            except Exception:
+                self._connection.rollback()
+                raise
+
+    async def list_location_target_subscriber_ids(
+        self,
+        *,
+        guild_id: int,
+        track: str,
+        normalized_locations: Iterable[str],
+    ) -> List[int]:
+        observed_locations = {
+            str(location).strip()
+            for location in normalized_locations
+            if str(location).strip()
+        }
+        if not observed_locations:
+            return []
+        async with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT user_id, location_key, created_at
+                FROM location_target_subscriptions
+                WHERE guild_id = ? AND track = ?
+                ORDER BY created_at ASC, user_id ASC
+                """,
+                (str(guild_id), track),
+            ).fetchall()
+
+        subscriber_ids: list[int] = []
+        seen: set[int] = set()
+        for row in rows:
+            user_id = int(row["user_id"])
+            if user_id in seen:
+                continue
+            target_key = str(row["location_key"])
+            if any(
+                location_target_matches(target_key, observed)
+                for observed in observed_locations
+            ):
+                subscriber_ids.append(user_id)
+                seen.add(user_id)
+        return subscriber_ids
 
     async def claim_command_receipt(
         self,

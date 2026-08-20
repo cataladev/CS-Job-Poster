@@ -181,7 +181,9 @@ async def test_crash_window_reconciles_marker_without_second_send(config_factory
 
 
 @pytest.mark.asyncio
-async def test_company_targets_ping_only_in_the_subscribed_track(config_factory) -> None:
+async def test_company_and_location_targets_ping_once_in_the_subscribed_track(
+    config_factory,
+) -> None:
     config = config_factory()
     database = Database(config.sqlite_db_path)
     await database.initialize()
@@ -200,12 +202,39 @@ async def test_company_targets_ping_only_in_the_subscribed_track(config_factory)
             company="Example Corp",
             company_key="example",
         )
-        await _create_pending_delivery(database, track="internship", channel_id=111)
+        await database.toggle_location_target_subscription(
+            guild_id=123,
+            user_id=777,
+            track="internship",
+            location="Colorado",
+            location_key="co",
+        )
+        await database.toggle_location_target_subscription(
+            guild_id=123,
+            user_id=999,
+            track="internship",
+            location="Boulder, CO",
+            location_key="boulder co",
+        )
+        await database.toggle_location_target_subscription(
+            guild_id=123,
+            user_id=888,
+            track="new_grad",
+            location="Boulder, CO",
+            location_key="boulder co",
+        )
+        await _create_pending_delivery(
+            database,
+            track="internship",
+            channel_id=111,
+            location="Boulder, CO",
+        )
         await _create_pending_delivery(
             database,
             track="new_grad",
             channel_id=222,
             external_id="new-grad-1",
+            location="Boulder, CO",
         )
         internship_channel = FakeChannel([])
         new_grad_channel = FakeChannel([], channel_id=222)
@@ -216,9 +245,12 @@ async def test_company_targets_ping_only_in_the_subscribed_track(config_factory)
 
         assert await publisher.publish_pending() == (2, 0)
 
-        assert internship_channel.contents == ["🎯 <@777>"]
+        assert internship_channel.contents == ["🎯 <@777> <@999>"]
         assert new_grad_channel.contents == ["🎯 <@888>"]
-        assert [user.id for user in internship_channel.allowed_mentions[0].users] == [777]
+        assert [user.id for user in internship_channel.allowed_mentions[0].users] == [
+            777,
+            999,
+        ]
         assert [user.id for user in new_grad_channel.allowed_mentions[0].users] == [888]
         assert internship_channel.allowed_mentions[0].everyone is False
         assert internship_channel.allowed_mentions[0].roles is False

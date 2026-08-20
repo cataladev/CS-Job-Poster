@@ -15,7 +15,12 @@ from job_bot.config import (
 from job_bot.database import Database
 from job_bot.feed_publisher import TrackChannelPublisher
 from job_bot.models import AppConfig
-from job_bot.utils.normalization import direct_link_company_key
+from job_bot.utils.feed_normalization import is_us_location
+from job_bot.utils.normalization import (
+    US_STATE_CODES,
+    direct_link_company_key,
+    normalize_location,
+)
 
 
 TRACK_CONFIG_KEYS = {
@@ -304,6 +309,105 @@ def register_job_channel_commands(
             guild.id,
             interaction.user.id,
             company_key,
+        )
+
+    @tree.command(
+        name="target-location",
+        description="Toggle an instant alert for one U.S. location and job track.",
+    )
+    @app_commands.guild_only()
+    @app_commands.describe(
+        track="Whether to watch internship or new-grad jobs.",
+        location="U.S. city/state, state, or Remote; for example Boulder, CO.",
+    )
+    @app_commands.choices(
+        track=[
+            app_commands.Choice(name="Internships", value="internship"),
+            app_commands.Choice(name="New grad", value="new_grad"),
+        ]
+    )
+    async def target_location(
+        interaction: discord.Interaction,
+        track: app_commands.Choice[str],
+        location: str,
+    ) -> None:
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message(
+                "This command must be used in a server.", ephemeral=True
+            )
+            return
+        if not await require_posting_guild(interaction, guild):
+            return
+
+        display_location = " ".join(location.split()).strip()
+        location_key = normalize_location(display_location)
+        explicit_us_location = is_us_location(display_location, trusted_us=False)
+        if location_key.startswith("remote") and (
+            display_location.casefold() == "remote" or explicit_us_location
+        ):
+            location_key = "remote"
+        if not display_location or not location_key:
+            await interaction.response.send_message(
+                "Enter a U.S. city and state, a state, or Remote.", ephemeral=True
+            )
+            return
+        if len(display_location) > 100:
+            await interaction.response.send_message(
+                "Locations must be 100 characters or fewer.", ephemeral=True
+            )
+            return
+        normalized_us_evidence = location_key in US_STATE_CODES or any(
+            location_key.endswith(f" {state_code}") for state_code in US_STATE_CODES
+        )
+        if (
+            location_key != "remote"
+            and not normalized_us_evidence
+            and not explicit_us_location
+        ):
+            await interaction.response.send_message(
+                "Enter an unambiguous U.S. location such as `Boulder, CO`, "
+                "`Colorado`, or `Remote`.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            enabled = await configurator.database.toggle_location_target_subscription(
+                guild_id=guild.id,
+                user_id=interaction.user.id,
+                track=track.value,
+                location=display_location,
+                location_key=location_key,
+            )
+        except ValueError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
+
+        safe_location = discord.utils.escape_mentions(
+            discord.utils.escape_markdown(display_location)
+        )
+        track_label = TRACK_LABELS[track.value].lower()
+        if enabled:
+            message = (
+                f"Location target set for **{safe_location}** {track_label} jobs. "
+                "You'll be mentioned on each new matching post."
+            )
+            action = "enabled"
+        else:
+            message = (
+                f"Location target removed for **{safe_location}** {track_label} jobs."
+            )
+            action = "disabled"
+        await interaction.response.send_message(message, ephemeral=True)
+        logger.info(
+            "location_target_subscription track=%s action=%s guild=%s user=%s "
+            "location_key=%s",
+            track.value,
+            action,
+            guild.id,
+            interaction.user.id,
+            location_key,
         )
 
     @tree.command(
