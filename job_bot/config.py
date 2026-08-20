@@ -134,6 +134,9 @@ def load_config() -> AppConfig:
         direct_ats_poll_interval_seconds=max(
             300, int(os.getenv("DIRECT_ATS_POLL_INTERVAL_SECONDS", "900"))
         ),
+        company_source_poll_interval_seconds=max(
+            300, int(os.getenv("COMPANY_SOURCE_POLL_INTERVAL_SECONDS", "3600"))
+        ),
         discord_internship_alert_role_id=(
             int(internship_alert_role_id) if internship_alert_role_id else None
         ),

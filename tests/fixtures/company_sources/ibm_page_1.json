@@ -1,0 +1,19 @@
+{
+  "hits": {
+    "total": {"value": 2, "relation": "eq"},
+    "hits": [
+      {
+        "_id": "ibm-hit-87892",
+        "_source": {
+          "title": "Software Developer Intern, Summer 2027",
+          "url": "https://careers.ibm.com/careers/JobDetail?jobId=87892",
+          "field_keyword_05": "United States",
+          "field_keyword_08": "Software Engineering",
+          "field_keyword_18": "Internship",
+          "field_keyword_19": "Austin, TX",
+          "dcdate": "2026-08-15T12:00:00Z"
+        }
+      }
+    ]
+  }
+}

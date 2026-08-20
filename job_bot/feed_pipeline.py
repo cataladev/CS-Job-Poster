@@ -2,14 +2,21 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Callable, Iterable, Protocol
+from typing import Protocol
 from urllib.parse import urlsplit
 
 from job_bot.ats_feeds import build_direct_ats_feeds
 from job_bot.database import Database
-from job_bot.github_feeds import FEEDS, FeedDefinition, FeedFetchResult, GitHubFeedFetcher
+from job_bot.github_feeds import (
+    FEEDS,
+    FeedDefinition,
+    FeedFetchResult,
+    GitHubFeedFetcher,
+    JobObservation,
+)
 from job_bot.models import AppConfig
 from job_bot.utils.feed_normalization import (
     external_identity_keys,
@@ -19,7 +26,6 @@ from job_bot.utils.feed_normalization import (
 from job_bot.utils.http import AsyncHttpClient
 from job_bot.utils.normalization import (
     direct_link_company_key,
-    normalize_company_name,
     normalize_job_posting,
 )
 
@@ -45,6 +51,17 @@ class FeedRunStats:
     direct_link_boards_fetched: int = 0
     baseline_completed: bool = False
     errors: list[str] = field(default_factory=list)
+
+
+@dataclass
+class ObservationIngestStats:
+    observations: int = 0
+    rejected: int = 0
+    canonical_created: int = 0
+    duplicates: int = 0
+    canonicals_merged: int = 0
+    deliveries_queued: int = 0
+    deliveries_suppressed: int = 0
 
 
 HttpClientFactory = Callable[..., AsyncHttpClient]
@@ -164,123 +181,17 @@ class FeedPipeline:
                     and state["path"] == feed.path
                 )
                 suppress_delivery = not initial_baseline_complete or not feed_baselined
-                source_created = 0
-                source_duplicates = 0
-                source_merged = 0
-
-                for observation in result.observations:
-                    if not observation.locations or not all(
-                        is_us_location(
-                            location,
-                            trusted_us=False,
-                            context=observation.application_url,
-                        )
-                        for location in observation.locations
-                    ):
-                        stats.rejected += 1
-                        self.logger.warning(
-                            "observation_rejected_non_us source=%s external_id=%s locations=%s",
-                            observation.source_id,
-                            observation.external_id,
-                            observation.locations,
-                        )
-                        continue
-                    job = normalize_job_posting(observation.to_job_posting())
-                    is_jobright = _is_jobright_observation(
-                        observation,
-                        job.canonical_url or job.url,
-                    )
-                    resolved_direct_url = None
-                    if is_jobright:
-                        jobright_url = job.canonical_url or job.url
-                        resolved_direct_url = await self.database.find_cached_direct_link(
-                            job=job,
-                            posted_date=observation.posted_date,
-                        )
-                        if resolved_direct_url:
-                            job.url = resolved_direct_url
-                            job.canonical_url = resolved_direct_url
-                            job.alternate_urls = [*job.alternate_urls, jobright_url]
-                            job.raw_data = {
-                                **job.raw_data,
-                                "jobright_fallback_url": jobright_url,
-                                "direct_link_cache": True,
-                            }
-                            job = normalize_job_posting(job)
-                    if job.normalized_company in self.config.company_blacklist:
-                        stats.rejected += 1
-                        self.logger.info(
-                            "observation_rejected_company_blacklist source=%s external_id=%s company=%s",
-                            observation.source_id,
-                            observation.external_id,
-                            job.company,
-                        )
-                        continue
-                    exact_identity_keys = {f"url:{job.canonical_url}"}
-                    exact_identity_keys.update(
-                        external_identity_keys(
-                            job.canonical_url or job.url,
-                            company=job.normalized_company,
-                        )
-                    )
-                    canonical_keys = location_scoped_identity_keys(
-                        exact_identity_keys,
-                        normalized_locations=job.normalized_locations,
-                    )
-                    channel_id = self.config.channel_id_for_track(job.track)
-                    if (
-                        job.track == "new_grad"
-                        and channel_id == self.config.discord_channel_id
-                    ):
-                        channel_id = None
-                    delivery_suppressed = suppress_delivery or channel_id is None
-                    delivery_not_before = (
-                        (datetime.now(UTC) + JOBRIGHT_DELIVERY_WAIT).isoformat()
-                        if is_jobright and not resolved_direct_url and not delivery_suppressed
-                        else None
-                    )
-                    payload = asdict(observation)
-                    payload["raw_data"] = dict(job.raw_data)
-                    ingest = await self.database.ingest_feed_job(
-                        job=job,
-                        source_id=observation.source_id,
-                        external_id=observation.external_id,
-                        source_label=observation.source_label,
-                        source_url=observation.source_url,
-                        source_ref=observation.source_ref,
-                        posted_date=observation.posted_date,
-                        payload=payload,
-                        canonical_keys=canonical_keys,
-                        channel_id=channel_id,
-                        suppress_delivery=delivery_suppressed,
-                        delivery_not_before=delivery_not_before,
-                    )
-                    if not is_jobright:
-                        await self.database.cache_direct_link(
-                            job=job,
-                            source_id=observation.source_id,
-                            source_ref=observation.source_ref,
-                            posted_date=observation.posted_date,
-                        )
-                    if ingest.created:
-                        source_created += 1
-                        stats.canonical_created += 1
-                    else:
-                        source_duplicates += 1
-                        stats.duplicates += 1
-                    if ingest.delivery_state == "pending":
-                        stats.deliveries_queued += 1
-                    elif ingest.delivery_state == "suppressed":
-                        stats.deliveries_suppressed += 1
-                    source_merged += len(ingest.merged_canonical_ids)
-                    stats.canonicals_merged += len(ingest.merged_canonical_ids)
-
-                    # The database adapter is intentionally synchronous inside its
-                    # transaction boundary. Yield between rows so large README
-                    # snapshots cannot starve Discord's gateway heartbeat.
-                    await asyncio.sleep(0)
-
-                stats.observations += len(result.observations)
+                ingest_stats = await self.ingest_observations(
+                    result.observations,
+                    suppress_delivery=suppress_delivery,
+                )
+                stats.observations += ingest_stats.observations
+                stats.rejected += ingest_stats.rejected
+                stats.canonical_created += ingest_stats.canonical_created
+                stats.duplicates += ingest_stats.duplicates
+                stats.canonicals_merged += ingest_stats.canonicals_merged
+                stats.deliveries_queued += ingest_stats.deliveries_queued
+                stats.deliveries_suppressed += ingest_stats.deliveries_suppressed
                 stats.rejected += result.rejected
                 await self.database.record_feed_success(
                     source_id=feed.source_id,
@@ -296,9 +207,9 @@ class FeedPipeline:
                     feed.source_id,
                     len(result.observations),
                     result.rejected,
-                    source_created,
-                    source_duplicates,
-                    source_merged,
+                    ingest_stats.canonical_created,
+                    ingest_stats.duplicates,
+                    ingest_stats.canonicals_merged,
                     suppress_delivery,
                 )
 
@@ -353,6 +264,126 @@ class FeedPipeline:
                 len(stats.errors),
             )
             return stats
+
+    async def ingest_observations(
+        self,
+        observations: Iterable[JobObservation],
+        *,
+        suppress_delivery: bool,
+    ) -> ObservationIngestStats:
+        """Normalize and persist observations through the shared dedupe boundary."""
+
+        batch = tuple(observations)
+        stats = ObservationIngestStats(observations=len(batch))
+        for observation in batch:
+            if not observation.locations or not all(
+                is_us_location(
+                    location,
+                    trusted_us=False,
+                    context=observation.application_url,
+                )
+                for location in observation.locations
+            ):
+                stats.rejected += 1
+                self.logger.warning(
+                    "observation_rejected_non_us source=%s external_id=%s locations=%s",
+                    observation.source_id,
+                    observation.external_id,
+                    observation.locations,
+                )
+                continue
+
+            job = normalize_job_posting(observation.to_job_posting())
+            is_jobright = _is_jobright_observation(
+                observation,
+                job.canonical_url or job.url,
+            )
+            resolved_direct_url = None
+            if is_jobright:
+                jobright_url = job.canonical_url or job.url
+                resolved_direct_url = await self.database.find_cached_direct_link(
+                    job=job,
+                    posted_date=observation.posted_date,
+                )
+                if resolved_direct_url:
+                    job.url = resolved_direct_url
+                    job.canonical_url = resolved_direct_url
+                    job.alternate_urls = [*job.alternate_urls, jobright_url]
+                    job.raw_data = {
+                        **job.raw_data,
+                        "jobright_fallback_url": jobright_url,
+                        "direct_link_cache": True,
+                    }
+                    job = normalize_job_posting(job)
+
+            if job.normalized_company in self.config.company_blacklist:
+                stats.rejected += 1
+                self.logger.info(
+                    "observation_rejected_company_blacklist source=%s external_id=%s company=%s",
+                    observation.source_id,
+                    observation.external_id,
+                    job.company,
+                )
+                continue
+
+            exact_identity_keys = {f"url:{job.canonical_url}"}
+            exact_identity_keys.update(
+                external_identity_keys(
+                    job.canonical_url or job.url,
+                    company=job.normalized_company,
+                )
+            )
+            canonical_keys = location_scoped_identity_keys(
+                exact_identity_keys,
+                normalized_locations=job.normalized_locations,
+            )
+            channel_id = self.config.channel_id_for_track(job.track)
+            if job.track == "new_grad" and channel_id == self.config.discord_channel_id:
+                channel_id = None
+            delivery_suppressed = suppress_delivery or channel_id is None
+            delivery_not_before = (
+                (datetime.now(UTC) + JOBRIGHT_DELIVERY_WAIT).isoformat()
+                if is_jobright and not resolved_direct_url and not delivery_suppressed
+                else None
+            )
+            payload = asdict(observation)
+            payload["raw_data"] = dict(job.raw_data)
+            ingest = await self.database.ingest_feed_job(
+                job=job,
+                source_id=observation.source_id,
+                external_id=observation.external_id,
+                source_label=observation.source_label,
+                source_url=observation.source_url,
+                source_ref=observation.source_ref,
+                posted_date=observation.posted_date,
+                payload=payload,
+                canonical_keys=canonical_keys,
+                channel_id=channel_id,
+                suppress_delivery=delivery_suppressed,
+                delivery_not_before=delivery_not_before,
+            )
+            if not is_jobright:
+                await self.database.cache_direct_link(
+                    job=job,
+                    source_id=observation.source_id,
+                    source_ref=observation.source_ref,
+                    posted_date=observation.posted_date,
+                )
+            if ingest.created:
+                stats.canonical_created += 1
+            else:
+                stats.duplicates += 1
+            if ingest.delivery_state == "pending":
+                stats.deliveries_queued += 1
+            elif ingest.delivery_state == "suppressed":
+                stats.deliveries_suppressed += 1
+            stats.canonicals_merged += len(ingest.merged_canonical_ids)
+
+            # The database adapter is intentionally synchronous inside its
+            # transaction boundary. Yield between rows so large snapshots cannot
+            # starve Discord's gateway heartbeat.
+            await asyncio.sleep(0)
+        return stats
 
     async def _prime_direct_link_cache(
         self,
