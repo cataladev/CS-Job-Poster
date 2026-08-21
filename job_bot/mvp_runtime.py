@@ -60,9 +60,6 @@ class FeedDiscordClient(discord.Client):
         self._shutdown = asyncio.Event()
         self._guild_commands_synced = False
 
-    async def setup_hook(self) -> None:
-        await self.tree.sync()
-
     async def on_ready(self) -> None:
         posting_guild_id = await self.publisher.configured_guild_id()
         self.logger.info(
@@ -75,9 +72,7 @@ class FeedDiscordClient(discord.Client):
             self.config.poll_interval_seconds,
         )
         if not self._guild_commands_synced:
-            for guild in self.guilds:
-                self.tree.copy_global_to(guild=guild)
-                await self.tree.sync(guild=guild)
+            await self._sync_commands_to_guild(posting_guild_id)
             self._guild_commands_synced = True
         await self.change_presence(
             status=discord.Status.online,
@@ -91,6 +86,24 @@ class FeedDiscordClient(discord.Client):
             pipeline=self.pipeline,
             interval_seconds=self.config.poll_interval_seconds,
         )
+
+    async def _sync_commands_to_guild(self, guild_id: int) -> None:
+        guild = discord.Object(id=guild_id)
+        self.tree.copy_global_to(guild=guild)
+        self.tree.clear_commands(guild=None)
+
+        # Guild commands update immediately. Syncing the now-empty global command
+        # set removes commands published by earlier versions of the runtime.
+        await self.tree.sync(guild=guild)
+        await self.tree.sync()
+
+        # Remove stale guild-scoped commands from any other servers where an
+        # earlier version copied them.
+        for connected_guild in self.guilds:
+            if connected_guild.id == guild_id:
+                continue
+            self.tree.clear_commands(guild=connected_guild)
+            await self.tree.sync(guild=connected_guild)
 
     async def close(self) -> None:
         self._shutdown.set()
