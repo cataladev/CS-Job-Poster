@@ -205,6 +205,51 @@ async def test_cross_source_semantic_match_requires_a_three_day_posting_window(
 
 
 @pytest.mark.asyncio
+async def test_exact_fingerprint_survives_shifted_semantic_date_window(
+    config_factory,
+) -> None:
+    """An immutable fingerprint must win over mutable observation metadata."""
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    try:
+        first = await _ingest(
+            database,
+            _observation(
+                "source-a",
+                "a-1",
+                "https://careers.example.com/jobs/123",
+                posted_date="2026-08-20",
+            ),
+        )
+        # Reproduce the production state: a later merge has attached older
+        # posting metadata, putting the canonical outside the semantic window
+        # even though its unique fingerprint still carries the original date.
+        database._connection.execute(  # noqa: SLF001 - regression fixture
+            "UPDATE feed_observations SET posted_date = ? WHERE canonical_id = ?",
+            ("2026-08-01", first.canonical_id),
+        )
+        database._connection.commit()  # noqa: SLF001 - regression fixture
+
+        duplicate = await _ingest(
+            database,
+            _observation(
+                "source-b",
+                "b-1",
+                "https://apply.example.com/openings/987",
+                posted_date="2026-08-20",
+            ),
+        )
+
+        assert not duplicate.created
+        assert duplicate.canonical_id == first.canonical_id
+        assert (await database.get_stats())["total_canonical_jobs"] == 1
+        assert await database.get_delivery_counts() == {"pending": 1}
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_stable_ats_requisition_merges_outside_semantic_posting_window(
     config_factory,
 ) -> None:

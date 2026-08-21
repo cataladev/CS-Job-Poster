@@ -493,6 +493,55 @@ async def test_first_complete_snapshot_is_silent_then_new_job_queues(config_fact
 
 
 @pytest.mark.asyncio
+async def test_ingest_error_does_not_block_other_rows_or_pending_publication(
+    config_factory,
+) -> None:
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    feed = _feed("one")
+    publisher = StubPublisher()
+    fetcher = StubFetcher({"one": [_job("one", "baseline")]})
+    pipeline = FeedPipeline(
+        config=config,
+        database=database,
+        publisher=publisher,
+        feeds=(feed,),
+        fetcher=fetcher,
+    )
+    try:
+        assert (await pipeline.run()).baseline_completed
+        original_ingest = database.ingest_feed_job
+
+        async def fail_one_observation(**kwargs):
+            if kwargs["external_id"] == "broken":
+                raise RuntimeError("simulated row conflict")
+            return await original_ingest(**kwargs)
+
+        database.ingest_feed_job = fail_one_observation  # type: ignore[method-assign]
+        fetcher.snapshots["one"] = [
+            _job("one", "baseline"),
+            _job("one", "broken"),
+            _job("one", "healthy"),
+        ]
+
+        result = await pipeline.run()
+
+        assert result.deliveries_queued == 1
+        assert result.errors == [
+            "one: 1 observation ingestion error(s); "
+            "first: external_id=broken: simulated row conflict"
+        ]
+        assert publisher.calls == 2
+        assert len(await database.list_deliveries_for_send(111)) == 1
+        state = await database.get_feed_state("one")
+        assert state is not None
+        assert "simulated row conflict" in state["last_error"]
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_direct_ats_feeds_wait_for_their_own_poll_interval(config_factory) -> None:
     config = config_factory()
     database = Database(config.sqlite_db_path)

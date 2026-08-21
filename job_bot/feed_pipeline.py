@@ -167,6 +167,7 @@ class FeedPipeline:
                 source_created = 0
                 source_duplicates = 0
                 source_merged = 0
+                source_ingest_errors: list[str] = []
 
                 for observation in result.observations:
                     if (
@@ -240,19 +241,33 @@ class FeedPipeline:
                     delivery_suppressed = suppress_delivery or channel_id is None
                     payload = asdict(observation)
                     payload["raw_data"] = dict(job.raw_data)
-                    ingest = await self.database.ingest_feed_job(
-                        job=job,
-                        source_id=observation.source_id,
-                        external_id=observation.external_id,
-                        source_label=observation.source_label,
-                        source_url=observation.source_url,
-                        source_ref=observation.source_ref,
-                        posted_date=observation.posted_date,
-                        payload=payload,
-                        canonical_keys=canonical_keys,
-                        channel_id=channel_id,
-                        suppress_delivery=delivery_suppressed,
-                    )
+                    try:
+                        ingest = await self.database.ingest_feed_job(
+                            job=job,
+                            source_id=observation.source_id,
+                            external_id=observation.external_id,
+                            source_label=observation.source_label,
+                            source_url=observation.source_url,
+                            source_ref=observation.source_ref,
+                            posted_date=observation.posted_date,
+                            payload=payload,
+                            canonical_keys=canonical_keys,
+                            channel_id=channel_id,
+                            suppress_delivery=delivery_suppressed,
+                        )
+                    except Exception as exc:
+                        error = f"external_id={observation.external_id}: {exc}"
+                        source_ingest_errors.append(error)
+                        self.logger.exception(
+                            "observation_ingest_failed source=%s external_id=%s",
+                            feed.source_id,
+                            observation.external_id,
+                        )
+                        # ingest_feed_job rolls back its transaction. Continue the
+                        # snapshot so one malformed or conflicting row cannot keep
+                        # already-queued deliveries from reaching Discord.
+                        await asyncio.sleep(0)
+                        continue
                     if not is_jobright:
                         await self.database.cache_direct_link(
                             job=job,
@@ -280,23 +295,39 @@ class FeedPipeline:
 
                 stats.observations += len(result.observations)
                 stats.rejected += result.rejected
-                await self.database.record_feed_success(
-                    source_id=feed.source_id,
-                    repository=feed.repository,
-                    path=feed.path,
-                    etag=result.etag,
-                    content_sha=result.content_sha,
-                    last_modified=result.last_modified,
-                    baseline_complete=True,
-                )
+                if source_ingest_errors:
+                    error = (
+                        f"{len(source_ingest_errors)} observation ingestion error(s); "
+                        f"first: {source_ingest_errors[0]}"
+                    )
+                    if feed.required_for_baseline:
+                        stats.errors.append(f"{feed.source_id}: {error}")
+                    await self.database.record_feed_error(
+                        source_id=feed.source_id,
+                        repository=feed.repository,
+                        path=feed.path,
+                        error=error,
+                    )
+                else:
+                    await self.database.record_feed_success(
+                        source_id=feed.source_id,
+                        repository=feed.repository,
+                        path=feed.path,
+                        etag=result.etag,
+                        content_sha=result.content_sha,
+                        last_modified=result.last_modified,
+                        baseline_complete=True,
+                    )
                 self.logger.info(
-                    "feed_finished source=%s observations=%s rejected=%s created=%s duplicates=%s merged=%s suppressed=%s",
+                    "feed_finished source=%s observations=%s rejected=%s created=%s "
+                    "duplicates=%s merged=%s ingest_errors=%s suppressed=%s",
                     feed.source_id,
                     len(result.observations),
                     result.rejected,
                     source_created,
                     source_duplicates,
                     source_merged,
+                    len(source_ingest_errors),
                     suppress_delivery,
                 )
 

@@ -1196,6 +1196,19 @@ class Database:
         async with self._lock:
             try:
                 candidate_ids: set[int] = set()
+                # The fingerprint column is the final canonical uniqueness guard.
+                # Look it up explicitly before the broader evidence checks below:
+                # an older observation can move a canonical's semantic date window
+                # while its immutable fingerprint still identifies this exact role
+                # and posting date.  Missing this lookup made the subsequent INSERT
+                # raise a unique-constraint error and abort the whole feed run.
+                fingerprint_match = self._connection.execute(
+                    "SELECT id FROM canonical_jobs WHERE dedupe_fingerprint = ?",
+                    (feed_dedupe_fingerprint,),
+                ).fetchone()
+                if fingerprint_match:
+                    candidate_ids.add(int(fingerprint_match["id"]))
+
                 observation = self._connection.execute(
                     """
                     SELECT canonical_id FROM feed_observations
