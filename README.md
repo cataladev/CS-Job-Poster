@@ -89,13 +89,17 @@ Duplicate prevention is persistent and happens before Discord delivery:
 1. Every upstream row is recorded by `(source_id, external_id)`.
 2. Canonical keys cover sanitized application URLs, stable ATS requisition IDs, and a
    normalized company/title/cycle/location signature. URL and requisition identities
-   are location-scoped.
-3. Matching company/title/cycle roles merge whenever their normalized locations
-   overlap. Disjoint locations remain distinct, even when repositories reuse the same
-   application URL or requisition ID.
-4. A transactional outbox permits only one delivery globally per canonical
+   remain location-scoped.
+3. Without stable identity evidence, roles merge only when track, normalized company,
+   normalized title, cycle, and the complete normalized location set match exactly,
+   and their posting dates fall within three days. Near titles such as an internship
+   and a co-op remain distinct.
+4. Exact fingerprint inserts are conflict-safe, so a duplicate discovered by another
+   database connection attaches to the existing canonical job instead of stopping the
+   polling run.
+5. A transactional outbox permits only one delivery globally per canonical
    role/location, so a channel change cannot replay an already known job.
-5. Every embed contains a stable delivery marker. Before a send or retry, the bot
+6. Every embed contains a stable delivery marker. Before a send or retry, the bot
    searches channel history for that marker and repairs the receipt when Discord
    accepted an earlier request whose database commit was interrupted.
 

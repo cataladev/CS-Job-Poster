@@ -320,7 +320,9 @@ async def test_distinct_titles_in_same_location_remain_distinct(config_factory) 
 
 
 @pytest.mark.asyncio
-async def test_cycle_suffix_in_title_does_not_create_duplicate(config_factory) -> None:
+async def test_cycle_suffix_in_title_remains_distinct_without_identity_match(
+    config_factory,
+) -> None:
     config = config_factory()
     database = Database(config.sqlite_db_path)
     await database.initialize()
@@ -344,16 +346,17 @@ async def test_cycle_suffix_in_title_does_not_create_duplicate(config_factory) -
             ),
         )
 
-        assert first.canonical_id == second.canonical_id
-        assert not second.created
-        assert await database.get_delivery_counts() == {"pending": 1}
+        assert first.created and second.created
+        assert first.canonical_id != second.canonical_id
+        assert await database.get_delivery_counts() == {"pending": 2}
     finally:
         await database.close()
 
 
 @pytest.mark.asyncio
-async def test_start_month_and_national_location_merge_across_sources(config_factory) -> None:
-    """A sparse repo row and an ATS row for one role must produce one post."""
+async def test_near_title_and_different_location_do_not_merge_without_identity(
+    config_factory,
+) -> None:
     config = config_factory()
     database = Database(config.sqlite_db_path)
     await database.initialize()
@@ -387,11 +390,129 @@ async def test_start_month_and_national_location_merge_across_sources(config_fac
         second = await _ingest(database, repository_copy)
 
         assert first.created
-        assert not second.created
-        assert first.canonical_id == second.canonical_id
-        assert await database.get_delivery_counts() == {"pending": 1}
+        assert second.created
+        assert first.canonical_id != second.canonical_id
+        assert await database.get_delivery_counts() == {"pending": 2}
         canonical = (await database.get_canonical_jobs([first.canonical_id]))[0]
         assert canonical.canonical_url == "https://jobs.ashbyhq.com/notion/notion-ats-1"
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_coop_title_remains_distinct_from_intern_title(config_factory) -> None:
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    try:
+        internship = await _ingest(
+            database,
+            _observation(
+                "source-a",
+                "internship",
+                "https://careers.example.com/jobs/internship",
+                title="Software Engineer Intern",
+                posted_date="2026-08-20",
+            ),
+        )
+        coop = await _ingest(
+            database,
+            _observation(
+                "source-b",
+                "coop",
+                "https://careers.example.com/jobs/coop",
+                title="Software Engineer Intern Co-op",
+                posted_date="2026-08-20",
+            ),
+        )
+
+        assert internship.created and coop.created
+        assert internship.canonical_id != coop.canonical_id
+        assert await database.get_delivery_counts() == {"pending": 2}
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_overlapping_but_nonidentical_location_sets_remain_distinct(
+    config_factory,
+) -> None:
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    try:
+        multi_city = _observation(
+            "source-a",
+            "multi-city",
+            "https://careers.example.com/jobs/multi-city",
+            posted_date="2026-08-20",
+        )
+        multi_city = JobObservation(
+            **{
+                **asdict(multi_city),
+                "locations": ["Austin, TX", "Boston, MA"],
+            }
+        )
+        austin_only = _observation(
+            "source-b",
+            "austin-only",
+            "https://careers.example.com/jobs/austin-only",
+            location="Austin, TX",
+            posted_date="2026-08-20",
+        )
+
+        first = await _ingest(database, multi_city)
+        second = await _ingest(database, austin_only)
+
+        assert first.created and second.created
+        assert first.canonical_id != second.canonical_id
+        assert await database.get_delivery_counts() == {"pending": 2}
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_exact_fingerprint_match_never_attempts_duplicate_insert(
+    config_factory,
+) -> None:
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    try:
+        first = await _ingest(
+            database,
+            _observation(
+                "source-a",
+                "first",
+                "https://careers.example.com/jobs/first",
+                posted_date="2026-08-20",
+            ),
+        )
+        # Simulate stale metadata that would make the broader three-day query
+        # miss. The exact persisted fingerprint must still select this row.
+        database._connection.execute(
+            "UPDATE canonical_jobs SET first_seen = ? WHERE id = ?",
+            ("2026-08-01T00:00:00+00:00", first.canonical_id),
+        )
+        database._connection.execute(
+            "UPDATE feed_observations SET posted_date = ? WHERE canonical_id = ?",
+            ("2026-08-01", first.canonical_id),
+        )
+        database._connection.commit()
+
+        duplicate = await _ingest(
+            database,
+            _observation(
+                "source-b",
+                "duplicate",
+                "https://careers.example.com/jobs/duplicate",
+                posted_date="2026-08-20",
+            ),
+        )
+
+        assert not duplicate.created
+        assert duplicate.canonical_id == first.canonical_id
+        assert await database.get_delivery_counts() == {"pending": 1}
     finally:
         await database.close()
 
