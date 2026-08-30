@@ -69,18 +69,22 @@ endpoints.
 First-party company sources live under `job_bot/company_sources/companies/`. They fetch
 company-owned careers APIs independently of Jobright, adapt results to the shared
 `JobObservation` contract, and enter the same normalization, deduplication, PostgreSQL
-outbox, and Discord delivery path. Each source receives a silent first baseline.
+outbox, and Discord delivery path. Each source receives a silent first baseline, then
+delivers new jobs independently even when a core GitHub or Jobright feed is unavailable.
 
 The fixed feed definitions live in `job_bot/github_feeds.py`. `config/sources.yaml`
 is deliberately not a runtime switchboard for the MVP. The Jobright integration derives
 its public U.S. search query from the server-rendered listing, then merges the first 100
 recommended and first 100 most-recent anonymous visitor results. This bounded scan is
-checked every main poll, avoids account-specific recommendations and unbounded scraping,
-and falls back to the public listing snapshot if the visitor API is temporarily down.
+rate-limited to one attempt every 45 minutes, avoids account-specific recommendations
+and unbounded scraping, and falls back to the public listing snapshot if the visitor API
+is temporarily down.
 Continuation rows inherit the preceding company, location cells are split and reduced to
 explicit U.S. locations, and every safe application link in a multi-apply row is observed
 before global deduplication. A second U.S.-only check runs immediately before Discord
-delivery.
+delivery. When a source supplies a usable posting date, observations older than seven
+days are rejected before normalization, database persistence, or Discord delivery;
+exactly seven days old remains eligible.
 
 ## Duplicate guarantees
 
@@ -226,9 +230,10 @@ make db-migrate
 make run-postgres
 ```
 
-On the first successful run, all ten current inventories are saved with suppressed
-deliveries and nothing is posted. A partial first run cannot complete that baseline.
-Each feed added later also gets its own silent first snapshot.
+On the first successful run, all current core inventories are saved with suppressed
+deliveries and nothing is posted. A partial core run cannot complete that shared
+baseline. Each first-party company API owns a separate silent first snapshot, so a
+failing core feed does not block new jobs from an already-baselined company source.
 
 Run the test suite with:
 
@@ -255,6 +260,10 @@ for intentionally deferred commands, process tracking, direct scraping, closures
 post editing, branding, and enrichment.
 
 ## Important modules
+
+See [First-Party Company Source Developer Guide](COMPANY_SOURCE_GUIDE.md) for the
+complete API discovery, adapter, registration, testing, dedupe, scheduling, and
+deployment workflow for adding another company careers API.
 
 - `job_bot/github_feeds.py` — feed definitions, dynamic Jobright windows, conditional
   repository fetching, and schema adapters.
