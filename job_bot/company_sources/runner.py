@@ -127,6 +127,11 @@ class CompanySourceRunner:
                     suppress_delivery=suppress_delivery,
                 )
                 stats.add_ingest(ingest)
+                if ingest.errors:
+                    raise RuntimeError(
+                        f"{len(ingest.errors)} observation ingestion error(s); "
+                        f"first: {ingest.errors[0]}"
+                    )
                 await self.database.record_feed_success(
                     source_id=source.source_id,
                     repository=source_repository,

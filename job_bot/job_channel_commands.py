@@ -15,6 +15,12 @@ from job_bot.config import (
 from job_bot.database import Database
 from job_bot.feed_publisher import TrackChannelPublisher
 from job_bot.models import AppConfig
+from job_bot.utils.feed_normalization import is_us_location
+from job_bot.utils.normalization import (
+    US_STATE_CODES,
+    direct_link_company_key,
+    normalize_location,
+)
 
 
 TRACK_CONFIG_KEYS = {
@@ -127,6 +133,30 @@ def register_job_channel_commands(
 ) -> None:
     logger = logging.getLogger("job_channel_commands")
 
+    async def require_posting_guild(
+        interaction: discord.Interaction,
+        guild: discord.Guild,
+    ) -> bool:
+        try:
+            posting_guild_id = await publisher.configured_guild_id()
+        except RuntimeError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return False
+        if guild.id == posting_guild_id:
+            return True
+        await interaction.response.send_message(
+            "This bot's job feed is bound to a different server. Job-feed settings "
+            "and subscriptions can only be changed from the established posting server.",
+            ephemeral=True,
+        )
+        logger.warning(
+            "cross_guild_job_configuration_blocked attempted_guild=%s posting_guild=%s user=%s",
+            guild.id,
+            posting_guild_id,
+            interaction.user.id,
+        )
+        return False
+
     @tree.command(
         name="job-alert",
         description="Opt in or out of the configured internship or new-grad digest alert.",
@@ -205,6 +235,182 @@ def register_job_channel_commands(
         )
 
     @tree.command(
+        name="target",
+        description="Toggle an instant alert when one company posts a job.",
+    )
+    @app_commands.guild_only()
+    @app_commands.describe(
+        company="Company to watch, such as NVIDIA, Palantir, or Microsoft.",
+        track="Whether to watch internship or new-grad jobs.",
+    )
+    @app_commands.choices(
+        track=[
+            app_commands.Choice(name="Internships", value="internship"),
+            app_commands.Choice(name="New grad", value="new_grad"),
+        ]
+    )
+    async def target(
+        interaction: discord.Interaction,
+        company: str,
+        track: app_commands.Choice[str],
+    ) -> None:
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message(
+                "This command must be used in a server.", ephemeral=True
+            )
+            return
+        if not await require_posting_guild(interaction, guild):
+            return
+
+        display_company = " ".join(company.split()).strip()
+        company_key = direct_link_company_key(display_company)
+        if not display_company or not company_key:
+            await interaction.response.send_message(
+                "Enter a company name to target.", ephemeral=True
+            )
+            return
+        if len(display_company) > 80:
+            await interaction.response.send_message(
+                "Company names must be 80 characters or fewer.", ephemeral=True
+            )
+            return
+
+        try:
+            enabled = await configurator.database.toggle_company_target_subscription(
+                guild_id=guild.id,
+                user_id=interaction.user.id,
+                track=track.value,
+                company=display_company,
+                company_key=company_key,
+            )
+        except ValueError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
+
+        safe_company = discord.utils.escape_mentions(
+            discord.utils.escape_markdown(display_company)
+        )
+        track_label = TRACK_LABELS[track.value].lower()
+        if enabled:
+            message = (
+                f"Target set for **{safe_company}** {track_label} jobs. "
+                "You'll be mentioned on each new matching post."
+            )
+            action = "enabled"
+        else:
+            message = f"Target removed for **{safe_company}** {track_label} jobs."
+            action = "disabled"
+        await interaction.response.send_message(message, ephemeral=True)
+        logger.info(
+            "company_target_subscription track=%s action=%s guild=%s user=%s company_key=%s",
+            track.value,
+            action,
+            guild.id,
+            interaction.user.id,
+            company_key,
+        )
+
+    @tree.command(
+        name="target-location",
+        description="Toggle an instant alert for one U.S. location and job track.",
+    )
+    @app_commands.guild_only()
+    @app_commands.describe(
+        track="Whether to watch internship or new-grad jobs.",
+        location="U.S. city/state, state, or Remote; for example Boulder, CO.",
+    )
+    @app_commands.choices(
+        track=[
+            app_commands.Choice(name="Internships", value="internship"),
+            app_commands.Choice(name="New grad", value="new_grad"),
+        ]
+    )
+    async def target_location(
+        interaction: discord.Interaction,
+        track: app_commands.Choice[str],
+        location: str,
+    ) -> None:
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message(
+                "This command must be used in a server.", ephemeral=True
+            )
+            return
+        if not await require_posting_guild(interaction, guild):
+            return
+
+        display_location = " ".join(location.split()).strip()
+        location_key = normalize_location(display_location)
+        explicit_us_location = is_us_location(display_location, trusted_us=False)
+        if location_key.startswith("remote") and (
+            display_location.casefold() == "remote" or explicit_us_location
+        ):
+            location_key = "remote"
+        if not display_location or not location_key:
+            await interaction.response.send_message(
+                "Enter a U.S. city and state, a state, or Remote.", ephemeral=True
+            )
+            return
+        if len(display_location) > 100:
+            await interaction.response.send_message(
+                "Locations must be 100 characters or fewer.", ephemeral=True
+            )
+            return
+        normalized_us_evidence = location_key in US_STATE_CODES or any(
+            location_key.endswith(f" {state_code}") for state_code in US_STATE_CODES
+        )
+        if (
+            location_key != "remote"
+            and not normalized_us_evidence
+            and not explicit_us_location
+        ):
+            await interaction.response.send_message(
+                "Enter an unambiguous U.S. location such as `Boulder, CO`, "
+                "`Colorado`, or `Remote`.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            enabled = await configurator.database.toggle_location_target_subscription(
+                guild_id=guild.id,
+                user_id=interaction.user.id,
+                track=track.value,
+                location=display_location,
+                location_key=location_key,
+            )
+        except ValueError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
+
+        safe_location = discord.utils.escape_mentions(
+            discord.utils.escape_markdown(display_location)
+        )
+        track_label = TRACK_LABELS[track.value].lower()
+        if enabled:
+            message = (
+                f"Location target set for **{safe_location}** {track_label} jobs. "
+                "You'll be mentioned on each new matching post."
+            )
+            action = "enabled"
+        else:
+            message = (
+                f"Location target removed for **{safe_location}** {track_label} jobs."
+            )
+            action = "disabled"
+        await interaction.response.send_message(message, ephemeral=True)
+        logger.info(
+            "location_target_subscription track=%s action=%s guild=%s user=%s "
+            "location_key=%s",
+            track.value,
+            action,
+            guild.id,
+            interaction.user.id,
+            location_key,
+        )
+
+    @tree.command(
         name="set-job-channel",
         description="Set the Discord channel for internship or new-grad job posts.",
     )
@@ -232,6 +438,8 @@ def register_job_channel_commands(
                 "Choose a text channel from this server.",
                 ephemeral=True,
             )
+            return
+        if not await require_posting_guild(interaction, guild):
             return
 
         bot_member = guild.me
@@ -303,6 +511,8 @@ def register_job_channel_commands(
             await interaction.response.send_message(
                 "This command must be used in a server.", ephemeral=True
             )
+            return
+        if not await require_posting_guild(interaction, guild):
             return
         bot_member = guild.me
         if bot_member is None and interaction.client.user is not None:
@@ -406,6 +616,8 @@ def register_job_channel_commands(
             await interaction.response.send_message(
                 "This command must be used in a server.", ephemeral=True
             )
+            return
+        if not await require_posting_guild(interaction, guild):
             return
         if role is not None:
             if role.guild.id != guild.id or role.is_default():

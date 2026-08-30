@@ -117,6 +117,49 @@ async def test_cross_source_same_location_is_one_delivery(config_factory) -> Non
 
 
 @pytest.mark.asyncio
+async def test_country_first_multi_city_copy_is_one_delivery(config_factory) -> None:
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    try:
+        repository_copy = _observation(
+            "repository",
+            "repository-copy",
+            "https://apply.careers.microsoft.com/careers/job/123",
+        )
+        repository_copy = JobObservation(
+            **{
+                **asdict(repository_copy),
+                "locations": ["Redmond, WA", "Mountain View, CA"],
+            }
+        )
+        api_copy = _observation(
+            "api",
+            "api-copy",
+            "https://apply.careers.microsoft.com/careers/job/123",
+        )
+        api_copy = JobObservation(
+            **{
+                **asdict(api_copy),
+                "locations": [
+                    "United States, Washington, Redmond",
+                    "United States, California, Mountain View",
+                ],
+            }
+        )
+
+        first = await _ingest(database, repository_copy)
+        second = await _ingest(database, api_copy)
+
+        assert first.created
+        assert not second.created
+        assert second.canonical_id == first.canonical_id
+        assert await database.get_delivery_counts() == {"pending": 1}
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_cross_source_semantic_match_requires_a_three_day_posting_window(
     config_factory,
 ) -> None:
@@ -157,6 +200,51 @@ async def test_cross_source_semantic_match_requires_a_three_day_posting_window(
         assert outside_window.created
         assert outside_window.canonical_id != first.canonical_id
         assert await database.get_delivery_counts() == {"pending": 2}
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_exact_fingerprint_survives_shifted_semantic_date_window(
+    config_factory,
+) -> None:
+    """An immutable fingerprint must win over mutable observation metadata."""
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    try:
+        first = await _ingest(
+            database,
+            _observation(
+                "source-a",
+                "a-1",
+                "https://careers.example.com/jobs/123",
+                posted_date="2026-08-20",
+            ),
+        )
+        # Reproduce the production state: a later merge has attached older
+        # posting metadata, putting the canonical outside the semantic window
+        # even though its unique fingerprint still carries the original date.
+        database._connection.execute(  # noqa: SLF001 - regression fixture
+            "UPDATE feed_observations SET posted_date = ? WHERE canonical_id = ?",
+            ("2026-08-01", first.canonical_id),
+        )
+        database._connection.commit()  # noqa: SLF001 - regression fixture
+
+        duplicate = await _ingest(
+            database,
+            _observation(
+                "source-b",
+                "b-1",
+                "https://apply.example.com/openings/987",
+                posted_date="2026-08-20",
+            ),
+        )
+
+        assert not duplicate.created
+        assert duplicate.canonical_id == first.canonical_id
+        assert (await database.get_stats())["total_canonical_jobs"] == 1
+        assert await database.get_delivery_counts() == {"pending": 1}
     finally:
         await database.close()
 

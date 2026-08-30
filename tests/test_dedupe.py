@@ -3,11 +3,32 @@ import pytest
 from job_bot.database import Database
 from job_bot.dedupe import DedupeEngine
 from job_bot.models import JobPosting
-from job_bot.utils.normalization import normalize_job_posting, normalize_location
+from job_bot.utils.normalization import (
+    location_target_matches,
+    normalize_job_posting,
+    normalize_location,
+)
 
 
 def test_normalize_location_matches_greenhouse_country_verbose_format() -> None:
     assert normalize_location("Seattle, Washington, United States") == "seattle wa"
+
+
+def test_normalize_location_matches_country_first_format() -> None:
+    assert normalize_location("United States, Washington, Redmond") == "redmond wa"
+    assert (
+        normalize_location("United States, California, Mountain View")
+        == "mountain view ca"
+    )
+
+
+def test_location_target_matching_is_exact_with_state_and_remote_options() -> None:
+    assert location_target_matches("boulder co", "boulder co")
+    assert not location_target_matches("boulder co", "denver co")
+    assert location_target_matches("co", "boulder co")
+    assert location_target_matches("co", "co boulder office")
+    assert location_target_matches("remote", "remote us")
+    assert not location_target_matches("remote", "boulder co")
 
 
 @pytest.mark.asyncio

@@ -99,3 +99,13 @@ def test_feed_outbox_migration_preserves_and_seeds_existing_posts(monkeypatch) -
 
             cursor.execute("SELECT title FROM canonical_jobs WHERE id = %s", (canonical_id,))
             assert cursor.fetchone() == ("Software Engineer Intern",)
+
+            cursor.execute(
+                "SELECT to_regclass('public.company_target_subscriptions')"
+            )
+            assert cursor.fetchone() == ("company_target_subscriptions",)
+
+            cursor.execute(
+                "SELECT to_regclass('public.location_target_subscriptions')"
+            )
+            assert cursor.fetchone() == ("location_target_subscriptions",)

@@ -38,6 +38,7 @@ DIRECT_LINK_COMPANY_ALIASES = {
     "amazon web services aws": "amazon",
     "magna international": "magna",
     "nvidia ai": "nvidia",
+    "palantir technologies": "palantir",
     "sony electronics": "sony",
 }
 TITLE_SYNONYMS = {
@@ -115,6 +116,7 @@ US_STATE_NAME_TO_CODE = {
     "wyoming": "wy",
     "district of columbia": "dc",
 }
+US_STATE_CODES = frozenset(US_STATE_NAME_TO_CODE.values())
 TRACKING_QUERY_PREFIXES = ("utm_",)
 TRACKING_QUERY_KEYS = {"ref", "referrer", "source", "gh_src", "gh_source"}
 SEASON_RE = re.compile(
@@ -175,6 +177,19 @@ def normalize_location(location: str) -> str:
     value = value.replace("–", "-").replace("—", "-")
     if value in LOCATION_ALIASES:
         return LOCATION_ALIASES[value]
+    # ApplyGuy and a few employer APIs emit locations country-first, e.g.
+    # ``United States, Washington, Redmond``. Convert that representation to
+    # the same city/state identity used by repository rows such as
+    # ``Redmond, WA`` so one requisition cannot become two Discord posts.
+    country_first = [part.strip() for part in value.split(",")]
+    if (
+        len(country_first) >= 3
+        and country_first[0] in {"united states", "usa", "us", "u.s."}
+        and country_first[1] in US_STATE_NAME_TO_CODE
+    ):
+        city = " ".join(country_first[2:]).strip()
+        if city:
+            return f"{city} {US_STATE_NAME_TO_CODE[country_first[1]]}"
     value = re.sub(r"[^a-z0-9\s,]+", " ", value)
     value = collapse_whitespace(value.replace(",", " "))
     # Greenhouse and similar boards commonly format a U.S. city as
@@ -191,6 +206,22 @@ def normalize_location(location: str) -> str:
                 value = f"{value[: -len(suffix)].strip()} {state_code}"
                 break
     return LOCATION_ALIASES.get(value, value)
+
+
+def location_target_matches(target_key: str, observed_location_key: str) -> bool:
+    """Match a normalized city, state, or remote target to one job location."""
+    if not target_key or not observed_location_key:
+        return False
+    if target_key == observed_location_key:
+        return True
+    if target_key == "remote":
+        return observed_location_key.startswith("remote")
+    if target_key in US_STATE_CODES:
+        return (
+            observed_location_key.startswith(f"{target_key} ")
+            or observed_location_key.endswith(f" {target_key}")
+        )
+    return False
 
 
 def collapse_location_cluster(locations: Iterable[str]) -> str:

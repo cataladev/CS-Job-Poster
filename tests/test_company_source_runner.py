@@ -171,6 +171,87 @@ async def test_company_source_uses_shared_cross_source_dedupe_and_direct_url_pre
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("source_baselined", [False, True])
+async def test_company_ingest_error_keeps_healthy_rows_without_completing_snapshot(
+    config_factory,
+    monkeypatch,
+    source_baselined,
+) -> None:
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    pipeline = FeedPipeline(
+        config=config,
+        database=database,
+        publisher=StubPublisher(),
+        feeds=(),
+        direct_link_feeds=(),
+    )
+    runner = CompanySourceRunner(config=config, database=database, pipeline=pipeline)
+    monkeypatch.setitem(COMPANY_SOURCE_REGISTRY, "test_corp", MutableCompanySource)
+    monkeypatch.setattr(MutableCompanySource, "error", None)
+    monkeypatch.setattr(
+        MutableCompanySource,
+        "observations",
+        [
+            _observation("broken", title="Data Engineering Intern"),
+            _observation("healthy", title="Platform Engineering Intern"),
+        ],
+    )
+    original_ingest = database.ingest_feed_job
+
+    async def fail_one_observation(**kwargs):
+        if kwargs["external_id"] == "broken":
+            raise RuntimeError("simulated company row conflict")
+        return await original_ingest(**kwargs)
+
+    monkeypatch.setattr(database, "ingest_feed_job", fail_one_observation)
+    try:
+        if source_baselined:
+            await database.record_feed_success(
+                source_id=MutableCompanySource.source_id,
+                repository="company-api/test_corp",
+                path=MutableCompanySource.source_url,
+                etag=None,
+                content_sha="previous-snapshot",
+                last_modified=None,
+            )
+
+        with pytest.raises(RuntimeError, match="1 observation ingestion error"):
+            await runner.run("test_corp", DummyHttpClient())  # type: ignore[arg-type]
+
+        state = await database.get_feed_state(MutableCompanySource.source_id)
+        assert state is not None
+        assert bool(state["baseline_complete"]) == source_baselined
+        assert state["content_sha"] == (
+            "previous-snapshot" if source_baselined else None
+        )
+        assert "simulated company row conflict" in state["last_error"]
+        assert len(await database.search_text("Platform Engineering Intern")) == 1
+        assert await database.search_text("Data Engineering Intern") == []
+        delivery_state = "pending" if source_baselined else "suppressed"
+        assert await database.get_delivery_counts() == {delivery_state: 1}
+        run = database._connection.execute(
+            "SELECT * FROM source_runs WHERE source_name = ? ORDER BY id DESC LIMIT 1",
+            (MutableCompanySource.source_id,),
+        ).fetchone()
+        assert run["status"] == "error"
+        assert run["jobs_new"] == 1
+
+        monkeypatch.setattr(database, "ingest_feed_job", original_ingest)
+        recovered = await runner.run("test_corp", DummyHttpClient())  # type: ignore[arg-type]
+        assert recovered.baseline_completed == (not source_baselined)
+        assert recovered.duplicates == 1
+        assert recovered.canonical_created == 1
+        state = await database.get_feed_state(MutableCompanySource.source_id)
+        assert state["last_error"] is None
+        assert state["content_sha"] == "snapshot"
+        assert await database.get_delivery_counts() == {delivery_state: 2}
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_company_source_failure_is_recorded_without_completing_baseline(
     config_factory,
     monkeypatch,

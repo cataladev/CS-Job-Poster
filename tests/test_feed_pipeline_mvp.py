@@ -362,7 +362,9 @@ async def test_late_direct_observation_updates_canonical_without_touching_sent_d
 
 
 @pytest.mark.asyncio
-async def test_jobright_only_delivery_waits_five_minutes_without_new_fetches(config_factory) -> None:
+async def test_jobright_only_delivery_is_immediately_ready_without_direct_match(
+    config_factory,
+) -> None:
     config = config_factory()
     database = Database(config.sqlite_db_path)
     await database.initialize()
@@ -381,12 +383,6 @@ async def test_jobright_only_delivery_waits_five_minutes_without_new_fetches(con
         update = await pipeline.run()
         assert update.deliveries_queued == 1
         assert await database.get_delivery_counts() == {"pending": 1, "suppressed": 1}
-        assert await database.list_deliveries_for_send(111) == []
-
-        database._connection.execute(  # noqa: SLF001 - deferred-delivery fixture
-            "UPDATE discord_deliveries SET not_before = '' WHERE state = 'pending'"
-        )
-        database._connection.commit()  # noqa: SLF001 - deferred-delivery fixture
         assert len(await database.list_deliveries_for_send(111)) == 1
     finally:
         await database.close()
@@ -492,6 +488,55 @@ async def test_first_complete_snapshot_is_silent_then_new_job_queues(config_fact
         repeated = await pipeline.run()
         assert repeated.deliveries_queued == 0
         assert await database.get_delivery_counts() == {"pending": 1, "suppressed": 2}
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_ingest_error_does_not_block_other_rows_or_pending_publication(
+    config_factory,
+) -> None:
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    feed = _feed("one")
+    publisher = StubPublisher()
+    fetcher = StubFetcher({"one": [_job("one", "baseline")]})
+    pipeline = FeedPipeline(
+        config=config,
+        database=database,
+        publisher=publisher,
+        feeds=(feed,),
+        fetcher=fetcher,
+    )
+    try:
+        assert (await pipeline.run()).baseline_completed
+        original_ingest = database.ingest_feed_job
+
+        async def fail_one_observation(**kwargs):
+            if kwargs["external_id"] == "broken":
+                raise RuntimeError("simulated row conflict")
+            return await original_ingest(**kwargs)
+
+        database.ingest_feed_job = fail_one_observation  # type: ignore[method-assign]
+        fetcher.snapshots["one"] = [
+            _job("one", "baseline"),
+            _job("one", "broken"),
+            _job("one", "healthy"),
+        ]
+
+        result = await pipeline.run()
+
+        assert result.deliveries_queued == 1
+        assert result.errors == [
+            "one: 1 observation ingestion error(s); "
+            "first: external_id=broken: simulated row conflict"
+        ]
+        assert publisher.calls == 2
+        assert len(await database.list_deliveries_for_send(111)) == 1
+        state = await database.get_feed_state("one")
+        assert state is not None
+        assert "simulated row conflict" in state["last_error"]
     finally:
         await database.close()
 
@@ -722,6 +767,45 @@ async def test_pipeline_rejects_only_postings_older_than_seven_days(
         assert await database.get_delivery_counts() == {"suppressed": 1}
     finally:
         await database.close()
+
+
+@pytest.mark.asyncio
+async def test_pipeline_rejects_foreign_title_when_location_has_bad_us_state_code(
+    config_factory,
+) -> None:
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    feed = _feed("one")
+    fetcher = StubFetcher(
+        {
+            "one": [
+                _job(
+                    "one",
+                    "germany-mislabeled",
+                    location="Dresden, TN",
+                    title="2026 Software Dev Engineer Intern - Germany",
+                )
+            ]
+        }
+    )
+    pipeline = FeedPipeline(
+        config=config,
+        database=database,
+        publisher=StubPublisher(),
+        feeds=(feed,),
+        fetcher=fetcher,
+    )
+    try:
+        result = await pipeline.run()
+
+        assert result.baseline_completed
+        assert result.rejected == 1
+        assert result.canonical_created == 0
+        assert await database.get_delivery_counts() == {}
+    finally:
+        await database.close()
+
 
 
 @pytest.mark.asyncio

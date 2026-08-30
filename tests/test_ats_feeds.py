@@ -404,3 +404,37 @@ def test_applyguy_parser_uses_listing_url_not_aggregator_landing_page() -> None:
 
     assert rejected == 0
     assert observations[0].application_url == "https://jobs.example.com/roles/role-1"
+
+
+def test_applyguy_parser_splits_country_first_multi_city_locations() -> None:
+    definition = FeedDefinition(
+        source_id="applyguy_internships",
+        source_label="ApplyGuy direct listings",
+        repository="ApplyGuy/2027-Internships",
+        branch="main",
+        path="data/internships.json",
+        track="internship",
+        parser=parse_applyguy_json,
+    )
+    payload = {
+        "jobs": [
+            {
+                "id": "microsoft-role",
+                "company": "Microsoft",
+                "title": "AI Software Engineering Intern",
+                "location": (
+                    "United States, Washington, Redmond · "
+                    "United States, California, Mountain View"
+                ),
+                "listingUrl": "https://apply.careers.microsoft.com/careers/job/123",
+            }
+        ]
+    }
+
+    observations, rejected = parse_applyguy_json(json.dumps(payload), definition)
+
+    assert rejected == 0
+    assert observations[0].locations == [
+        "United States, Washington, Redmond",
+        "United States, California, Mountain View",
+    ]

@@ -14,9 +14,13 @@ import discord
 from job_bot.branding import BrandingResolver
 from job_bot.database import Database
 from job_bot.models import AppConfig, CanonicalJob
-from job_bot.utils.feed_normalization import is_us_location, sanitize_application_url
+from job_bot.utils.feed_normalization import (
+    has_explicit_foreign_role_location,
+    is_us_location,
+    sanitize_application_url,
+)
 from job_bot.utils.http import AsyncHttpClient
-from job_bot.utils.normalization import normalize_company_name
+from job_bot.utils.normalization import direct_link_company_key, normalize_company_name
 
 
 FALLBACK_COMPANY_THUMBNAIL_URL = (
@@ -105,6 +109,7 @@ class TrackChannelPublisher:
             return 0, 0
         sent = 0
         reconciled = 0
+        blocked_channels: list[tuple[int, str]] = []
         channel_ids = set(await self.database.list_delivery_channel_ids_for_send())
         channel_ids.add(self.config.discord_channel_id)
         if (
@@ -131,10 +136,35 @@ class TrackChannelPublisher:
                         channel_id,
                         exc,
                     )
+                    blocked_channels.append((channel_id, str(exc)))
                     continue
                 sent += channel_sent
                 reconciled += channel_reconciled
+        if blocked_channels:
+            summary = "; ".join(
+                f"{channel_id}: {error}" for channel_id, error in blocked_channels
+            )
+            raise RuntimeError(f"Discord delivery blocked for channel(s): {summary}")
         return sent, reconciled
+
+    async def configured_guild_id(self) -> int:
+        """Resolve the one Discord server allowed to mutate feed routing."""
+        if self.client is None:
+            raise RuntimeError("Discord client is not ready")
+        channel_ids = {self.config.discord_channel_id}
+        if self.config.discord_new_grad_channel_id is not None:
+            channel_ids.add(self.config.discord_new_grad_channel_id)
+        guild_ids: set[int] = set()
+        for channel_id in channel_ids:
+            channel = await self._resolve_channel(channel_id)
+            guild = getattr(channel, "guild", None)
+            guild_id = getattr(guild, "id", None)
+            if guild_id is None:
+                raise RuntimeError(f"Configured channel {channel_id} is not attached to a server")
+            guild_ids.add(int(guild_id))
+        if len(guild_ids) != 1:
+            raise RuntimeError("Configured job channels must belong to one Discord server")
+        return next(iter(guild_ids))
 
     async def _initialize_digest_cursor(self, channel_id: int) -> None:
         """Avoid summarizing historical posts after a deployment or upgrade."""
@@ -272,9 +302,10 @@ class TrackChannelPublisher:
                 )
                 reconciled += 1
                 self.logger.info(
-                    "delivery_reconciled delivery=%s canonical=%s message=%s",
+                    "delivery_reconciled delivery=%s canonical=%s channel=%s message=%s",
                     delivery["id"],
                     canonical_id,
+                    channel_id,
                     existing_message_id,
                 )
                 continue
@@ -282,13 +313,17 @@ class TrackChannelPublisher:
             location_parts = [
                 part.strip() for part in job.location.split("|") if part.strip()
             ]
-            if not location_parts or not all(
-                is_us_location(
-                    location,
-                    trusted_us=False,
-                    context=job.canonical_url,
+            if (
+                has_explicit_foreign_role_location(job.title)
+                or not location_parts
+                or not all(
+                    is_us_location(
+                        location,
+                        trusted_us=False,
+                        context=job.canonical_url,
+                    )
+                    for location in location_parts
                 )
-                for location in location_parts
             ):
                 await self.database.mark_delivery_suppressed(
                     int(delivery["id"]),
@@ -308,22 +343,52 @@ class TrackChannelPublisher:
                 metadata=metadata,
                 http_client=http_client,
             )
+            guild = getattr(channel, "guild", None)
+            guild_id = getattr(guild, "id", None)
+            if guild_id is None:
+                raise RuntimeError(
+                    f"Configured channel {channel_id} is not attached to a server"
+                )
+            company_subscriber_ids = (
+                await self.database.list_company_target_subscriber_ids(
+                    guild_id=int(guild_id),
+                    track=job.track,
+                    company_key=direct_link_company_key(job.company),
+                )
+            )
+            location_subscriber_ids = (
+                await self.database.list_location_target_subscriber_ids(
+                    guild_id=int(guild_id),
+                    track=job.track,
+                    normalized_locations=job.normalized_locations,
+                )
+            )
+            subscriber_ids = list(
+                dict.fromkeys([*company_subscriber_ids, *location_subscriber_ids])
+            )
+            target_content, allowed_mentions = self._target_mentions(subscriber_ids)
             await self.database.mark_delivery_sending(int(delivery["id"]))
             try:
                 message = await channel.send(
+                    content=target_content,
                     embed=self.build_embed(
                         job,
                         marker=marker,
                         metadata=metadata,
                         logo_url=logo_url,
-                    )
+                    ),
+                    allowed_mentions=allowed_mentions,
                 )
             except (discord.HTTPException, asyncio.TimeoutError) as exc:
                 await self.database.mark_delivery_uncertain(int(delivery["id"]), str(exc))
                 self.logger.warning(
-                    "delivery_uncertain delivery=%s canonical=%s error=%s",
+                    "delivery_uncertain delivery=%s canonical=%s channel=%s company=%r "
+                    "title=%r error=%s",
                     delivery["id"],
                     canonical_id,
+                    channel_id,
+                    job.company,
+                    job.title,
                     exc,
                 )
                 continue
@@ -338,14 +403,36 @@ class TrackChannelPublisher:
             existing_markers[marker] = int(message.id)
             sent += 1
             self.logger.info(
-                "delivery_sent delivery=%s canonical=%s message=%s",
+                "delivery_sent delivery=%s canonical=%s channel=%s company=%r title=%r "
+                "message=%s target_subscribers=%s company_target_subscribers=%s "
+                "location_target_subscribers=%s",
                 delivery["id"],
                 canonical_id,
+                channel_id,
+                job.company,
+                job.title,
                 message.id,
+                len(subscriber_ids),
+                len(company_subscriber_ids),
+                len(location_subscriber_ids),
             )
             if self.config.publish_delay_seconds > 0:
                 await asyncio.sleep(self.config.publish_delay_seconds)
         return sent, reconciled
+
+    @staticmethod
+    def _target_mentions(user_ids: list[int]) -> tuple[str | None, discord.AllowedMentions]:
+        unique_user_ids = list(dict.fromkeys(user_ids))
+        if not unique_user_ids:
+            return None, discord.AllowedMentions.none()
+        users = [discord.Object(id=user_id) for user_id in unique_user_ids]
+        content = "🎯 " + " ".join(f"<@{user.id}>" for user in users)
+        return content, discord.AllowedMentions(
+            everyone=False,
+            users=users,
+            roles=False,
+            replied_user=False,
+        )
 
     def build_embed(
         self,

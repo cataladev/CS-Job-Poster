@@ -1,11 +1,47 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
+import discord
 import pytest
 
 from job_bot.feed_publisher import TrackChannelPublisher
 from job_bot.mvp_runtime import FeedDiscordClient
+
+
+@pytest.mark.asyncio
+async def test_commands_are_synced_only_to_the_posting_guild() -> None:
+    calls: list[tuple[str, int | None]] = []
+
+    class FakeTree:
+        def copy_global_to(self, *, guild) -> None:
+            calls.append(("copy", guild.id))
+
+        def clear_commands(self, *, guild) -> None:
+            calls.append(("clear", None if guild is None else guild.id))
+
+        async def sync(self, *, guild=None) -> None:
+            calls.append(("sync", None if guild is None else guild.id))
+
+    harness = SimpleNamespace(
+        tree=FakeTree(),
+        guilds=[discord.Object(id=123), discord.Object(id=456)],
+    )
+
+    await FeedDiscordClient._sync_commands_to_guild(
+        harness,  # type: ignore[arg-type]
+        123,
+    )
+
+    assert calls == [
+        ("copy", 123),
+        ("clear", None),
+        ("sync", 123),
+        ("sync", None),
+        ("clear", 456),
+        ("sync", 456),
+    ]
 
 
 @pytest.mark.asyncio

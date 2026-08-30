@@ -1,5 +1,8 @@
+import pytest
+
 from job_bot.utils.feed_normalization import (
     external_identity_keys,
+    has_explicit_foreign_role_location,
     is_us_location,
     location_scoped_identity_keys,
     sanitize_application_url,
@@ -40,13 +43,46 @@ def test_us_location_requires_evidence_unless_feed_is_trusted() -> None:
     assert is_us_location("Austin, TX", trusted_us=False)
     assert is_us_location("Virtual US", trusted_us=False)
     assert is_us_location("multiple US", trusted_us=False)
+    assert is_us_location("Albuquerque, New Mexico", trusted_us=False)
     assert not is_us_location("Toronto, ON, Canada", trusted_us=True)
     assert not is_us_location("Remote in Canada", trusted_us=True)
     assert not is_us_location("Asti, Italy +1", trusted_us=True)
     assert not is_us_location("Ho Chi Minh City, Vietnam", trusted_us=True)
     assert not is_us_location("Austin, TX and Toronto, Canada", trusted_us=False)
+    assert not is_us_location("Austin, TX and Milan, Italy", trusted_us=False)
+    assert not is_us_location(
+        "Austin, TX",
+        trusted_us=False,
+        context="https://jobs.example.com/germany/software-engineer",
+    )
     assert is_us_location("Remote", trusted_us=True)
     assert not is_us_location("Remote", trusted_us=False)
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "2026 Software Dev Engineer Intern - Germany",
+        "Software Engineer (India)",
+        "Software Engineer, Canada - Remote",
+        "Software Engineer based in United Kingdom",
+    ],
+)
+def test_foreign_role_location_is_detected_in_title(title) -> None:
+    assert has_explicit_foreign_role_location(title)
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Associate Product Developer - Ninja APAC",
+        "Software Engineer - New Mexico",
+        "Software Engineer - Georgia",
+        "Software Engineer, US Federal",
+    ],
+)
+def test_non_location_title_text_does_not_trigger_foreign_rejection(title) -> None:
+    assert not has_explicit_foreign_role_location(title)
 
 
 def test_exact_identity_keys_are_scoped_to_location() -> None:

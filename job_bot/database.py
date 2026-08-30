@@ -16,7 +16,11 @@ from job_bot.utils.feed_normalization import (
     role_signature,
     sanitize_application_url,
 )
-from job_bot.utils.normalization import direct_link_company_key, normalize_company_name
+from job_bot.utils.normalization import (
+    direct_link_company_key,
+    location_target_matches,
+    normalize_company_name,
+)
 
 try:
     import psycopg
@@ -423,6 +427,26 @@ CREATE TABLE IF NOT EXISTS app_state (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS company_target_subscriptions (
+    guild_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    track TEXT NOT NULL CHECK (track IN ('internship', 'new_grad')),
+    company TEXT NOT NULL,
+    company_key TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (guild_id, user_id, track, company_key)
+);
+
+CREATE TABLE IF NOT EXISTS location_target_subscriptions (
+    guild_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    track TEXT NOT NULL CHECK (track IN ('internship', 'new_grad')),
+    location TEXT NOT NULL,
+    location_key TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (guild_id, user_id, track, location_key)
+);
+
 CREATE TABLE IF NOT EXISTS feed_observations (
     source_id TEXT NOT NULL,
     external_id TEXT NOT NULL,
@@ -504,6 +528,12 @@ CREATE INDEX IF NOT EXISTS idx_process_activity_events_user_type
 
 CREATE INDEX IF NOT EXISTS idx_feed_observations_canonical
     ON feed_observations(canonical_id, source_id);
+
+CREATE INDEX IF NOT EXISTS idx_company_target_subscriptions_lookup
+    ON company_target_subscriptions(guild_id, track, company_key, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_location_target_subscriptions_lookup
+    ON location_target_subscriptions(guild_id, track, location_key, created_at);
 
 CREATE INDEX IF NOT EXISTS idx_feed_canonical_match
     ON canonical_jobs(track, normalized_company, season_term);
@@ -1858,6 +1888,151 @@ class Database:
                 self._connection.rollback()
                 raise
 
+    async def recover_misrouted_delivery_channels(
+        self,
+        *,
+        recovery_key: str,
+        source_channels: Mapping[str, int],
+        target_channels: Mapping[str, int],
+        replay_sent_after: str,
+    ) -> Dict[str, int]:
+        """Restore one accidental cross-server redirect exactly once.
+
+        Unsent deliveries are moved without changing suppression state. Messages
+        accepted by Discord after the redirect are requeued with a marker scoped
+        to the restored channel, so they can be delivered to the intended server
+        without ever duplicating a message in that channel.
+        """
+        tracks = sorted(set(source_channels).intersection(target_channels))
+        if not recovery_key or not tracks:
+            return {"channels_restored": 0, "deliveries_moved": 0, "deliveries_requeued": 0}
+
+        async with self._lock:
+            try:
+                completed = self._connection.execute(
+                    "SELECT value FROM app_state WHERE key = ?",
+                    (recovery_key,),
+                ).fetchone()
+                if completed and completed["value"] == "complete":
+                    return {
+                        "channels_restored": 0,
+                        "deliveries_moved": 0,
+                        "deliveries_requeued": 0,
+                    }
+
+                now = _utc_now()
+                channels_restored = 0
+                deliveries_moved = 0
+                deliveries_requeued = 0
+
+                for track in tracks:
+                    source_channel = str(source_channels[track])
+                    target_channel = str(target_channels[track])
+                    config_key = (
+                        "discord_channel_id"
+                        if track == "internship"
+                        else "discord_new_grad_channel_id"
+                    )
+                    cursor = self._connection.execute(
+                        """
+                        UPDATE runtime_config
+                        SET value = ?, updated_by_user_id = ?, updated_at = ?
+                        WHERE key = ? AND value = ?
+                        """,
+                        (
+                            target_channel,
+                            f"system:{recovery_key}",
+                            now,
+                            config_key,
+                            source_channel,
+                        ),
+                    )
+                    channels_restored += max(0, int(cursor.rowcount or 0))
+
+                    rows = self._connection.execute(
+                        """
+                        SELECT d.id, d.canonical_id, d.state, d.sent_at
+                        FROM discord_deliveries d
+                        JOIN canonical_jobs c ON c.id = d.canonical_id
+                        WHERE c.track = ?
+                          AND d.channel_id = ?
+                          AND (
+                              d.state IN ('suppressed', 'pending', 'sending', 'uncertain')
+                              OR (d.state = 'sent' AND d.sent_at >= ?)
+                          )
+                        ORDER BY d.id ASC
+                        """,
+                        (track, source_channel, replay_sent_after),
+                    ).fetchall()
+
+                    for row in rows:
+                        canonical_id = int(row["canonical_id"])
+                        target_post = self._connection.execute(
+                            """
+                            SELECT message_id, posted_at
+                            FROM discord_posts
+                            WHERE canonical_id = ? AND channel_id = ?
+                            """,
+                            (canonical_id, target_channel),
+                        ).fetchone()
+                        if target_post:
+                            state = "sent"
+                            message_id = str(target_post["message_id"])
+                            sent_at = str(target_post["posted_at"])
+                            last_error = None
+                        elif row["state"] == "suppressed":
+                            state = "suppressed"
+                            message_id = None
+                            sent_at = None
+                            last_error = "moved from an unintended Discord server"
+                        else:
+                            state = "pending"
+                            message_id = None
+                            sent_at = None
+                            last_error = "requeued after an unintended Discord server redirect"
+                            if row["state"] in {"sent", "sending", "uncertain"}:
+                                deliveries_requeued += 1
+
+                        self._connection.execute(
+                            """
+                            UPDATE discord_deliveries
+                            SET channel_id = ?, state = ?, marker = ?, message_id = ?,
+                                last_error = ?, not_before = '', updated_at = ?, sent_at = ?
+                            WHERE id = ?
+                            """,
+                            (
+                                target_channel,
+                                state,
+                                self._delivery_marker(canonical_id, target_channel),
+                                message_id,
+                                last_error,
+                                now,
+                                sent_at,
+                                row["id"],
+                            ),
+                        )
+                        deliveries_moved += 1
+
+                self._connection.execute(
+                    """
+                    INSERT INTO app_state (key, value, updated_at)
+                    VALUES (?, 'complete', ?)
+                    ON CONFLICT(key) DO UPDATE SET
+                        value = excluded.value,
+                        updated_at = excluded.updated_at
+                    """,
+                    (recovery_key, now),
+                )
+                self._connection.commit()
+                return {
+                    "channels_restored": channels_restored,
+                    "deliveries_moved": deliveries_moved,
+                    "deliveries_requeued": deliveries_requeued,
+                }
+            except Exception:
+                self._connection.rollback()
+                raise
+
     async def get_delivery_counts(self) -> Dict[str, int]:
         async with self._lock:
             rows = self._connection.execute(
@@ -2123,6 +2298,247 @@ class Database:
                 ORDER BY key ASC
                 """
             ).fetchall()
+
+    async def toggle_company_target_subscription(
+        self,
+        *,
+        guild_id: int,
+        user_id: int,
+        track: str,
+        company: str,
+        company_key: str,
+        max_targets_per_user: int = 50,
+        max_subscribers_per_target: int = 50,
+    ) -> bool:
+        """Toggle a target subscription and return whether it is enabled afterward."""
+        if track not in {"internship", "new_grad"}:
+            raise ValueError("Track must be internship or new_grad.")
+        if guild_id <= 0 or user_id <= 0:
+            raise ValueError("Guild and user IDs must be positive.")
+        if not company.strip() or not company_key.strip():
+            raise ValueError("Company must not be empty.")
+
+        async with self._lock:
+            try:
+                key = (str(guild_id), str(user_id), track, company_key)
+                existing = self._connection.execute(
+                    """
+                    SELECT 1
+                    FROM company_target_subscriptions
+                    WHERE guild_id = ? AND user_id = ? AND track = ? AND company_key = ?
+                    """,
+                    key,
+                ).fetchone()
+                if existing:
+                    self._connection.execute(
+                        """
+                        DELETE FROM company_target_subscriptions
+                        WHERE guild_id = ? AND user_id = ? AND track = ? AND company_key = ?
+                        """,
+                        key,
+                    )
+                    self._connection.commit()
+                    return False
+
+                user_count = self._connection.execute(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM company_target_subscriptions
+                    WHERE guild_id = ? AND user_id = ?
+                    """,
+                    (str(guild_id), str(user_id)),
+                ).fetchone()
+                if user_count and int(user_count["count"]) >= max_targets_per_user:
+                    raise ValueError(
+                        f"You can target at most {max_targets_per_user} company/track combinations."
+                    )
+
+                subscriber_count = self._connection.execute(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM company_target_subscriptions
+                    WHERE guild_id = ? AND track = ? AND company_key = ?
+                    """,
+                    (str(guild_id), track, company_key),
+                ).fetchone()
+                if (
+                    subscriber_count
+                    and int(subscriber_count["count"]) >= max_subscribers_per_target
+                ):
+                    raise ValueError(
+                        "That company and track already has the maximum number of subscribers."
+                    )
+
+                self._connection.execute(
+                    """
+                    INSERT INTO company_target_subscriptions (
+                        guild_id, user_id, track, company, company_key, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(guild_id),
+                        str(user_id),
+                        track,
+                        company,
+                        company_key,
+                        _utc_now(),
+                    ),
+                )
+                self._connection.commit()
+                return True
+            except Exception:
+                self._connection.rollback()
+                raise
+
+    async def list_company_target_subscriber_ids(
+        self,
+        *,
+        guild_id: int,
+        track: str,
+        company_key: str,
+    ) -> List[int]:
+        async with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT user_id
+                FROM company_target_subscriptions
+                WHERE guild_id = ? AND track = ? AND company_key = ?
+                ORDER BY created_at ASC, user_id ASC
+                """,
+                (str(guild_id), track, company_key),
+            ).fetchall()
+        return [int(row["user_id"]) for row in rows]
+
+    async def toggle_location_target_subscription(
+        self,
+        *,
+        guild_id: int,
+        user_id: int,
+        track: str,
+        location: str,
+        location_key: str,
+        max_targets_per_user: int = 50,
+        max_subscribers_per_target: int = 50,
+    ) -> bool:
+        """Toggle a location target and return whether it is enabled afterward."""
+        if track not in {"internship", "new_grad"}:
+            raise ValueError("Track must be internship or new_grad.")
+        if guild_id <= 0 or user_id <= 0:
+            raise ValueError("Guild and user IDs must be positive.")
+        if not location.strip() or not location_key.strip():
+            raise ValueError("Location must not be empty.")
+
+        async with self._lock:
+            try:
+                key = (str(guild_id), str(user_id), track, location_key)
+                existing = self._connection.execute(
+                    """
+                    SELECT 1
+                    FROM location_target_subscriptions
+                    WHERE guild_id = ? AND user_id = ? AND track = ? AND location_key = ?
+                    """,
+                    key,
+                ).fetchone()
+                if existing:
+                    self._connection.execute(
+                        """
+                        DELETE FROM location_target_subscriptions
+                        WHERE guild_id = ? AND user_id = ? AND track = ? AND location_key = ?
+                        """,
+                        key,
+                    )
+                    self._connection.commit()
+                    return False
+
+                user_count = self._connection.execute(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM location_target_subscriptions
+                    WHERE guild_id = ? AND user_id = ?
+                    """,
+                    (str(guild_id), str(user_id)),
+                ).fetchone()
+                if user_count and int(user_count["count"]) >= max_targets_per_user:
+                    raise ValueError(
+                        f"You can target at most {max_targets_per_user} location/track combinations."
+                    )
+
+                subscriber_count = self._connection.execute(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM location_target_subscriptions
+                    WHERE guild_id = ? AND track = ? AND location_key = ?
+                    """,
+                    (str(guild_id), track, location_key),
+                ).fetchone()
+                if (
+                    subscriber_count
+                    and int(subscriber_count["count"]) >= max_subscribers_per_target
+                ):
+                    raise ValueError(
+                        "That location and track already has the maximum number of subscribers."
+                    )
+
+                self._connection.execute(
+                    """
+                    INSERT INTO location_target_subscriptions (
+                        guild_id, user_id, track, location, location_key, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(guild_id),
+                        str(user_id),
+                        track,
+                        location,
+                        location_key,
+                        _utc_now(),
+                    ),
+                )
+                self._connection.commit()
+                return True
+            except Exception:
+                self._connection.rollback()
+                raise
+
+    async def list_location_target_subscriber_ids(
+        self,
+        *,
+        guild_id: int,
+        track: str,
+        normalized_locations: Iterable[str],
+    ) -> List[int]:
+        observed_locations = {
+            str(location).strip()
+            for location in normalized_locations
+            if str(location).strip()
+        }
+        if not observed_locations:
+            return []
+        async with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT user_id, location_key, created_at
+                FROM location_target_subscriptions
+                WHERE guild_id = ? AND track = ?
+                ORDER BY created_at ASC, user_id ASC
+                """,
+                (str(guild_id), track),
+            ).fetchall()
+
+        subscriber_ids: list[int] = []
+        seen: set[int] = set()
+        for row in rows:
+            user_id = int(row["user_id"])
+            if user_id in seen:
+                continue
+            target_key = str(row["location_key"])
+            if any(
+                location_target_matches(target_key, observed)
+                for observed in observed_locations
+            ):
+                subscriber_ids.append(user_id)
+                seen.add(user_id)
+        return subscriber_ids
 
     async def claim_command_receipt(
         self,

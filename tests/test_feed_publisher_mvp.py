@@ -148,6 +148,13 @@ async def test_crash_window_reconciles_marker_without_second_send(config_factory
     await database.initialize()
     try:
         await _create_pending_delivery(database)
+        await database.toggle_company_target_subscription(
+            guild_id=123,
+            user_id=777,
+            track="internship",
+            company="Example Corp",
+            company_key="example",
+        )
         delivery = (await database.list_deliveries_for_send(111))[0]
         await database.mark_delivery_sending(int(delivery["id"]))
 
@@ -169,6 +176,84 @@ async def test_crash_window_reconciles_marker_without_second_send(config_factory
         assert channel.sent == []
         assert await database.get_delivery_counts() == {"sent": 1}
         assert (await database.get_stats())["total_posted"] == 1
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_company_and_location_targets_ping_once_in_the_subscribed_track(
+    config_factory,
+) -> None:
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    try:
+        await database.toggle_company_target_subscription(
+            guild_id=123,
+            user_id=777,
+            track="internship",
+            company="Example Corp",
+            company_key="example",
+        )
+        await database.toggle_company_target_subscription(
+            guild_id=123,
+            user_id=888,
+            track="new_grad",
+            company="Example Corp",
+            company_key="example",
+        )
+        await database.toggle_location_target_subscription(
+            guild_id=123,
+            user_id=777,
+            track="internship",
+            location="Colorado",
+            location_key="co",
+        )
+        await database.toggle_location_target_subscription(
+            guild_id=123,
+            user_id=999,
+            track="internship",
+            location="Boulder, CO",
+            location_key="boulder co",
+        )
+        await database.toggle_location_target_subscription(
+            guild_id=123,
+            user_id=888,
+            track="new_grad",
+            location="Boulder, CO",
+            location_key="boulder co",
+        )
+        await _create_pending_delivery(
+            database,
+            track="internship",
+            channel_id=111,
+            location="Boulder, CO",
+        )
+        await _create_pending_delivery(
+            database,
+            track="new_grad",
+            channel_id=222,
+            external_id="new-grad-1",
+            location="Boulder, CO",
+        )
+        internship_channel = FakeChannel([])
+        new_grad_channel = FakeChannel([], channel_id=222)
+        publisher = TrackChannelPublisher(config, database)
+        publisher.bind_client(  # type: ignore[arg-type]
+            FakeClient({111: internship_channel, 222: new_grad_channel})
+        )
+
+        assert await publisher.publish_pending() == (2, 0)
+
+        assert internship_channel.contents == ["🎯 <@777> <@999>"]
+        assert new_grad_channel.contents == ["🎯 <@888>"]
+        assert [user.id for user in internship_channel.allowed_mentions[0].users] == [
+            777,
+            999,
+        ]
+        assert [user.id for user in new_grad_channel.allowed_mentions[0].users] == [888]
+        assert internship_channel.allowed_mentions[0].everyone is False
+        assert internship_channel.allowed_mentions[0].roles is False
     finally:
         await database.close()
 
@@ -231,6 +316,30 @@ async def test_publisher_suppresses_non_us_pending_delivery(config_factory) -> N
 
 
 @pytest.mark.asyncio
+async def test_publisher_suppresses_foreign_title_despite_us_state_code(
+    config_factory,
+) -> None:
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    try:
+        await _create_pending_delivery(
+            database,
+            location="Dresden, TN",
+            title="2026 Software Dev Engineer Intern - Germany",
+        )
+        channel = FakeChannel([])
+        publisher = TrackChannelPublisher(config, database)
+        publisher.bind_client(FakeClient(channel))  # type: ignore[arg-type]
+
+        assert await publisher.publish_pending() == (0, 0)
+        assert channel.sent == []
+        assert await database.get_delivery_counts() == {"suppressed": 1}
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_missing_history_permission_fails_closed(config_factory) -> None:
     config = config_factory()
     database = Database(config.sqlite_db_path)
@@ -247,7 +356,8 @@ async def test_missing_history_permission_fails_closed(config_factory) -> None:
         publisher = TrackChannelPublisher(config, database)
         publisher.bind_client(FakeClient(channel))  # type: ignore[arg-type]
 
-        assert await publisher.publish_pending() == (0, 0)
+        with pytest.raises(RuntimeError, match="Discord delivery blocked"):
+            await publisher.publish_pending()
 
         assert channel.sent == []
         assert await database.get_delivery_counts() == {"pending": 1}
@@ -468,7 +578,8 @@ async def test_digest_role_ping_requires_mention_everyone_permission(config_fact
         expired_cursor = (publisher._daily_digest_at(digest_now) - timedelta(days=1)).isoformat()
         await database.set_digest_cursor(111, expired_cursor)
 
-        assert await publisher.publish_pending() == (0, 0)
+        with pytest.raises(RuntimeError, match="Mention Everyone permission"):
+            await publisher.publish_pending()
         assert len(channel.sent) == 1
         assert await database.get_digest_cursor(111) == expired_cursor
     finally:
