@@ -594,8 +594,11 @@ async def test_upgrade_promotes_only_recent_suppressed_jobs_once(config_factory)
         fetcher=fetcher,
     )
     try:
-        assert (await pipeline.run()).baseline_completed
-        assert await database.get_delivery_counts() == {"suppressed": 3}
+        baseline = await pipeline.run()
+        assert baseline.baseline_completed
+        assert baseline.rejected == 1
+        assert await database.search_text("old") == []
+        assert await database.get_delivery_counts() == {"suppressed": 2}
 
         # Simulate a database created by the pre-catch-up deployment: its feed
         # baseline exists, but the new one-time migration marker does not.
@@ -607,11 +610,11 @@ async def test_upgrade_promotes_only_recent_suppressed_jobs_once(config_factory)
 
         upgraded = await pipeline.run()
         assert upgraded.deliveries_promoted == 1
-        assert await database.get_delivery_counts() == {"pending": 1, "suppressed": 2}
+        assert await database.get_delivery_counts() == {"pending": 1, "suppressed": 1}
 
         repeated = await pipeline.run()
         assert repeated.deliveries_promoted == 0
-        assert await database.get_delivery_counts() == {"pending": 1, "suppressed": 2}
+        assert await database.get_delivery_counts() == {"pending": 1, "suppressed": 1}
     finally:
         await database.close()
 
@@ -671,6 +674,52 @@ async def test_pipeline_rejects_non_us_observation_before_ingestion(config_facto
         assert result.rejected == 1
         assert result.canonical_created == 0
         assert await database.get_delivery_counts() == {}
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_pipeline_rejects_only_postings_older_than_seven_days(
+    config_factory,
+) -> None:
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    feed = _feed("one")
+    today = datetime.now(UTC).date()
+    fetcher = StubFetcher(
+        {
+            "one": [
+                _job(
+                    "one",
+                    "seven-days-old",
+                    posted_date=(today - timedelta(days=7)).isoformat(),
+                ),
+                _job(
+                    "one",
+                    "eight-days-old",
+                    posted_date=(today - timedelta(days=8)).isoformat(),
+                ),
+            ]
+        }
+    )
+    pipeline = FeedPipeline(
+        config=config,
+        database=database,
+        publisher=StubPublisher(),
+        feeds=(feed,),
+        fetcher=fetcher,
+    )
+    try:
+        result = await pipeline.run()
+
+        assert result.baseline_completed
+        assert result.observations == 2
+        assert result.rejected == 1
+        assert result.canonical_created == 1
+        assert await database.search_text("seven-days-old") != []
+        assert await database.search_text("eight-days-old") == []
+        assert await database.get_delivery_counts() == {"suppressed": 1}
     finally:
         await database.close()
 

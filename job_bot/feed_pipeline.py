@@ -67,12 +67,25 @@ class ObservationIngestStats:
 HttpClientFactory = Callable[..., AsyncHttpClient]
 JOBRIGHT_DELIVERY_WAIT = timedelta(minutes=5)
 DIRECT_ATS_CACHE_TTL = timedelta(hours=4)
+MAX_POSTING_AGE_DAYS = 7
 
 
 def _is_jobright_observation(observation: object, application_url: str) -> bool:
     source_id = str(getattr(observation, "source_id", "")).casefold()
     host = (urlsplit(application_url).hostname or "").casefold()
     return source_id.startswith("jobright") or host in {"jobright.ai", "www.jobright.ai"}
+
+
+def _posting_is_too_old(posted_date: str | None) -> bool:
+    """Reject known posting dates older than the inclusive seven-day window."""
+    raw = str(posted_date or "").strip()
+    if not raw:
+        return False
+    try:
+        posting_day = datetime.fromisoformat(raw.replace("Z", "+00:00")).date()
+    except ValueError:
+        return False
+    return (datetime.now(UTC).date() - posting_day).days > MAX_POSTING_AGE_DAYS
 
 
 class FeedPipeline:
@@ -276,6 +289,17 @@ class FeedPipeline:
         batch = tuple(observations)
         stats = ObservationIngestStats(observations=len(batch))
         for observation in batch:
+            if _posting_is_too_old(observation.posted_date):
+                stats.rejected += 1
+                self.logger.info(
+                    "observation_rejected_stale source=%s external_id=%s posted_date=%s max_age_days=%s",
+                    observation.source_id,
+                    observation.external_id,
+                    observation.posted_date,
+                    MAX_POSTING_AGE_DAYS,
+                )
+                continue
+
             if not observation.locations or not all(
                 is_us_location(
                     location,
