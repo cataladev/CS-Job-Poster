@@ -114,8 +114,10 @@ class CompanySourceRunner:
                     and state["repository"] == source_repository
                     and state["path"] == source_path
                 )
-                core_baselined = await self.database.is_initial_feed_baseline_complete()
-                suppress_delivery = not core_baselined or not source_baselined
+                # Company APIs own their baseline lifecycle. A failing GitHub or
+                # Jobright feed must not prevent a healthy first-party source
+                # from delivering jobs discovered after its silent snapshot.
+                suppress_delivery = not source_baselined
 
                 result = await source.fetch()
                 stats.pages_checked = result.pages_checked

@@ -69,27 +69,15 @@ def _observation(
     )
 
 
-async def _complete_core_baseline(database: Database) -> None:
-    await database.record_feed_success(
-        source_id="core_test",
-        repository="test/core",
-        path="jobs.json",
-        etag=None,
-        content_sha="core",
-        last_modified=None,
-    )
-    assert await database.complete_initial_feed_baseline_if_ready(["core_test"])
-
-
 @pytest.mark.asyncio
-async def test_company_source_runner_silently_baselines_then_queues_only_new_jobs(
+async def test_company_source_ignores_core_baseline_after_its_own_silent_snapshot(
     config_factory,
     monkeypatch,
 ) -> None:
     config = config_factory()
     database = Database(config.sqlite_db_path)
     await database.initialize()
-    await _complete_core_baseline(database)
+    assert not await database.is_initial_feed_baseline_complete()
     pipeline = FeedPipeline(
         config=config,
         database=database,
@@ -134,7 +122,7 @@ async def test_company_source_uses_shared_cross_source_dedupe_and_direct_url_pre
     config = config_factory()
     database = Database(config.sqlite_db_path)
     await database.initialize()
-    await _complete_core_baseline(database)
+    assert not await database.is_initial_feed_baseline_complete()
     pipeline = FeedPipeline(
         config=config,
         database=database,
