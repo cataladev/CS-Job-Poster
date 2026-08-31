@@ -1,0 +1,19 @@
+{
+  "hits": {
+    "total": {"value": 2, "relation": "eq"},
+    "hits": [
+      {
+        "_id": "ibm-hit-99001",
+        "_source": {
+          "title": "Entry Level Software Engineer",
+          "url": "https://careers.ibm.com/careers/JobDetail?jobId=99001",
+          "field_keyword_05": "USA",
+          "field_keyword_08": "Software Engineering",
+          "field_keyword_18": "Entry Level",
+          "field_keyword_19": "Multiple Cities",
+          "dcdate": "2026-08-14"
+        }
+      }
+    ]
+  }
+}

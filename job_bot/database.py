@@ -14,7 +14,6 @@ from job_bot.utils.feed_normalization import (
     is_aggregator_application_url,
     preferred_application_url,
     role_signature,
-    role_title_key,
     sanitize_application_url,
 )
 from job_bot.utils.normalization import (
@@ -79,6 +78,13 @@ def _feed_locations_overlap(
     return bool(incoming_locations.intersection(candidate_locations)) or (
         "us" in incoming_locations or "us" in candidate_locations
     )
+
+
+def _feed_locations_match_exactly(
+    incoming_locations: set[str], candidate_locations: set[str]
+) -> bool:
+    """Require the same normalized location set for metadata-only dedupe."""
+    return incoming_locations == candidate_locations
 
 
 def _season_terms_compatible(incoming: str, candidate: str) -> bool:
@@ -1196,19 +1202,6 @@ class Database:
         async with self._lock:
             try:
                 candidate_ids: set[int] = set()
-                # The fingerprint column is the final canonical uniqueness guard.
-                # Look it up explicitly before the broader evidence checks below:
-                # an older observation can move a canonical's semantic date window
-                # while its immutable fingerprint still identifies this exact role
-                # and posting date.  Missing this lookup made the subsequent INSERT
-                # raise a unique-constraint error and abort the whole feed run.
-                fingerprint_match = self._connection.execute(
-                    "SELECT id FROM canonical_jobs WHERE dedupe_fingerprint = ?",
-                    (feed_dedupe_fingerprint,),
-                ).fetchone()
-                if fingerprint_match:
-                    candidate_ids.add(int(fingerprint_match["id"]))
-
                 observation = self._connection.execute(
                     """
                     SELECT canonical_id FROM feed_observations
@@ -1218,6 +1211,15 @@ class Database:
                 ).fetchone()
                 if observation:
                     candidate_ids.add(int(observation["canonical_id"]))
+
+                # This is both the fastest exact-role check and a guard against
+                # attempting an insert that the unique constraint will reject.
+                fingerprint_match = self._connection.execute(
+                    "SELECT id FROM canonical_jobs WHERE dedupe_fingerprint = ?",
+                    (feed_dedupe_fingerprint,),
+                ).fetchone()
+                if fingerprint_match:
+                    candidate_ids.add(int(fingerprint_match["id"]))
 
                 if keys:
                     placeholders = ", ".join("?" for _ in keys)
@@ -1263,9 +1265,7 @@ class Database:
                     same_cycle = (row["season_term"] or "").casefold() == (
                         job.season_term or ""
                     ).casefold()
-                    same_title = role_title_key(
-                        row["normalized_title"], row["season_term"]
-                    ) == role_title_key(job.normalized_title, job.season_term)
+                    same_title = row["normalized_title"] == job.normalized_title
                     if (
                         same_cycle
                         and same_title
@@ -1274,7 +1274,7 @@ class Database:
                             candidate_posted_date=row["first_posted_date"],
                             candidate_first_seen=row["first_seen"],
                         )
-                        and _feed_locations_overlap(
+                        and _feed_locations_match_exactly(
                             job_locations, candidate_locations
                         )
                     ):
@@ -1286,7 +1286,7 @@ class Database:
                     created = False
                 else:
                     now = _utc_now()
-                    canonical_id = self._insert_and_get_id(
+                    inserted = self._connection.execute(
                         """
                         INSERT INTO canonical_jobs (
                             track, title, company, location, summary, canonical_url,
@@ -1294,6 +1294,8 @@ class Database:
                             normalized_company, normalized_title, normalized_locations,
                             dedupe_fingerprint, source_names, provenance_tags, first_seen, last_seen
                         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(dedupe_fingerprint) DO NOTHING
+                        RETURNING id
                         """,
                         (
                             job.track,
@@ -1315,8 +1317,24 @@ class Database:
                             now,
                             now,
                         ),
-                    )
-                    created = True
+                    ).fetchone()
+                    if inserted:
+                        canonical_id = int(inserted["id"])
+                        created = True
+                    else:
+                        # Another database connection may insert the exact role
+                        # after our lookup but before this statement. Treat that
+                        # normal race as a duplicate instead of aborting a poll.
+                        conflict = self._connection.execute(
+                            "SELECT id FROM canonical_jobs WHERE dedupe_fingerprint = ?",
+                            (feed_dedupe_fingerprint,),
+                        ).fetchone()
+                        if not conflict:
+                            raise RuntimeError(
+                                "canonical fingerprint conflict did not return an existing row"
+                            )
+                        canonical_id = int(conflict["id"])
+                        created = False
 
                 canonical_row = self._connection.execute(
                     "SELECT source_names, provenance_tags, summary, canonical_url FROM canonical_jobs WHERE id = ?",

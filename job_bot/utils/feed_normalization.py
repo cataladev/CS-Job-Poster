@@ -167,15 +167,6 @@ _AGGREGATOR_APPLICATION_HOSTS = frozenset(
         "www.speedyapply.com",
     }
 )
-_TITLE_DATE_TOKENS = frozenset(
-    {
-        "jan", "january", "feb", "february", "mar", "march", "apr", "april",
-        "may", "jun", "june", "jul", "july", "aug", "august", "sep", "sept",
-        "september", "oct", "october", "nov", "november", "dec", "december",
-    }
-)
-
-
 @dataclass(frozen=True)
 class SafeUrl:
     url: str
@@ -375,31 +366,20 @@ def role_signature(
     cycle: str | None,
     normalized_locations: list[str],
 ) -> str:
+    """Build an exact normalized role identity for canonical persistence.
+
+    This deliberately keeps every normalized title token. Near matches such as
+    ``Software Engineer Intern`` and ``Software Engineer Intern Co-op`` are
+    separate roles unless stronger source/ATS identity evidence links them.
+    """
     payload = {
         "track": track,
         "company": company,
-        "title": role_title_key(title, cycle),
+        "title": title.casefold(),
         "cycle": (cycle or "").casefold(),
         "locations": sorted(set(normalized_locations)),
     }
     digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
-    return f"role:{digest}"
-
-
-def role_title_key(normalized_title: str, cycle: str | None) -> str:
-    """Remove title tokens already represented by the separate cycle identity.
-
-    Sources commonly append a start month, such as ``(Dec 2026)``, while the
-    company ATS and another repo use the same role name without it. The date is
-    availability metadata, not a distinct role identity.
-    """
-    cycle_tokens = set(re.findall(r"[a-z0-9]+", (cycle or "").casefold()))
-    removable = cycle_tokens.intersection(
-        {"summer", "fall", "winter", "spring"}
-        | {str(year) for year in range(2020, 2041)}
-    )
-    return " ".join(
-        token
-        for token in normalized_title.casefold().split()
-        if token not in removable and token not in _TITLE_DATE_TOKENS
-    )
+    # Version the exact signature so it cannot collide with canonical rows
+    # created by the older cycle-token-stripping signature.
+    return f"role-exact-v2:{digest}"

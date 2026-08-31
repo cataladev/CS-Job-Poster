@@ -2,15 +2,17 @@
 
 A focused Discord publisher for curated U.S. internships and new-grad roles.
 
-The bot polls ten U.S. aggregator surfaces (eight from five GitHub repositories and two
-public Jobright listings) plus direct, public employer ATS boards. It combines every
-successful snapshot, removes duplicates across sources, and publishes newly added roles
-to separate internship and new-grad Discord channels. Its MVP commands configure posting
-channels, optional digest-alert roles, and personal company targets.
+The bot polls U.S. aggregator surfaces, direct public employer ATS boards, and
+first-party company careers APIs. It combines every successful snapshot, removes
+duplicates across sources, and publishes newly added roles to separate internship and
+new-grad Discord channels. Its MVP commands configure posting channels and optional
+digest-alert roles, plus personal company and location targets.
 
 ## Runtime behavior
 
 - Polls every five minutes by default.
+- Polls registered first-party company APIs independently every hour by default; IBM is
+  the first registered company source.
 - Runs the GitHub and Jobright core feeds in their own five-minute loop, so a slow
   direct-employer sweep cannot delay new internship or new-grad Discord posts.
 - Derives 309 unique direct employer boards from the bundled company seed: Greenhouse,
@@ -64,16 +66,25 @@ then uses an unambiguous direct match while retaining Jobright as fallback. This
 polling every employer board on every cycle and does not use HTML rendering or login-only
 endpoints.
 
+First-party company sources live under `job_bot/company_sources/companies/`. They fetch
+company-owned careers APIs independently of Jobright, adapt results to the shared
+`JobObservation` contract, and enter the same normalization, deduplication, PostgreSQL
+outbox, and Discord delivery path. Each source receives a silent first baseline, then
+delivers new jobs independently even when a core GitHub or Jobright feed is unavailable.
+
 The fixed feed definitions live in `job_bot/github_feeds.py`. `config/sources.yaml`
 is deliberately not a runtime switchboard for the MVP. The Jobright integration derives
 its public U.S. search query from the server-rendered listing, then merges the first 100
 recommended and first 100 most-recent anonymous visitor results. This bounded scan is
-checked every main poll, avoids account-specific recommendations and unbounded scraping,
-and falls back to the public listing snapshot if the visitor API is temporarily down.
+rate-limited to one attempt every 45 minutes, avoids account-specific recommendations
+and unbounded scraping, and falls back to the public listing snapshot if the visitor API
+is temporarily down.
 Continuation rows inherit the preceding company, location cells are split and reduced to
 explicit U.S. locations, and every safe application link in a multi-apply row is observed
 before global deduplication. A second U.S.-only check runs immediately before Discord
-delivery.
+delivery. When a source supplies a usable posting date, observations older than seven
+days are rejected before normalization, database persistence, or Discord delivery;
+exactly seven days old remains eligible.
 
 ## Duplicate guarantees
 
@@ -82,13 +93,17 @@ Duplicate prevention is persistent and happens before Discord delivery:
 1. Every upstream row is recorded by `(source_id, external_id)`.
 2. Canonical keys cover sanitized application URLs, stable ATS requisition IDs, and a
    normalized company/title/cycle/location signature. URL and requisition identities
-   are location-scoped.
-3. Matching company/title/cycle roles merge whenever their normalized locations
-   overlap. Disjoint locations remain distinct, even when repositories reuse the same
-   application URL or requisition ID.
-4. A transactional outbox permits only one delivery globally per canonical
+   remain location-scoped.
+3. Without stable identity evidence, roles merge only when track, normalized company,
+   normalized title, cycle, and the complete normalized location set match exactly,
+   and their posting dates fall within three days. Near titles such as an internship
+   and a co-op remain distinct.
+4. Exact fingerprint inserts are conflict-safe, so a duplicate discovered by another
+   database connection attaches to the existing canonical job instead of stopping the
+   polling run.
+5. A transactional outbox permits only one delivery globally per canonical
    role/location, so a channel change cannot replay an already known job.
-5. Every embed contains a stable delivery marker. Before a send or retry, the bot
+6. Every embed contains a stable delivery marker. Before a send or retry, the bot
    searches channel history for that marker and repairs the receipt when Discord
    accepted an earlier request whose database commit was interrupted.
 
@@ -193,6 +208,7 @@ Optional runtime settings:
 ```dotenv
 POLL_INTERVAL_SECONDS=300
 DIRECT_ATS_POLL_INTERVAL_SECONDS=900
+COMPANY_SOURCE_POLL_INTERVAL_SECONDS=3600
 DIGEST_INTERVAL_SECONDS=14400
 DISCORD_INTERNSHIP_ALERT_ROLE_ID=
 DISCORD_NEW_GRAD_ALERT_ROLE_ID=
@@ -206,7 +222,9 @@ USER_AGENT=cs-job-poster/2.0
 ```
 
 `POLL_INTERVAL_SECONDS` has a minimum of 30 seconds; `DIRECT_ATS_POLL_INTERVAL_SECONDS`
-has a minimum of five minutes; `DIGEST_INTERVAL_SECONDS` has a minimum of 15 minutes.
+and `COMPANY_SOURCE_POLL_INTERVAL_SECONDS` have a minimum of five minutes;
+`DIGEST_INTERVAL_SECONDS` has a minimum of 15 minutes. First-party company API
+sources run independently of Jobright and default to an hourly collection cycle.
 The alert-role environment values are optional and can be overridden live with
 `/set-job-alert-role`. `RECENT_CATCHUP_HOURS` is a one-time upgrade bridge: an
 already-baselined deployment queues suppressed roles whose source date falls in that
@@ -241,9 +259,10 @@ make db-migrate
 make run-postgres
 ```
 
-On the first successful run, all ten current inventories are saved with suppressed
-deliveries and nothing is posted. A partial first run cannot complete that baseline.
-Each feed added later also gets its own silent first snapshot.
+On the first successful run, all current core inventories are saved with suppressed
+deliveries and nothing is posted. A partial core run cannot complete that shared
+baseline. Each first-party company API owns a separate silent first snapshot, so a
+failing core feed does not block new jobs from an already-baselined company source.
 
 Run the test suite with:
 
@@ -271,11 +290,30 @@ post editing, branding, and enrichment.
 
 ## Important modules
 
+See [First-Party Company Source Developer Guide](COMPANY_SOURCE_GUIDE.md) for the
+complete API discovery, adapter, registration, testing, dedupe, scheduling, and
+deployment workflow for adding another company careers API.
+
 - `job_bot/github_feeds.py` — feed definitions, dynamic Jobright windows, conditional
   repository fetching, and schema adapters.
 - `job_bot/utils/feed_normalization.py` — location handling, link safety, ATS keys.
 - `job_bot/feed_pipeline.py` — concurrent collection, silent baselines, ingestion.
+- `job_bot/company_sources/` — first-party company API adapters, registry, runner, and
+  independent collection pipeline.
 - `job_bot/database.py` — observations, canonical merging, delivery outbox.
 - `job_bot/feed_publisher.py` — Discord embeds and marker reconciliation.
 - `job_bot/job_channel_commands.py` — persisted admin-only channel configuration.
 - `job_bot/mvp_runtime.py` — one-client scheduler, slash commands, and process lock.
+
+Run a read-only live IBM smoke test without a database or Discord connection:
+
+```bash
+.venv/bin/python scripts/smoke_ibm_source.py --show 10
+```
+
+Run the live IBM source twice through normalization, dedupe, and the configured
+development PostgreSQL database without connecting to Discord:
+
+```bash
+.venv/bin/python scripts/test_ibm_database_workflow.py --runs 2
+```

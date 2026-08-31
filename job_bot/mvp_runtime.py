@@ -8,7 +8,12 @@ import discord
 from discord import app_commands
 
 from job_bot.ats_feeds import build_direct_ats_feeds
-from job_bot.config import apply_runtime_channel_overrides, configure_logging, load_config
+from job_bot.company_sources.runner import CompanySourcePipeline
+from job_bot.config import (
+    apply_runtime_channel_overrides,
+    configure_logging,
+    load_config,
+)
 from job_bot.database import Database
 from job_bot.feed_pipeline import FeedPipeline
 from job_bot.feed_publisher import TrackChannelPublisher
@@ -39,6 +44,7 @@ class FeedDiscordClient(discord.Client):
         config: AppConfig,
         database: Database,
         pipeline: FeedPipeline,
+        company_source_pipeline: CompanySourcePipeline,
         publisher: TrackChannelPublisher,
     ) -> None:
         intents = discord.Intents.default()
@@ -47,6 +53,7 @@ class FeedDiscordClient(discord.Client):
         super().__init__(intents=intents)
         self.config = config
         self.pipeline = pipeline
+        self.company_source_pipeline = company_source_pipeline
         self.publisher = publisher
         self.logger = logging.getLogger(self.__class__.__name__)
         self.tree = app_commands.CommandTree(self)
@@ -86,6 +93,11 @@ class FeedDiscordClient(discord.Client):
             pipeline=self.pipeline,
             interval_seconds=self.config.poll_interval_seconds,
         )
+        self._ensure_poll_task(
+            name="company_sources",
+            pipeline=self.company_source_pipeline,
+            interval_seconds=self.config.company_source_poll_interval_seconds,
+        )
 
     async def _sync_commands_to_guild(self, guild_id: int) -> None:
         guild = discord.Object(id=guild_id)
@@ -121,7 +133,7 @@ class FeedDiscordClient(discord.Client):
         self,
         *,
         name: str,
-        pipeline: FeedPipeline,
+        pipeline: FeedPipeline | CompanySourcePipeline,
         interval_seconds: int,
     ) -> None:
         poll_task = self._poll_tasks.get(name)
@@ -138,7 +150,7 @@ class FeedDiscordClient(discord.Client):
     async def _poll_loop(
         self,
         *,
-        pipeline: FeedPipeline,
+        pipeline: FeedPipeline | CompanySourcePipeline,
         interval_seconds: int,
         feed_group: str,
     ) -> None:
@@ -231,6 +243,11 @@ async def run_bot() -> None:
         feeds=FEEDS,
         direct_link_feeds=direct_link_feeds,
     )
+    company_source_pipeline = CompanySourcePipeline(
+        config=config,
+        database=database,
+        feed_pipeline=pipeline,
+    )
     logger.info(
         "bounded_direct_link_resolver_enabled boards=%s cache_ttl_seconds=%s",
         len(direct_link_feeds),
@@ -240,6 +257,7 @@ async def run_bot() -> None:
         config=config,
         database=database,
         pipeline=pipeline,
+        company_source_pipeline=company_source_pipeline,
         publisher=publisher,
     )
     publisher.bind_client(client)

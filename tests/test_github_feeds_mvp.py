@@ -190,6 +190,16 @@ def test_runtime_feeds_cover_only_us_job_surfaces() -> None:
     assert all("INTL" not in feed.path for feed in FEEDS)
     assert all(not feed.trusted_us for feed in FEEDS)
     assert {feed.provider for feed in FEEDS if feed.repository == "jobright.ai"} == {"jobright"}
+    assert {
+        feed.poll_interval_seconds
+        for feed in FEEDS
+        if feed.repository == "jobright.ai"
+    } == {2_700}
+    assert all(
+        feed.poll_interval_seconds == 0
+        for feed in FEEDS
+        if feed.repository != "jobright.ai"
+    )
 
 
 def test_jobright_parser_uses_public_us_listings_and_keeps_tracks_separate() -> None:

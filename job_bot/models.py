@@ -212,6 +212,7 @@ class AppConfig:
     digest_hour_local: int = 16
     digest_timezone: str = "America/New_York"
     direct_ats_poll_interval_seconds: int = 900
+    company_source_poll_interval_seconds: int = 3600
     discord_internship_alert_role_id: Optional[int] = None
     discord_new_grad_alert_role_id: Optional[int] = None
 

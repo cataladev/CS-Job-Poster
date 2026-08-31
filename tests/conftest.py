@@ -38,6 +38,7 @@ def config_factory(tmp_path):
             user_agent="test-agent",
             company_seed_path=str(tmp_path / "company_watchlist_seed.csv"),
             source_settings=source_settings or {},
+            company_source_poll_interval_seconds=3600,
         )
 
     return _factory

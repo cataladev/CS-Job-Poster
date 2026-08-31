@@ -92,6 +92,7 @@ WORKDAY_PUBLIC_USER_AGENT = (
     "Mozilla/5.0 (compatible; LennyFindsJobs/1.0; "
     "+https://github.com/LennyFindsJobs)"
 )
+JOBRIGHT_POLL_INTERVAL_SECONDS = 45 * 60
 
 
 @dataclass(frozen=True)
@@ -764,6 +765,7 @@ FEEDS: tuple[FeedDefinition, ...] = (
         parse_jobright_next_data,
         fetch_url="https://jobright.ai/jobs/software-engineer-intern-jobs-in-united-states",
         provider="jobright",
+        poll_interval_seconds=JOBRIGHT_POLL_INTERVAL_SECONDS,
     ),
     FeedDefinition(
         "jobright_new_grad",
@@ -775,6 +777,7 @@ FEEDS: tuple[FeedDefinition, ...] = (
         parse_jobright_next_data,
         fetch_url="https://jobright.ai/jobs/software-engineer-new-graduate-jobs-in-united-states",
         provider="jobright",
+        poll_interval_seconds=JOBRIGHT_POLL_INTERVAL_SECONDS,
     ),
 )
 
