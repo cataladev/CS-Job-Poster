@@ -1,4 +1,7 @@
 .env
+# Proxy lists carry credentials; keep every copy out of the repository.
+*proxies*.txt
+*.proxies
 .venv/
 .pycache/
 __pycache__/
@@ -10,3 +13,8 @@ __pycache__/
 .DS_Store
 playwright-report/
 *.egg-info/
+
+# Local soak-test artifacts (never committed)
+jobright-soak.log
+bot.pid
+jobright-monitor-state.json

@@ -1,18 +1,30 @@
+import asyncio
 import json
 from pathlib import Path
 
+import aiohttp
 import pytest
 
+from job_bot.feed_health import _format_duration
 from job_bot.github_feeds import (
     FEEDS,
+    JOBRIGHT_BLOCK_BACKOFF_STEPS,
+    JOBRIGHT_MAX_EGRESS_ATTEMPTS,
+    JOBRIGHT_POLL_INTERVAL_SECONDS,
+    JOBRIGHT_PUBLIC_WINDOW_SIZE,
+    JOBRIGHT_TAXONOMY_IDS,
+    build_jobright_public_query,
     FeedDefinition,
     GitHubFeedFetcher,
+    classify_jobright_failure,
+    jobright_backoff_seconds,
     parse_intern_engine_json,
     parse_jobright_next_data,
     parse_jobright_public_cards,
     parse_markdown_table,
     parse_simplify_json,
 )
+from job_bot.utils.http import ProxyEndpoint
 
 
 FIXTURES = Path("tests/fixtures")
@@ -325,36 +337,45 @@ def test_jobright_parser_keeps_jobright_as_the_primary_application_url() -> None
     assert jobs[1].application_url == "https://jobright.ai/jobs/info/invalid-original"
 
 
-@pytest.mark.asyncio
-async def test_jobright_fetcher_merges_recommended_and_recent_public_windows() -> None:
-    definition = FeedDefinition(
-        "jobright_internships",
+def _jobright_definition(track: str = "internship") -> FeedDefinition:
+    source_id = "jobright_internships" if track == "internship" else "jobright_new_grad"
+    path = (
+        "software-engineer-intern-jobs-in-united-states"
+        if track == "internship"
+        else "software-engineer-new-graduate-jobs-in-united-states"
+    )
+    return FeedDefinition(
+        source_id,
         "Jobright",
         "jobright.ai",
         "public",
-        "software-engineer-intern-jobs-in-united-states",
-        "internship",
+        path,
+        track,
         parse_jobright_next_data,
-        fetch_url="https://jobright.ai/jobs/software-engineer-intern-jobs-in-united-states",
+        fetch_url=f"https://jobright.ai/jobs/{path}",
         provider="jobright",
+        poll_interval_seconds=JOBRIGHT_POLL_INTERVAL_SECONDS,
     )
-    query = {"country": "US", "value": "Software Engineer Intern"}
+
+
+@pytest.mark.asyncio
+async def test_jobright_fetcher_requests_the_computer_science_taxonomy_window() -> None:
+    definition = _jobright_definition()
 
     class FakeHttpClient:
-        headers = None
-        requests: list[str] = []
+        def __init__(self) -> None:
+            self.requests: list[str] = []
+            self.bodies: list[dict] = []
+            self.listing_fetches = 0
 
         async def get_text(self, _url, *, headers):
-            self.headers = headers
-            return _jobright_html(query, [_jobright_card("intern-1")]), {"ETag": '"page"'}, 200
+            self.listing_fetches += 1
+            return _jobright_html({}, [_jobright_card("listing-only")]), {}, 200
 
         async def post_json(self, url, *, json):
             self.requests.append(url)
-            assert json == query
-            if "sortCondition=0" in url:
-                cards = [_jobright_card("intern-1"), _jobright_card("intern-2")]
-            else:
-                cards = [_jobright_card("intern-2"), _jobright_card("intern-3")]
+            self.bodies.append(json)
+            cards = [_jobright_card("intern-1"), _jobright_card("intern-2")]
             return {"success": True, "result": {"jobList": cards}}, {}, 200
 
     client = FakeHttpClient()
@@ -365,45 +386,419 @@ async def test_jobright_fetcher_merges_recommended_and_recent_public_windows() -
         last_modified="Wed, 12 Aug 2026 12:00:00 GMT",
     )
 
-    assert client.headers == {}
-    assert len(client.requests) == 2
-    assert {"sortCondition=0", "sortCondition=1"} == {
-        "sortCondition=0" if "sortCondition=0" in url else "sortCondition=1"
-        for url in client.requests
-    }
-    assert [job.external_id for job in result.observations] == ["intern-1", "intern-2", "intern-3"]
-    assert result.rejected == 0
+    # The listing page is a fallback surface only; a healthy poll never fetches it.
+    assert client.listing_fetches == 0
+    assert len(client.requests) == 1
+    assert f"count={JOBRIGHT_PUBLIC_WINDOW_SIZE}" in client.requests[0]
+    assert "sortCondition=1" in client.requests[0]
+
+    body = client.bodies[0]
+    assert [entry["taxonomyId"] for entry in body["jobTaxonomyList"]] == list(
+        JOBRIGHT_TAXONOMY_IDS
+    )
+    assert body["seniority"] == [1]
+    assert [job.external_id for job in result.observations] == ["intern-1", "intern-2"]
+    assert result.degraded_reason is None
 
 
 @pytest.mark.asyncio
-async def test_jobright_fetcher_uses_ssr_snapshot_when_public_windows_fail() -> None:
-    definition = FeedDefinition(
-        "jobright_internships",
-        "Jobright",
-        "jobright.ai",
-        "public",
-        "software-engineer-intern-jobs-in-united-states",
-        "internship",
-        parse_jobright_next_data,
-        fetch_url="https://jobright.ai/jobs/software-engineer-intern-jobs-in-united-states",
-        provider="jobright",
-    )
-    query = {"country": "US", "value": "Software Engineer Intern"}
+async def test_jobright_fetcher_shares_one_window_across_both_tracks() -> None:
+    class CountingHttpClient:
+        def __init__(self) -> None:
+            self.post_count = 0
 
-    class FailingWindowHttpClient:
         async def get_text(self, _url, *, headers):
-            return _jobright_html(query, [_jobright_card("intern-1")]), {}, 200
+            raise AssertionError("the listing page must not be fetched on a healthy poll")
 
         async def post_json(self, _url, *, json):
-            raise RuntimeError("temporary Jobright outage")
+            self.post_count += 1
+            cards = [
+                _jobright_card("intern-1"),
+                _jobright_card(
+                    "grad-1",
+                    title="Software Engineer I - Platform",
+                    seniority="Entry Level",
+                    employment_type="Full-time",
+                ),
+            ]
+            return {"success": True, "result": {"jobList": cards}}, {}, 200
 
-    result = await GitHubFeedFetcher().fetch(
+    client = CountingHttpClient()
+    fetcher = GitHubFeedFetcher()
+    internships, new_grads = await asyncio.gather(
+        fetcher.fetch(_jobright_definition("internship"), client),  # type: ignore[arg-type]
+        fetcher.fetch(_jobright_definition("new_grad"), client),  # type: ignore[arg-type]
+    )
+
+    assert client.post_count == 1
+    assert [job.external_id for job in internships.observations] == ["intern-1"]
+    assert [job.external_id for job in new_grads.observations] == ["grad-1"]
+
+
+@pytest.mark.asyncio
+async def test_jobright_fetcher_marks_the_listing_fallback_as_degraded() -> None:
+    definition = _jobright_definition()
+
+    class BlockedWindowHttpClient:
+        async def get_text(self, _url, *, headers):
+            return _jobright_html({}, [_jobright_card("intern-1")]), {}, 200
+
+        async def post_json(self, _url, *, json):
+            raise RuntimeError(
+                "POST https://jobright.ai/swan/recommend/visitor-list/jobs returned 403"
+            )
+
+    fetcher = GitHubFeedFetcher()
+    result = await fetcher.fetch(
         definition,
-        FailingWindowHttpClient(),  # type: ignore[arg-type]
+        BlockedWindowHttpClient(),  # type: ignore[arg-type]
     )
 
     assert [job.external_id for job in result.observations] == ["intern-1"]
     assert result.rejected == 0
+    # A truncated listing snapshot stays usable, but never reports itself as healthy.
+    assert result.degraded_reason == "blocked"
+
+
+@pytest.mark.asyncio
+async def test_jobright_fetcher_stops_contacting_a_refusing_source() -> None:
+    definition = _jobright_definition()
+
+    class BlockedWindowHttpClient:
+        def __init__(self) -> None:
+            self.post_attempts = 0
+
+        async def get_text(self, _url, *, headers):
+            return _jobright_html({}, [_jobright_card("intern-1")]), {}, 200
+
+        async def post_json(self, _url, *, json):
+            self.post_attempts += 1
+            raise TimeoutError("connection timed out")
+
+    fetcher = GitHubFeedFetcher()
+    assert fetcher.jobright_seconds_until_retry() == 0
+
+    client = BlockedWindowHttpClient()
+    first = await fetcher.fetch(definition, client)  # type: ignore[arg-type]
+
+    assert first.degraded_reason == "timeout"
+    assert client.post_attempts == 1
+    assert fetcher.jobright_seconds_until_retry() > 0
+
+    # The next poll must not add traffic to a door Jobright has already closed.
+    second = await fetcher.fetch(definition, client)  # type: ignore[arg-type]
+
+    assert second.skipped is True
+    assert second.degraded_reason == "backoff"
+    assert second.observations == []
+    assert client.post_attempts == 1
+
+
+class _RecordingJobrightClient:
+    """Answers the visitor window per egress address, recording what it was sent."""
+
+    def __init__(self, *, blocked_proxies: tuple[str, ...] = ()) -> None:
+        self.blocked_proxies = blocked_proxies
+        self.window_calls: list[dict[str, object]] = []
+        self.listing_calls: list[dict[str, object]] = []
+
+    async def get_text(self, _url, *, headers, **kwargs):
+        self.listing_calls.append(kwargs)
+        return _jobright_html({}, [_jobright_card("listing-1")]), {}, 200
+
+    async def post_json(self, _url, *, json, **kwargs):
+        self.window_calls.append(kwargs)
+        proxy = str(kwargs.get("proxy", ""))
+        if any(blocked in proxy for blocked in self.blocked_proxies):
+            raise RuntimeError(
+                "POST https://jobright.ai/swan/recommend/visitor-list/jobs returned 403"
+            )
+        return {"success": True, "result": {"jobList": [_jobright_card("intern-1")]}}, {}, 200
+
+
+def _proxy(host: str, *, credentials: bool = False) -> ProxyEndpoint:
+    return ProxyEndpoint(
+        url=f"http://{host}:8080",
+        username="isp-user" if credentials else None,
+        password="isp-secret" if credentials else None,
+    )
+
+
+class _RecordingNotifier:
+    def __init__(self) -> None:
+        self.messages: list[str] = []
+
+    async def send(self, message: str) -> bool:
+        self.messages.append(message)
+        return True
+
+
+@pytest.mark.asyncio
+async def test_jobright_announces_boot_rotation_degradation_and_recovery() -> None:
+    definition = _jobright_definition()
+    notifier = _RecordingNotifier()
+    client = _RecordingJobrightClient()
+    fetcher = GitHubFeedFetcher(
+        jobright_proxies=[_proxy("isp-a.example.com"), _proxy("isp-b.example.com")],
+        jobright_notifier=notifier,  # type: ignore[arg-type]
+    )
+
+    await fetcher.fetch(definition, client)  # type: ignore[arg-type]
+    assert "Jobright online" in notifier.messages[0]
+    assert "isp-a.example.com:8080" in notifier.messages[0]
+
+    # Both addresses start refusing: one rotation, then the degraded announcement.
+    client.blocked_proxies = ("isp-a.example.com", "isp-b.example.com")
+    fetcher._jobright_window_cards = None
+    await fetcher.fetch(definition, client)  # type: ignore[arg-type]
+
+    assert "rotated egress" in notifier.messages[1]
+    assert "blocked (HTTP 403) on isp-a.example.com:8080" in notifier.messages[1]
+    assert "retrying via isp-b.example.com:8080" in notifier.messages[1]
+    # One rotation for two addresses: the exhausted final attempt does not announce
+    # a retry it will not make, and reports the address it actually used.
+    assert len(notifier.messages) == 3
+    assert "Jobright degraded" in notifier.messages[2]
+    assert "blocked (HTTP 403) via egress isp-b.example.com:8080" in notifier.messages[2]
+    assert f"next attempt in {_format_duration(JOBRIGHT_BLOCK_BACKOFF_STEPS[0])}" in notifier.messages[2]
+
+    # And the all-clear once a window succeeds again.
+    client.blocked_proxies = ()
+    fetcher._jobright_retry_after = 0.0
+    fetcher._jobright_window_cards = None
+    await fetcher.fetch(definition, client)  # type: ignore[arg-type]
+
+    assert "Jobright recovered" in notifier.messages[-1]
+    assert "1 failed attempt" in notifier.messages[-1]
+    assert "isp-b.example.com:8080" in notifier.messages[-1]
+
+
+@pytest.mark.asyncio
+async def test_jobright_reads_its_proxy_pool_from_the_configured_list_file(
+    tmp_path, monkeypatch
+) -> None:
+    listing = tmp_path / "jobright-proxies.txt"
+    listing.write_text(
+        "# provider export\n198.51.100.10:8080:isp-user:isp-pass\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("JOBRIGHT_PROXY_FILE", str(listing))
+    client = _RecordingJobrightClient()
+
+    fetcher = GitHubFeedFetcher()
+    result = await fetcher.fetch(_jobright_definition(), client)  # type: ignore[arg-type]
+
+    assert result.degraded_reason is None
+    assert fetcher.jobright_egress_label() == "198.51.100.10:8080"
+    assert client.window_calls[0]["proxy"] == "http://198.51.100.10:8080"
+    assert "Proxy-Authorization" in client.window_calls[0]["proxy_headers"]
+
+
+@pytest.mark.asyncio
+async def test_jobright_window_leaves_through_the_configured_isp_proxy() -> None:
+    client = _RecordingJobrightClient()
+    fetcher = GitHubFeedFetcher(jobright_proxies=[_proxy("isp-a.example.com", credentials=True)])
+
+    result = await fetcher.fetch(_jobright_definition(), client)  # type: ignore[arg-type]
+
+    assert result.degraded_reason is None
+    assert [job.external_id for job in result.observations] == ["intern-1"]
+    assert client.window_calls[0]["proxy"] == "http://isp-a.example.com:8080"
+    assert "Proxy-Authorization" in client.window_calls[0]["proxy_headers"]
+    assert fetcher.jobright_egress_label() == "isp-a.example.com:8080"
+
+
+@pytest.mark.asyncio
+async def test_jobright_requests_stay_direct_when_no_proxy_is_configured() -> None:
+    client = _RecordingJobrightClient()
+
+    result = await GitHubFeedFetcher().fetch(
+        _jobright_definition(),
+        client,  # type: ignore[arg-type]
+    )
+
+    assert result.degraded_reason is None
+    # No proxy configured must mean no proxy keywords at all, not an empty proxy.
+    assert client.window_calls == [{}]
+
+
+@pytest.mark.asyncio
+async def test_jobright_rotates_to_the_next_address_when_one_is_blocked() -> None:
+    client = _RecordingJobrightClient(blocked_proxies=("isp-a.example.com",))
+    fetcher = GitHubFeedFetcher(
+        jobright_proxies=[_proxy("isp-a.example.com"), _proxy("isp-b.example.com")]
+    )
+
+    result = await fetcher.fetch(_jobright_definition(), client)  # type: ignore[arg-type]
+
+    # A blocked address costs one retry, not the poll: the window still arrives whole.
+    assert result.degraded_reason is None
+    assert [job.external_id for job in result.observations] == ["intern-1"]
+    assert [call["proxy"] for call in client.window_calls] == [
+        "http://isp-a.example.com:8080",
+        "http://isp-b.example.com:8080",
+    ]
+    assert client.listing_calls == []
+    assert fetcher.jobright_seconds_until_retry() == 0
+    # The working address is kept for the next poll rather than cycling every time.
+    assert fetcher.jobright_egress_label() == "isp-b.example.com:8080"
+
+
+@pytest.mark.asyncio
+async def test_jobright_backs_off_once_every_address_is_refused() -> None:
+    client = _RecordingJobrightClient(
+        blocked_proxies=("isp-a.example.com", "isp-b.example.com")
+    )
+    fetcher = GitHubFeedFetcher(
+        jobright_proxies=[_proxy("isp-a.example.com"), _proxy("isp-b.example.com")]
+    )
+
+    result = await fetcher.fetch(_jobright_definition(), client)  # type: ignore[arg-type]
+
+    assert len(client.window_calls) == 2
+    assert result.degraded_reason == "blocked"
+    assert [job.external_id for job in result.observations] == ["listing-1"]
+    # The snapshot leaves through the address of the last attempt, not a fresh one.
+    assert client.listing_calls[0]["proxy"] == "http://isp-b.example.com:8080"
+    assert fetcher.jobright_seconds_until_retry() > 0
+
+
+@pytest.mark.asyncio
+async def test_jobright_caps_how_many_addresses_one_poll_may_try() -> None:
+    hosts = tuple(f"isp-{index}.example.com" for index in range(10))
+    client = _RecordingJobrightClient(blocked_proxies=hosts)
+    fetcher = GitHubFeedFetcher(jobright_proxies=[_proxy(host) for host in hosts])
+
+    result = await fetcher.fetch(_jobright_definition(), client)  # type: ignore[arg-type]
+
+    # A large pool must not turn one poll into a burst across every address it owns.
+    assert len(client.window_calls) == JOBRIGHT_MAX_EGRESS_ATTEMPTS
+    assert result.degraded_reason == "blocked"
+    assert fetcher.jobright_seconds_until_retry() > 0
+    # The next poll resumes further along the pool instead of re-testing the head.
+    assert fetcher.jobright_egress_label() == "isp-2.example.com:8080"
+
+
+@pytest.mark.asyncio
+async def test_jobright_does_not_rotate_addresses_on_a_query_scoped_failure() -> None:
+    class MalformedWindowClient(_RecordingJobrightClient):
+        async def post_json(self, _url, *, json, **kwargs):
+            self.window_calls.append(kwargs)
+            return {"success": False}, {}, 200
+
+    client = MalformedWindowClient()
+    fetcher = GitHubFeedFetcher(
+        jobright_proxies=[_proxy("isp-a.example.com"), _proxy("isp-b.example.com")]
+    )
+
+    result = await fetcher.fetch(_jobright_definition(), client)  # type: ignore[arg-type]
+
+    # An invalid payload repeats identically from every address; burning the pool on
+    # it would hide the real cause and spend addresses for nothing.
+    assert len(client.window_calls) == 1
+    assert result.degraded_reason == "malformed"
+    assert fetcher.jobright_egress_label() == "isp-a.example.com:8080"
+
+
+@pytest.mark.asyncio
+async def test_jobright_backoff_clears_after_a_successful_window() -> None:
+    definition = _jobright_definition()
+
+    class HealthyHttpClient:
+        async def post_json(self, _url, *, json):
+            return (
+                {"success": True, "result": {"jobList": [_jobright_card("intern-1")]}},
+                {},
+                200,
+            )
+
+    fetcher = GitHubFeedFetcher()
+    fetcher._jobright_consecutive_failures = 3
+    fetcher._jobright_retry_after = 0.0
+
+    result = await fetcher.fetch(definition, HealthyHttpClient())  # type: ignore[arg-type]
+
+    assert result.degraded_reason is None
+    assert fetcher.jobright_seconds_until_retry() == 0
+    assert fetcher._jobright_consecutive_failures == 0
+
+
+@pytest.mark.asyncio
+async def test_jobright_fetcher_treats_an_empty_window_as_unavailable() -> None:
+    definition = _jobright_definition()
+
+    class EmptyWindowHttpClient:
+        async def get_text(self, _url, *, headers):
+            return _jobright_html({}, [_jobright_card("intern-1")]), {}, 200
+
+        async def post_json(self, _url, *, json):
+            return {"success": True, "result": {"jobList": []}}, {}, 200
+
+    result = await GitHubFeedFetcher().fetch(
+        definition,
+        EmptyWindowHttpClient(),  # type: ignore[arg-type]
+    )
+
+    # An empty window is a failed source, not evidence that every role disappeared.
+    assert result.degraded_reason == "unavailable"
+    assert [job.external_id for job in result.observations] == ["intern-1"]
+
+
+def test_classify_jobright_failure_reads_a_wrapped_proxy_connection_error() -> None:
+    # aiohttp phrases a dead proxy as "Cannot connect to host", identical to a dead
+    # upstream; only the chained exception type separates the two.
+    cause = aiohttp.ClientProxyConnectionError(
+        aiohttp.client_reqrep.ConnectionKey(
+            "isp-a.example.com", 8080, False, True, None, None, None
+        ),
+        OSError("Connection refused"),
+    )
+    wrapped = RuntimeError("HTTP request failed for https://jobright.ai: cannot connect")
+    wrapped.__cause__ = cause
+
+    assert classify_jobright_failure(wrapped) == "proxy_error"
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (RuntimeError("GET https://jobright.ai returned 403: forbidden"), "blocked"),
+        (RuntimeError('{"errorCode":43004}'), "blocked"),
+        (
+            RuntimeError("HTTP request failed: Cannot connect to proxy isp-a:8080"),
+            "proxy_error",
+        ),
+        (RuntimeError("POST https://jobright.ai returned 407: auth required"), "proxy_error"),
+        (RuntimeError("POST https://jobright.ai returned 429"), "throttled"),
+        (RuntimeError("POST https://jobright.ai returned 503"), "upstream_error"),
+        (TimeoutError("connection timed out"), "timeout"),
+        (RuntimeError("visitor API returned an invalid payload"), "malformed"),
+        (RuntimeError("something else entirely"), "unavailable"),
+    ],
+)
+def test_classify_jobright_failure_names_the_cause(error: BaseException, expected: str) -> None:
+    assert classify_jobright_failure(error) == expected
+
+
+def test_jobright_backoff_escalates_then_caps() -> None:
+    steps = [jobright_backoff_seconds(n) for n in range(1, len(JOBRIGHT_BLOCK_BACKOFF_STEPS) + 2)]
+
+    assert steps[0] == JOBRIGHT_BLOCK_BACKOFF_STEPS[0]
+    assert steps == sorted(steps)
+    assert steps[-1] == JOBRIGHT_BLOCK_BACKOFF_STEPS[-1]
+    assert jobright_backoff_seconds(0) == JOBRIGHT_POLL_INTERVAL_SECONDS
+
+
+def test_jobright_taxonomy_ids_are_unique_and_computer_science_scoped() -> None:
+    assert len(JOBRIGHT_TAXONOMY_IDS) == len(set(JOBRIGHT_TAXONOMY_IDS))
+    # Group 01 is Jobright's software/internet/AI family; 02-01-03 is embedded software.
+    assert all(
+        taxonomy_id.startswith("01-") or taxonomy_id == "02-01-03"
+        for taxonomy_id in JOBRIGHT_TAXONOMY_IDS
+    )
+    # The listing pages only ever carry the fallback wildcard, which selects nothing
+    # specific and is what limited the source to one broad slice.
+    assert "00-00-00" not in JOBRIGHT_TAXONOMY_IDS
 
 
 def test_intern_engine_parser_accepts_structured_jobs_object() -> None:
@@ -478,3 +873,14 @@ async def test_fetcher_sends_validators_and_accepts_304() -> None:
         "If-None-Match": '"snapshot"',
         "If-Modified-Since": "Wed, 12 Aug 2026 12:00:00 GMT",
     }
+
+
+def test_jobright_query_never_sends_an_empty_taxonomy_title() -> None:
+    # An empty title returns zero rows with success:true and no error code, which is
+    # indistinguishable from a genuinely empty window. Only a non-empty title works.
+    query = build_jobright_public_query()
+
+    assert query["jobTaxonomyList"], "the endpoint rejects an empty taxonomy list"
+    for entry in query["jobTaxonomyList"]:
+        assert entry["taxonomyId"] in JOBRIGHT_TAXONOMY_IDS
+        assert entry["title"], f"{entry['taxonomyId']} would send an empty title"
