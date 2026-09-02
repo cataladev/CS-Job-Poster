@@ -78,6 +78,8 @@ def load_config() -> AppConfig:
     new_grad_channel_id = os.getenv("DISCORD_NEW_GRAD_CHANNEL_ID")
     internship_alert_role_id = os.getenv("DISCORD_INTERNSHIP_ALERT_ROLE_ID")
     new_grad_alert_role_id = os.getenv("DISCORD_NEW_GRAD_ALERT_ROLE_ID")
+    outsource_internship_channel_id = os.getenv("OUTSOURCE_INTERNSHIP_CHANNEL_ID")
+    outsource_new_grad_channel_id = os.getenv("OUTSOURCE_NEW_GRAD_CHANNEL_ID")
     enable_new_grad_source = _parse_bool(
         os.getenv("ENABLE_NEW_GRAD_SOURCE"),
         default=bool(new_grad_channel_id),
@@ -142,6 +144,14 @@ def load_config() -> AppConfig:
         ),
         discord_new_grad_alert_role_id=(
             int(new_grad_alert_role_id) if new_grad_alert_role_id else None
+        ),
+        outsource_internship_channel_id=(
+            int(outsource_internship_channel_id)
+            if outsource_internship_channel_id
+            else None
+        ),
+        outsource_new_grad_channel_id=(
+            int(outsource_new_grad_channel_id) if outsource_new_grad_channel_id else None
         ),
     )
 

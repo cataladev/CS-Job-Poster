@@ -298,6 +298,92 @@ async def test_tracks_publish_to_their_separate_configured_channels(config_facto
 
 
 @pytest.mark.asyncio
+async def test_outsource_channels_copy_both_tracks_without_repeating_mentions(
+    config_factory,
+) -> None:
+    config = config_factory()
+    config.outsource_internship_channel_id = 333
+    config.outsource_new_grad_channel_id = 444
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    try:
+        await database.toggle_company_target_subscription(
+            guild_id=123,
+            user_id=777,
+            track="internship",
+            company="Example Corp",
+            company_key="example",
+        )
+        await _create_pending_delivery(database, track="internship", channel_id=111)
+        await _create_pending_delivery(
+            database,
+            track="new_grad",
+            channel_id=222,
+            external_id="new-grad-1",
+        )
+        internship_channel = FakeChannel([], channel_id=111)
+        new_grad_channel = FakeChannel([], channel_id=222)
+        outsource_internship_channel = FakeChannel([], channel_id=333)
+        outsource_new_grad_channel = FakeChannel([], channel_id=444)
+        publisher = TrackChannelPublisher(config, database)
+        publisher.bind_client(  # type: ignore[arg-type]
+            FakeClient(
+                {
+                    111: internship_channel,
+                    222: new_grad_channel,
+                    333: outsource_internship_channel,
+                    444: outsource_new_grad_channel,
+                }
+            )
+        )
+
+        assert await publisher.publish_pending() == (2, 0)
+
+        assert outsource_internship_channel.contents == ["🎯 <@777>"]
+        assert outsource_new_grad_channel.contents == [None]
+        assert outsource_internship_channel.sent[0].to_dict() == (
+            internship_channel.sent[0].to_dict()
+        )
+        assert outsource_new_grad_channel.sent[0].to_dict() == (
+            new_grad_channel.sent[0].to_dict()
+        )
+        copied_mentions = outsource_internship_channel.allowed_mentions[0]
+        assert copied_mentions.everyone is False
+        assert copied_mentions.users is False
+        assert copied_mentions.roles is False
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_outsource_failure_does_not_fail_a_successful_production_post(
+    config_factory,
+) -> None:
+    config = config_factory()
+    config.outsource_internship_channel_id = 333
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    try:
+        await _create_pending_delivery(database)
+        production_channel = FakeChannel([], channel_id=111)
+        unavailable_copy_channel = FakeChannel(
+            [],
+            channel_id=333,
+            send_error=asyncio.TimeoutError("copy timed out"),
+        )
+        publisher = TrackChannelPublisher(config, database)
+        publisher.bind_client(  # type: ignore[arg-type]
+            FakeClient({111: production_channel, 333: unavailable_copy_channel})
+        )
+
+        assert await publisher.publish_pending() == (1, 0)
+        assert len(production_channel.sent) == 1
+        assert await database.get_delivery_counts() == {"sent": 1}
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_publisher_suppresses_non_us_pending_delivery(config_factory) -> None:
     config = config_factory()
     database = Database(config.sqlite_db_path)
@@ -506,6 +592,7 @@ async def test_delivery_uses_source_company_logo_thumbnail(config_factory) -> No
 async def test_periodic_role_digest_links_back_to_individual_job_messages(config_factory) -> None:
     config = config_factory()
     config.discord_internship_alert_role_id = 555
+    config.outsource_internship_channel_id = 333
     database = Database(config.sqlite_db_path)
     await database.initialize()
     try:
@@ -517,6 +604,7 @@ async def test_periodic_role_digest_links_back_to_individual_job_messages(config
         )
         await _create_pending_delivery(database, external_id="job-2", location="Boston, MA")
         channel = FakeChannel([])
+        outsource_channel = FakeChannel([], channel_id=333)
         publisher = TrackChannelPublisher(config, database)
         publisher._priority_companies = {"amazon"}
         local_now = datetime.now(ZoneInfo("America/New_York")).replace(
@@ -524,12 +612,15 @@ async def test_periodic_role_digest_links_back_to_individual_job_messages(config
         )
         digest_now = local_now.astimezone(UTC)
         publisher._now = lambda: digest_now  # type: ignore[method-assign]
-        publisher.bind_client(FakeClient(channel))  # type: ignore[arg-type]
+        publisher.bind_client(  # type: ignore[arg-type]
+            FakeClient({111: channel, 333: outsource_channel})
+        )
 
         sent, reconciled = await publisher.publish_pending()
         assert (sent, reconciled) == (2, 0)
         assert len(channel.sent) == 2
         assert channel.contents == [None, None]
+        assert len(outsource_channel.sent) == 2
 
         cursor = (publisher._daily_digest_at(digest_now) - timedelta(days=1)).isoformat()
         await database.set_digest_cursor(111, cursor)
@@ -543,9 +634,14 @@ async def test_periodic_role_digest_links_back_to_individual_job_messages(config
         assert "https://discord.com/channels/123/111/1000" in digest.description
         assert channel.contents[-1] == "<@&555>"
         assert "jobbot:digest:" in digest.footer.text
+        assert len(outsource_channel.sent) == 3
+        assert outsource_channel.sent[-1].to_dict() == digest.to_dict()
+        assert outsource_channel.contents[-1] == "<@&555>"
+        assert outsource_channel.allowed_mentions[-1].roles is False
 
         assert await publisher.publish_pending() == (0, 0)
         assert len(channel.sent) == 3
+        assert len(outsource_channel.sent) == 3
     finally:
         await database.close()
 

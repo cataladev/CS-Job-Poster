@@ -200,8 +200,25 @@ Copy `.env.example` to `.env`. These values are required for production:
 DISCORD_TOKEN=replace-me
 DISCORD_CHANNEL_ID=123456789012345678
 DISCORD_NEW_GRAD_CHANNEL_ID=234567890123456789
+DISCORD_LOG_CHANNEL_ID=345678901234567890
 DATABASE_URL=postgresql://jobbot:jobbot@localhost:5432/jobbot
 ```
+
+To copy every successful internship and new-grad production post to a second
+pair of channels, set the optional outsource destinations:
+
+```dotenv
+OUTSOURCE_INTERNSHIP_CHANNEL_ID=345678901234567890
+OUTSOURCE_NEW_GRAD_CHANNEL_ID=456789012345678901
+```
+
+The existing Discord bot must have access to the destination channels and needs
+View Channel, Send Messages, and Embed Links permissions there. Job posts and daily
+digests are copied after the original succeeds. User and role mention text is kept,
+but Discord mentions are disabled on the copy so subscribers are not pinged twice.
+Leave either value blank to disable mirroring for that track. The implementation is
+isolated in `outsource/`; a failed copy is logged and does not retry or change the
+successful production delivery.
 
 Optional runtime settings:
 
@@ -278,7 +295,13 @@ no separate Actions publisher: only the long-running service sends messages.
 Each poll writes structured, count-oriented logs for feed fetch status, accepted and
 rejected observations, new canonicals, merges, suppressed/queued deliveries, sent or
 reconciled messages, and failures. Upstream errors do not erase prior snapshots or
-create closure events.
+create closure events. When `DISCORD_LOG_CHANNEL_ID` is configured, every core-feed
+and company-source scrape cycle also sends a status embed to that channel. Successful
+runs do not mention anyone. Errors from the first-party `company_sources` scraper
+group include their details and send `@here`. Core-feed errors—including Jobright and
+Simplify—are logged as warnings without a ping. The bot therefore needs View Channel,
+Send Messages, Embed Links, and Mention Everyone permissions in the log channel for
+company-source failure pings to notify members.
 
 Existing production tables are preserved. Alembic migration
 `20260813_0004_feed_outbox` adds the authoritative observation, key, feed-state, and

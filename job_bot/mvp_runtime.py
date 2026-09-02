@@ -23,6 +23,7 @@ from job_bot.job_channel_commands import (
     register_job_channel_commands,
 )
 from job_bot.models import AppConfig
+from job_bot.scrape_status import ScrapeStatusReporter
 
 
 CHANNEL_RECOVERY_KEY = "restore_established_job_channels_20260819_v1"
@@ -55,6 +56,8 @@ class FeedDiscordClient(discord.Client):
         self.pipeline = pipeline
         self.company_source_pipeline = company_source_pipeline
         self.publisher = publisher
+        self.scrape_status_reporter = ScrapeStatusReporter(config)
+        self.scrape_status_reporter.bind_client(self)
         self.logger = logging.getLogger(self.__class__.__name__)
         self.tree = app_commands.CommandTree(self)
         self.channel_configurator = JobChannelConfigurator(config, database)
@@ -156,14 +159,28 @@ class FeedDiscordClient(discord.Client):
     ) -> None:
         while not self.is_closed() and not self._shutdown.is_set():
             started = time.monotonic()
+            unexpected_error: Exception | None = None
             try:
                 stats = await pipeline.run()
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as exc:
                 self.logger.exception("feed_poll_failed feed_group=%s", feed_group)
                 stats = None
+                unexpected_error = exc
             elapsed = time.monotonic() - started
+            try:
+                await self.scrape_status_reporter.report(
+                    feed_group=feed_group,
+                    elapsed_seconds=elapsed,
+                    stats=stats,
+                    unexpected_error=unexpected_error,
+                )
+            except Exception:
+                self.logger.exception(
+                    "scrape_status_report_failed feed_group=%s",
+                    feed_group,
+                )
             delay = max(1.0, interval_seconds - elapsed)
             self.logger.info(
                 "feed_poll_scheduled feed_group=%s interval_seconds=%s elapsed_seconds=%.2f "

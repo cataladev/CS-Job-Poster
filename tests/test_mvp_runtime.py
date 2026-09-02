@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from types import SimpleNamespace
 
 import discord
@@ -81,6 +82,44 @@ async def test_runtime_can_start_independent_core_and_company_source_poll_tasks(
     finally:
         release.set()
         await asyncio.gather(*harness._poll_tasks.values())
+
+
+@pytest.mark.asyncio
+async def test_poll_loop_reports_each_completed_scrape_cycle() -> None:
+    reports = []
+
+    class FakeReporter:
+        async def report(self, **payload) -> None:
+            reports.append(payload)
+
+    class Harness:
+        def __init__(self) -> None:
+            self._shutdown = asyncio.Event()
+            self.scrape_status_reporter = FakeReporter()
+            self.logger = logging.getLogger("test_poll_loop")
+
+        def is_closed(self) -> bool:
+            return False
+
+    harness = Harness()
+    stats = SimpleNamespace(deliveries_sent=2, errors=[])
+
+    class Pipeline:
+        async def run(self):
+            harness._shutdown.set()
+            return stats
+
+    await FeedDiscordClient._poll_loop(
+        harness,  # type: ignore[arg-type]
+        pipeline=Pipeline(),  # type: ignore[arg-type]
+        interval_seconds=300,
+        feed_group="core",
+    )
+
+    assert len(reports) == 1
+    assert reports[0]["feed_group"] == "core"
+    assert reports[0]["stats"] is stats
+    assert reports[0]["unexpected_error"] is None
 
 
 @pytest.mark.asyncio

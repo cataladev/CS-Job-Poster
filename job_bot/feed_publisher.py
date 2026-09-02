@@ -21,6 +21,7 @@ from job_bot.utils.feed_normalization import (
 )
 from job_bot.utils.http import AsyncHttpClient
 from job_bot.utils.normalization import direct_link_company_key, normalize_company_name
+from outsource import OutsourceMirror
 
 
 FALLBACK_COMPANY_THUMBNAIL_URL = (
@@ -84,7 +85,13 @@ def _job_highlights(title: str, cycle: str | None, remote_status: str) -> list[s
 
 
 class TrackChannelPublisher:
-    def __init__(self, config: AppConfig, database: Database) -> None:
+    def __init__(
+        self,
+        config: AppConfig,
+        database: Database,
+        *,
+        outsource_mirror: OutsourceMirror | None = None,
+    ) -> None:
         self.config = config
         self.database = database
         self.branding = BrandingResolver(config, database)
@@ -92,6 +99,7 @@ class TrackChannelPublisher:
         self.logger = logging.getLogger(self.__class__.__name__)
         self._logo_cache: dict[str, str] = {}
         self._priority_companies = _priority_companies(config.company_seed_path)
+        self.outsource_mirror = outsource_mirror or OutsourceMirror(config)
         # The core feeds and the slower direct-ATS sweep run independently. Keep
         # the stateful pending-delivery claim/send flow single-file so concurrent
         # collectors cannot read the same pending delivery and post it twice.
@@ -99,6 +107,7 @@ class TrackChannelPublisher:
 
     def bind_client(self, client: discord.Client) -> None:
         self.client = client
+        self.outsource_mirror.bind_client(client)
 
     async def publish_pending(self) -> tuple[int, int]:
         async with self._publish_lock:
@@ -222,15 +231,17 @@ class TrackChannelPublisher:
         if role_id is not None:
             self.validate_role_mention_permissions(channel)
 
+        digest_embed = self.build_digest_embed(
+            deliveries,
+            channel=channel,
+            marker=marker,
+            started_at=started_at,
+            scheduled_at=scheduled_at,
+        )
+        digest_content = f"<@&{role_id}>" if role_id is not None else None
         message = await channel.send(
-            content=f"<@&{role_id}>" if role_id is not None else None,
-            embed=self.build_digest_embed(
-                deliveries,
-                channel=channel,
-                marker=marker,
-                started_at=started_at,
-                scheduled_at=scheduled_at,
-            ),
+            content=digest_content,
+            embed=digest_embed,
             allowed_mentions=(
                 discord.AllowedMentions(roles=[discord.Object(id=role_id)])
                 if role_id is not None
@@ -238,6 +249,13 @@ class TrackChannelPublisher:
             ),
         )
         await self.database.set_digest_cursor(channel_id, now.isoformat())
+        await self.outsource_mirror.copy_message(
+            track=track,
+            source_channel_id=channel_id,
+            source_message_id=int(message.id),
+            content=digest_content,
+            embed=digest_embed,
+        )
         self.logger.info(
             "digest_sent channel=%s track=%s jobs=%s message=%s",
             channel_id,
@@ -367,16 +385,17 @@ class TrackChannelPublisher:
                 dict.fromkeys([*company_subscriber_ids, *location_subscriber_ids])
             )
             target_content, allowed_mentions = self._target_mentions(subscriber_ids)
+            embed = self.build_embed(
+                job,
+                marker=marker,
+                metadata=metadata,
+                logo_url=logo_url,
+            )
             await self.database.mark_delivery_sending(int(delivery["id"]))
             try:
                 message = await channel.send(
                     content=target_content,
-                    embed=self.build_embed(
-                        job,
-                        marker=marker,
-                        metadata=metadata,
-                        logo_url=logo_url,
-                    ),
+                    embed=embed,
                     allowed_mentions=allowed_mentions,
                 )
             except (discord.HTTPException, asyncio.TimeoutError) as exc:
@@ -401,6 +420,13 @@ class TrackChannelPublisher:
                 message_id=int(message.id),
             )
             existing_markers[marker] = int(message.id)
+            await self.outsource_mirror.copy_message(
+                track=job.track,
+                source_channel_id=channel_id,
+                source_message_id=int(message.id),
+                content=target_content,
+                embed=embed,
+            )
             sent += 1
             self.logger.info(
                 "delivery_sent delivery=%s canonical=%s channel=%s company=%r title=%r "
