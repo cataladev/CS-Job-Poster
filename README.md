@@ -10,10 +10,12 @@ digest-alert roles, plus personal company and location targets.
 
 ## Runtime behavior
 
-- Polls every five minutes by default.
+- Ticks every minute by default. Each feed states its own cadence, so the fast tick
+  serves Jobright without dragging the rest along: Jobright is polled every minute,
+  the GitHub repository feeds every five.
 - Polls registered first-party company APIs independently every hour by default; IBM is
   the first registered company source.
-- Runs the GitHub and Jobright core feeds in their own five-minute loop, so a slow
+- Runs the GitHub and Jobright core feeds in their own loop, so a slow
   direct-employer sweep cannot delay new internship or new-grad Discord posts.
 - Derives 309 unique direct employer boards from the bundled company seed: Greenhouse,
   Lever, Ashby, and SmartRecruiters. Those boards use their public structured endpoints
@@ -29,7 +31,7 @@ digest-alert roles, plus personal company and location targets.
 - Uses conditional GitHub requests (`ETag` and `Last-Modified`) to avoid reprocessing
   unchanged repository feeds. Jobright's dynamic public window is requested
   unconditionally, because the listing page's cache validators can be unchanged while
-  the window behind it has moved on; it keeps its own 45-minute interval.
+  the window behind it has moved on; it keeps its own one-minute interval.
 - Requires row-level U.S. evidence. Mixed-location rows retain only their U.S.
   locations; foreign, ambiguous, archived, and inactive rows are not published.
 - Applies no title, category, seniority, season, or job-age filter.
@@ -79,10 +81,11 @@ its computer-science job functions directly in the anonymous visitor query
 (`JOBRIGHT_TAXONOMY_IDS`) rather than deriving them from the server-rendered listing,
 whose `00-00-00` fallback taxonomy limited the source to one broad software-engineering
 slice. Both tracks share a single most-recent window, so the whole integration costs one
-request per attempt, bounded to one attempt every 45 minutes. It avoids account-specific
+request per attempt, bounded to one attempt a minute. It avoids account-specific
 recommendations and unbounded scraping. If the visitor API refuses the window, the
 listing snapshot is used as a stopgap, the poll is recorded as degraded rather than
-healthy, and the feed backs off progressively (45 minutes, then 90, 3 hours, 6 hours)
+healthy, and the feed backs off progressively (a minute, then five, then ten, rising
+in five-minute steps to an hour)
 until a window succeeds. Jobright throttles by source address, so a refused deployment
 stops adding traffic instead of retrying into the block.
 
@@ -103,7 +106,7 @@ through, the upstream error, and when the next attempt is due), each egress rota
 naming the address that was refused and the one being tried next, and the recovery with
 how many attempts failed and how long the source was degraded. A steady feed, and a
 feed failing repeatedly for the same reason, both stay quiet — a channel that repeats
-itself every 45 minutes stops being read; a changed failure reason is announced again,
+itself every minute stops being read; a changed failure reason is announced again,
 because a block turning into a dead proxy is a different problem with a different fix.
 Set `JOBRIGHT_STATUS_WEBHOOK_URL` to a Discord webhook to receive these; unset, the same
 lines go to the application log. The webhook is best-effort — an unreachable or
@@ -244,7 +247,7 @@ DATABASE_URL=postgresql://jobbot:jobbot@localhost:5432/jobbot
 Optional runtime settings:
 
 ```dotenv
-POLL_INTERVAL_SECONDS=300
+POLL_INTERVAL_SECONDS=60
 DIRECT_ATS_POLL_INTERVAL_SECONDS=900
 COMPANY_SOURCE_POLL_INTERVAL_SECONDS=3600
 DIGEST_INTERVAL_SECONDS=14400

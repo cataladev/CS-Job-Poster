@@ -1051,3 +1051,111 @@ async def test_new_grad_jobs_are_suppressed_when_channel_is_not_separate(
         assert await database.get_delivery_counts() == {"suppressed": 2}
     finally:
         await database.close()
+
+
+@pytest.mark.asyncio
+async def test_baseline_epoch_silences_every_source_for_one_run(config_factory) -> None:
+    """A new epoch must make the next run silent for all feeds, not just one.
+
+    A release that widens what a source can see turns its whole backlog into rows the
+    database has never recorded. Without this, every one of them is delivered at once.
+    """
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    publisher = StubPublisher()
+    github = _feed("github_one")
+    other = _feed("github_two")
+    try:
+        pipeline = FeedPipeline(
+            config=config,
+            database=database,
+            publisher=publisher,
+            feeds=(github, other),
+            fetcher=StubFetcher(
+                {
+                    github.source_id: [_job(github.source_id, "a")],
+                    other.source_id: [_job(other.source_id, "b")],
+                }
+            ),
+        )
+        await pipeline.run()          # silent first baseline
+        second = await pipeline.run()  # normal delivery resumes
+        assert second.deliveries_queued == 0  # nothing new appeared
+
+        # A job discovered normally is queued.
+        pipeline.fetcher.snapshots[github.source_id].append(_job(github.source_id, "new"))
+        queued = await pipeline.run()
+        assert queued.deliveries_queued == 1
+
+        counts = await database.get_delivery_counts()
+        assert counts.get("pending", 0) >= 1
+
+        applied = await database.apply_feed_baseline_epoch("epoch-2")
+
+        assert applied["feeds_reset"] == 2
+        # Anything already queued was queued under the old behaviour.
+        assert applied["deliveries_suppressed"] >= 1
+        assert await database.is_initial_feed_baseline_complete() is False
+
+        # Widened coverage: three previously invisible rows arrive at once.
+        pipeline.fetcher.snapshots[other.source_id] = [
+            _job(other.source_id, "b"),
+            _job(other.source_id, "wide-1"),
+            _job(other.source_id, "wide-2"),
+        ]
+        after_epoch = await pipeline.run()
+
+        assert after_epoch.deliveries_queued == 0
+        assert (await database.get_delivery_counts()).get("pending", 0) == 0
+
+        # The run after the epoch delivers normally again.
+        pipeline.fetcher.snapshots[other.source_id].append(_job(other.source_id, "fresh"))
+        resumed = await pipeline.run()
+        assert resumed.deliveries_queued == 1
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_baseline_epoch_is_applied_only_once(config_factory) -> None:
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    try:
+        first = await database.apply_feed_baseline_epoch("epoch-1")
+        again = await database.apply_feed_baseline_epoch("epoch-1")
+
+        assert again == {"feeds_reset": 0, "deliveries_suppressed": 0}
+        assert first["feeds_reset"] == 0  # nothing baselined yet in a fresh database
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_baseline_epoch_never_replays_a_sent_delivery(config_factory) -> None:
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    publisher = StubPublisher()
+    feed = _feed("github_one")
+    try:
+        pipeline = FeedPipeline(
+            config=config,
+            database=database,
+            publisher=publisher,
+            feeds=(feed,),
+            fetcher=StubFetcher({feed.source_id: [_job(feed.source_id, "a")]}),
+        )
+        await pipeline.run()
+        pipeline.fetcher.snapshots[feed.source_id].append(_job(feed.source_id, "sent-one"))
+        await pipeline.run()
+
+        sent_before = (await database.get_delivery_counts()).get("sent", 0)
+
+        await database.apply_feed_baseline_epoch("epoch-2")
+
+        # Suppression only ever touches unsent rows.
+        assert (await database.get_delivery_counts()).get("sent", 0) == sent_before
+    finally:
+        await database.close()
