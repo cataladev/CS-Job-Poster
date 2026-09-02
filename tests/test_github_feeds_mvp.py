@@ -195,20 +195,23 @@ def test_runtime_feeds_cover_only_us_job_surfaces() -> None:
             "main",
             "docs/api/jobs.json",
         ),
-        ("jobright.ai", "public", "software-engineer-intern-jobs-in-united-states"),
-        ("jobright.ai", "public", "software-engineer-new-graduate-jobs-in-united-states"),
+        ("jobright.ai", "public", "taxonomy-window/internship"),
+        ("jobright.ai", "public", "taxonomy-window/new-grad"),
     }
 
     assert all("INTL" not in feed.path for feed in FEEDS)
     assert all(not feed.trusted_us for feed in FEEDS)
     assert {feed.provider for feed in FEEDS if feed.repository == "jobright.ai"} == {"jobright"}
+    # Jobright publishes continuously and is polled every minute; it is the reason
+    # the collection loop ticks that fast. Every other feed states a slower cadence of
+    # its own so the faster loop does not drag the repository feeds along with it.
     assert {
         feed.poll_interval_seconds
         for feed in FEEDS
         if feed.repository == "jobright.ai"
-    } == {2_700}
+    } == {60}
     assert all(
-        feed.poll_interval_seconds == 0
+        feed.poll_interval_seconds == 300
         for feed in FEEDS
         if feed.repository != "jobright.ai"
     )
@@ -245,7 +248,10 @@ def test_jobright_parser_uses_public_us_listings_and_keeps_tracks_separate() -> 
     assert internships[0].external_id == "intern-us-1"
     assert internships[0].locations == ["Austin, TX"]
     assert internships[0].cycle == "fall 2026"
-    assert internships[0].posted_date == "2026-08-14"
+    # Jobright publishes its own index timestamp, not the employer's posting date,
+    # so no date is carried rather than a wrong one.
+    assert internships[0].posted_date is None
+    assert internships[0].raw_data["jobright_publish_time"] == "2026-08-14 13:39:51"
     assert internships[0].application_url == "https://jobright.ai/jobs/info/intern-us-1"
 
     assert new_grad_rejected == 2
@@ -884,3 +890,29 @@ def test_jobright_query_never_sends_an_empty_taxonomy_title() -> None:
     for entry in query["jobTaxonomyList"]:
         assert entry["taxonomyId"] in JOBRIGHT_TAXONOMY_IDS
         assert entry["title"], f"{entry['taxonomyId']} would send an empty title"
+
+
+def test_jobright_window_with_no_matching_track_is_healthy_not_failed() -> None:
+    """One shared window splits into two tracks, so either side can come up empty.
+
+    Jobright indexes in batches, so a window of thirty consecutive internships is an
+    ordinary morning. Raising there would mark the feed failed and block the run's
+    baseline over a perfectly good fetch.
+    """
+    internship_definition = _jobright_definition("internship")
+    new_grad_definition = _jobright_definition("new_grad")
+    cards = [_jobright_card(f"intern-{index}") for index in range(5)]
+
+    internships, _ = parse_jobright_public_cards(cards, internship_definition)
+    new_grads, rejected = parse_jobright_public_cards(cards, new_grad_definition)
+
+    assert [job.external_id for job in internships] == [f"intern-{i}" for i in range(5)]
+    assert new_grads == []
+    assert rejected == 5
+
+
+def test_jobright_empty_window_is_still_a_failed_source() -> None:
+    # An empty window means the API returned nothing, which is not the same as a
+    # window that held nothing for this track. That guard must not be weakened.
+    with pytest.raises(ValueError, match="produced no public job cards"):
+        parse_jobright_public_cards([], _jobright_definition("internship"))

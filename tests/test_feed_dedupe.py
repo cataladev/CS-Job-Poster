@@ -838,3 +838,137 @@ async def test_initialize_seeds_legacy_discord_posts_as_sent(config_factory) -> 
         assert await reopened.list_deliveries_for_send(111) == []
     finally:
         await reopened.close()
+
+
+@pytest.mark.asyncio
+async def test_dateless_source_merges_with_an_older_dated_posting(config_factory) -> None:
+    """A source that cannot report a posting date must not be split off by the window.
+
+    Jobright stamps every role with its own index time, so a months-old listing looks
+    like it was posted today. Carrying no date instead lets the same role seen through
+    a dated repository feed still merge, rather than reaching Discord twice.
+    """
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    try:
+        dated = await _ingest(
+            database,
+            _observation(
+                "source-a",
+                "a-1",
+                "https://careers.example.com/jobs/123",
+                posted_date="2026-08-01",
+            ),
+        )
+        dateless = await _ingest(
+            database,
+            _observation(
+                "jobright_internships",
+                "jr-1",
+                "https://jobright.ai/jobs/info/abc123",
+                posted_date=None,
+            ),
+        )
+
+        assert dateless.canonical_id == dated.canonical_id
+        assert not dateless.created
+        assert await database.get_delivery_counts() == {"pending": 1}
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_dateless_source_still_needs_matching_locations(config_factory) -> None:
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    try:
+        austin = await _ingest(
+            database,
+            _observation(
+                "source-a",
+                "a-1",
+                "https://careers.example.com/jobs/123",
+                location="Austin, TX",
+                posted_date="2026-08-01",
+            ),
+        )
+        seattle = await _ingest(
+            database,
+            _observation(
+                "jobright_internships",
+                "jr-1",
+                "https://jobright.ai/jobs/info/abc123",
+                location="Seattle, WA",
+                posted_date=None,
+            ),
+        )
+
+        # Abstaining on the date must not weaken any other identity requirement.
+        assert seattle.created
+        assert seattle.canonical_id != austin.canonical_id
+        assert await database.get_delivery_counts() == {"pending": 2}
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_dateless_source_still_needs_matching_titles(config_factory) -> None:
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    try:
+        intern = await _ingest(
+            database,
+            _observation(
+                "source-a",
+                "a-1",
+                "https://careers.example.com/jobs/123",
+                title="Software Engineer Intern",
+                posted_date="2026-08-01",
+            ),
+        )
+        analyst = await _ingest(
+            database,
+            _observation(
+                "jobright_internships",
+                "jr-1",
+                "https://jobright.ai/jobs/info/abc123",
+                title="Data Analyst Intern",
+                posted_date=None,
+            ),
+        )
+
+        assert analyst.created
+        assert analyst.canonical_id != intern.canonical_id
+    finally:
+        await database.close()
+
+
+def test_semantic_window_abstains_only_when_the_incoming_date_is_unknown() -> None:
+    from job_bot.database import _semantic_dedupe_window_matches
+
+    # Unknown incoming date abstains rather than asserting "today".
+    assert _semantic_dedupe_window_matches(
+        incoming_posted_date=None,
+        candidate_posted_date="2026-01-01",
+        candidate_first_seen="2026-01-01T00:00:00+00:00",
+    )
+    # A source that does report a date is still held to the three-day window.
+    assert not _semantic_dedupe_window_matches(
+        incoming_posted_date="2026-08-20",
+        candidate_posted_date="2026-08-01",
+        candidate_first_seen="2026-08-01T00:00:00+00:00",
+    )
+    assert _semantic_dedupe_window_matches(
+        incoming_posted_date="2026-08-03",
+        candidate_posted_date="2026-08-01",
+        candidate_first_seen="2026-08-01T00:00:00+00:00",
+    )
+    # No candidate date at all remains a non-match, dated or not.
+    assert not _semantic_dedupe_window_matches(
+        incoming_posted_date=None,
+        candidate_posted_date=None,
+        candidate_first_seen="not-a-date",
+    )
