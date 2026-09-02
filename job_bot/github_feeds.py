@@ -86,7 +86,14 @@ Parser = Callable[[str, "FeedDefinition"], tuple[list[JobObservation], int]]
 # slice. Naming the computer-science taxonomies directly widens coverage by roughly
 # an order of magnitude while *reducing* request volume: one window replaces the
 # previous listing fetch plus two derived windows.
-JOBRIGHT_PUBLIC_WINDOW_SIZE = 400
+#
+# The window is deliberately small. ``sortCondition=1`` orders by Jobright's index
+# time -- literally "what was just added" -- and Jobright publishes on the order of
+# 180 roles a day, so a one-minute poll expects a fraction of one new card. Thirty
+# covers roughly four hours of backlog after an outage and caps the blast radius of
+# any single run: whatever goes wrong upstream, one poll can never post more than a
+# window's worth.
+JOBRIGHT_PUBLIC_WINDOW_SIZE = 30
 JOBRIGHT_PUBLIC_SORT_CONDITIONS = (1,)
 
 # Seniority 1 covers Jobright's combined intern/new-grad band. Both tracks share it
@@ -128,9 +135,10 @@ JOBRIGHT_TAXONOMY_IDS = (
 )
 
 # Both Jobright tracks filter the same intern/new-grad taxonomy window, so one fetch
-# serves both. The cache only has to outlive a single concurrent collection pass; it
-# is far shorter than the feed interval, so consecutive polls always refetch.
-JOBRIGHT_WINDOW_CACHE_SECONDS = 120
+# serves both. The cache only has to outlive a single concurrent collection pass (a
+# few seconds); it must stay well under the feed interval below, or a poll that clears
+# the interval gate would be served stale cards and never see a new job.
+JOBRIGHT_WINDOW_CACHE_SECONDS = 30
 
 # Jobright throttles by source address. Escalate the feed's own interval when it does,
 # so a blocked deployment stops adding traffic instead of retrying into the block.
@@ -188,7 +196,10 @@ WORKDAY_PUBLIC_USER_AGENT = (
     "Mozilla/5.0 (compatible; LennyFindsJobs/1.0; "
     "+https://github.com/LennyFindsJobs)"
 )
-JOBRIGHT_POLL_INTERVAL_SECONDS = 45 * 60
+# Jobright is the one source that publishes continuously rather than in batches, so it
+# is polled far more often than the repository feeds. It is the reason the collection
+# loop ticks every minute; every other feed states a slower cadence of its own.
+JOBRIGHT_POLL_INTERVAL_SECONDS = 60
 
 
 @dataclass(frozen=True)
@@ -205,7 +216,12 @@ class FeedDefinition:
     fetch_url: str | None = None
     provider: str | None = None
     company_name: str | None = None
-    poll_interval_seconds: int = 0
+    # Every feed states its own cadence rather than inheriting the collection loop's.
+    # The loop now ticks faster than most feeds want, so that a single source can be
+    # polled frequently without dragging the rest along with it. Five minutes is the
+    # long-standing rate for the repository feeds, whose files change a few times an
+    # hour at best.
+    poll_interval_seconds: int = 300
     required_for_baseline: bool = True
 
     @property
@@ -651,7 +667,14 @@ def parse_jobright_public_cards(
     job_list: Sequence[object],
     definition: FeedDefinition,
 ) -> tuple[list[JobObservation], int]:
-    """Normalize cards from Jobright's public visitor-list endpoint."""
+    """Normalize cards from Jobright's public visitor-list endpoint.
+
+    Both tracks read one shared window and split it on each card's own seniority and
+    title, so a window can legitimately hold nothing for the track being parsed --
+    Jobright indexes in batches, and thirty consecutive internships is an ordinary
+    morning. That is an empty result, not a broken source. An empty *window* still
+    is a broken source, and still raises.
+    """
     if not job_list:
         raise ValueError(f"{definition.source_id} produced no public job cards")
 
@@ -719,8 +742,17 @@ def parse_jobright_public_cards(
                 application_url=application_url,
                 track=definition.track,
                 cycle=cycle,
-                posted_date=_iso_date(job.get("publishTime")),
+                # Deliberately absent. ``publishTime`` is Jobright's own index
+                # timestamp, not the employer's posting date: a single window of 258
+                # roles carried just two distinct values, so a role first listed
+                # months ago still reports as posted today. Publishing that date
+                # misleads readers, and feeding it to the dedupe window makes a
+                # months-old role look like a different posting from the same role
+                # seen through a repository feed, which is how the same job reaches
+                # Discord twice. No date at all is the honest signal.
+                posted_date=None,
                 raw_data={
+                    "jobright_publish_time": clean_feed_text(job.get("publishTime")),
                     "jobright_seniority": seniority,
                     "employment_type": employment_type,
                     "work_model": clean_feed_text(job.get("workModel")),
@@ -730,8 +762,6 @@ def parse_jobright_public_cards(
             )
         )
 
-    if not observations:
-        raise ValueError(f"{definition.source_id} produced no active U.S. observations")
     return observations, rejected
 
 
@@ -970,7 +1000,10 @@ FEEDS: tuple[FeedDefinition, ...] = (
         "Jobright",
         "jobright.ai",
         "public",
-        "software-engineer-intern-jobs-in-united-states",
+        # Identity, not a URL: the request is built from fetch_url. Naming the
+        # taxonomy window rather than the listing page keeps this accurate now that
+        # the listing is only the degraded fallback.
+        "taxonomy-window/internship",
         "internship",
         parse_jobright_next_data,
         fetch_url="https://jobright.ai/jobs/software-engineer-intern-jobs-in-united-states",
@@ -982,7 +1015,7 @@ FEEDS: tuple[FeedDefinition, ...] = (
         "Jobright",
         "jobright.ai",
         "public",
-        "software-engineer-new-graduate-jobs-in-united-states",
+        "taxonomy-window/new-grad",
         "new_grad",
         parse_jobright_next_data,
         fetch_url="https://jobright.ai/jobs/software-engineer-new-graduate-jobs-in-united-states",

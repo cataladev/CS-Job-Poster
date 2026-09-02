@@ -126,7 +126,10 @@ def load_config() -> AppConfig:
         ),
         company_seed_path=os.getenv("COMPANY_SEED_PATH", "data/company_watchlist_seed.csv"),
         source_settings=source_settings,
-        poll_interval_seconds=max(30, int(os.getenv("POLL_INTERVAL_SECONDS", "300"))),
+        # The collection tick, not any one feed's cadence. Feeds state their own
+        # interval and are skipped on ticks they are not due for, so this only has
+        # to be as fast as the fastest feed wants (Jobright, one minute).
+        poll_interval_seconds=max(30, int(os.getenv("POLL_INTERVAL_SECONDS", "60"))),
         recent_catchup_hours=max(0, int(os.getenv("RECENT_CATCHUP_HOURS", "48"))),
         digest_interval_seconds=max(900, int(os.getenv("DIGEST_INTERVAL_SECONDS", "14400"))),
         digest_hour_local=min(23, max(0, int(os.getenv("DIGEST_HOUR_LOCAL", "16")))),

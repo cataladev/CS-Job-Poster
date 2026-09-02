@@ -25,6 +25,13 @@ from job_bot.job_channel_commands import (
 from job_bot.models import AppConfig
 
 
+# Bump this whenever a release changes what a source can see -- a wider query, a new
+# parser, a corrected filter. Every row that becomes newly visible would otherwise look
+# like a job posted moments ago, and the whole backlog would be delivered at once. A new
+# epoch makes the next collection record everything in silence and deliver only what
+# appears after it. Sent deliveries are never replayed.
+FEED_BASELINE_EPOCH = "2026-09-02-jobright-taxonomy-window"
+
 CHANNEL_RECOVERY_KEY = "restore_established_job_channels_20260819_v1"
 MISROUTED_CHANNELS = {
     "internship": 1539496312636969020,
@@ -207,6 +214,17 @@ async def run_bot() -> None:
         logger.critical("Another posting runtime holds the database lock; refusing to start")
         await database.close()
         return
+
+    baseline_epoch = await database.apply_feed_baseline_epoch(FEED_BASELINE_EPOCH)
+    if any(baseline_epoch.values()):
+        logger.warning(
+            "feed_baseline_epoch_applied epoch=%s feeds_reset=%s deliveries_suppressed=%s "
+            "-- the next collection records every source silently and delivers only "
+            "what appears after it",
+            FEED_BASELINE_EPOCH,
+            baseline_epoch["feeds_reset"],
+            baseline_epoch["deliveries_suppressed"],
+        )
 
     recovery = await database.recover_misrouted_delivery_channels(
         recovery_key=CHANNEL_RECOVERY_KEY,

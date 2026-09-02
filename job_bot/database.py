@@ -33,6 +33,7 @@ except ImportError:  # pragma: no cover - SQLite tests do not install postgres d
 DbRow = Mapping[str, Any]
 POSTGRES_PRIMARY_RUNTIME_LOCK_ID = 5_942_248_014_240_001_17
 RECENT_FEED_CATCHUP_STATE_KEY = "readme_recent_catchup_v1"
+FEED_BASELINE_EPOCH_STATE_KEY = "feed_baseline_epoch"
 SEMANTIC_DEDUPE_WINDOW_DAYS = 3
 
 
@@ -61,9 +62,19 @@ def _semantic_dedupe_window_matches(
     candidate_first_seen: str,
 ) -> bool:
     """Limit metadata-only cross-source matching to the same posting window."""
-    incoming = _feed_date(incoming_posted_date) or datetime.now(timezone.utc).date()
     candidate = _feed_date(candidate_posted_date) or _feed_date(candidate_first_seen)
-    return candidate is not None and abs((incoming - candidate).days) <= SEMANTIC_DEDUPE_WINDOW_DAYS
+    if candidate is None:
+        return False
+    incoming = _feed_date(incoming_posted_date)
+    if incoming is None:
+        # A source that publishes no trustworthy posting date cannot be asked which
+        # posting window a role belongs to, and treating "unknown" as "today" made it
+        # answer wrongly: an aggregator listing a months-old role fell outside the
+        # window against the same role from a dated source, so both were delivered.
+        # Unknown abstains instead. Track, company, title, cycle and the complete
+        # location set all still have to match exactly for a merge.
+        return True
+    return abs((incoming - candidate).days) <= SEMANTIC_DEDUPE_WINDOW_DAYS
 
 
 def _feed_locations_overlap(
@@ -1887,6 +1898,76 @@ class Database:
             except Exception:
                 self._connection.rollback()
                 raise
+
+    async def apply_feed_baseline_epoch(self, epoch: str) -> Dict[str, int]:
+        """Return every source to a silent first snapshot, once per epoch.
+
+        A release can change what a source is able to see -- a wider query, a new
+        parser, a corrected filter -- without changing anything the pipeline uses to
+        recognise that source. Every row that becomes newly visible then looks like a
+        job posted in the last few minutes, and the whole backlog is delivered at once.
+
+        Bumping the epoch clears the baseline flags so the next collection records
+        everything in silence and delivers only what appears afterwards. Deliveries
+        already queued are suppressed too: they were queued under the old behaviour,
+        and the point of the epoch is that the first run after it posts nothing.
+
+        Sent deliveries are never touched, so nothing is re-posted.
+        """
+        unchanged = {"feeds_reset": 0, "deliveries_suppressed": 0}
+        if not epoch:
+            return unchanged
+
+        async with self._lock:
+            try:
+                stored = self._connection.execute(
+                    "SELECT value FROM app_state WHERE key = ?",
+                    (FEED_BASELINE_EPOCH_STATE_KEY,),
+                ).fetchone()
+                if stored and stored["value"] == epoch:
+                    return unchanged
+
+                now = _utc_now()
+                feeds_reset = self._connection.execute(
+                    "UPDATE feed_state SET baseline_complete = 0 WHERE baseline_complete = 1"
+                ).rowcount
+                deliveries_suppressed = self._connection.execute(
+                    """
+                    UPDATE discord_deliveries
+                    SET state = 'suppressed', updated_at = ?
+                    WHERE state IN ('pending', 'sending', 'uncertain')
+                    """,
+                    (now,),
+                ).rowcount
+                # The shared flag gates every core feed at once; clearing it is what
+                # makes the next run silent for all of them rather than one at a time.
+                self._connection.execute(
+                    """
+                    INSERT INTO app_state (key, value, updated_at)
+                    VALUES ('initial_feed_baseline_complete', 'false', ?)
+                    ON CONFLICT(key) DO UPDATE SET
+                        value = excluded.value, updated_at = excluded.updated_at
+                    """,
+                    (now,),
+                )
+                self._connection.execute(
+                    """
+                    INSERT INTO app_state (key, value, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET
+                        value = excluded.value, updated_at = excluded.updated_at
+                    """,
+                    (FEED_BASELINE_EPOCH_STATE_KEY, epoch, now),
+                )
+                self._connection.commit()
+            except Exception:
+                self._connection.rollback()
+                raise
+
+        return {
+            "feeds_reset": max(0, feeds_reset),
+            "deliveries_suppressed": max(0, deliveries_suppressed),
+        }
 
     async def recover_misrouted_delivery_channels(
         self,

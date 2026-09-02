@@ -70,6 +70,13 @@ HttpClientFactory = Callable[..., AsyncHttpClient]
 DIRECT_ATS_CACHE_TTL = timedelta(hours=4)
 MAX_POSTING_AGE_DAYS = 7
 
+# A feed's last check is stamped when its fetch finishes, a few seconds into the run,
+# but the loop starts each run one full interval after the previous one *started*. A
+# feed whose interval equals the loop's would therefore always be short by the run
+# duration and fire every other tick. This slack absorbs that, so an interval means
+# the cadence it says rather than "the next tick after it".
+FEED_INTERVAL_SLACK_SECONDS = 30
+
 
 def _is_jobright_observation(observation: object, application_url: str) -> bool:
     source_id = str(getattr(observation, "source_id", "")).casefold()
@@ -554,9 +561,13 @@ class FeedPipeline:
                         last_checked_at = last_checked_at.replace(tzinfo=UTC)
                 except (TypeError, ValueError):
                     last_checked_at = None
+                due_after = max(
+                    0,
+                    feed.poll_interval_seconds - FEED_INTERVAL_SLACK_SECONDS,
+                )
                 if last_checked_at is not None and (
                     datetime.now(UTC) - last_checked_at
-                ).total_seconds() < feed.poll_interval_seconds:
+                ).total_seconds() < due_after:
                     return FeedFetchResult(
                         definition=feed,
                         observations=[],
