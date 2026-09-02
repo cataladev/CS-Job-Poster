@@ -1,24 +1,34 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import urlsplit
 
+import aiohttp
 import markdown
 from bs4 import BeautifulSoup, Tag
 
+from job_bot.feed_health import SourceHealthReporter
 from job_bot.models import JobPosting
 from job_bot.utils.feed_normalization import (
     clean_feed_text,
     is_us_location,
     sanitize_application_url,
 )
-from job_bot.utils.http import AsyncHttpClient
+from job_bot.utils.http import (
+    AsyncHttpClient,
+    ProxyEndpoint,
+    describe_proxy_pool,
+    load_proxy_pool,
+)
+from job_bot.utils.notify import Notifier, load_notifier
 from job_bot.utils.normalization import build_row_hash, detect_season_term
 from job_bot.watchlist import TrackClassifier
 
@@ -70,11 +80,97 @@ class JobObservation:
 Parser = Callable[[str, "FeedDefinition"], tuple[list[JobObservation], int]]
 
 
-# Jobright's public visitor endpoint supports larger windows than its HTML listing,
-# but its pagination becomes unreliable at deeper offsets. Two complementary first
-# windows provide fresh coverage without turning every poll into a bulk crawl.
-JOBRIGHT_PUBLIC_WINDOW_SIZE = 100
-JOBRIGHT_PUBLIC_SORT_CONDITIONS = (0, 1)
+# Jobright's public visitor endpoint filters server-side on an explicit taxonomy
+# list. The server-rendered listing pages only ever carry the ``00-00-00`` fallback
+# taxonomy, so deriving the query from them returned one broad software-engineering
+# slice. Naming the computer-science taxonomies directly widens coverage by roughly
+# an order of magnitude while *reducing* request volume: one window replaces the
+# previous listing fetch plus two derived windows.
+JOBRIGHT_PUBLIC_WINDOW_SIZE = 400
+JOBRIGHT_PUBLIC_SORT_CONDITIONS = (1,)
+
+# Seniority 1 covers Jobright's combined intern/new-grad band. Both tracks share it
+# and separate afterwards on the card's own seniority, employment type, and title, so
+# a mislabeled band cannot silently drop a role.
+JOBRIGHT_PUBLIC_SENIORITY = (1,)
+
+# Computer-science job functions a student or new graduate can apply for. Jobright
+# rejects an empty taxonomy list, and its ``title`` field is cosmetic -- only the id
+# selects roles. Grouped by Jobright's own second-level category for review.
+JOBRIGHT_TAXONOMY_IDS = (
+    # Backend engineering
+    "01-01-01", "01-01-02", "01-01-03", "01-01-04", "01-01-05",
+    "01-01-06", "01-01-07", "01-01-09", "01-01-10",
+    # Frontend, mobile, and game engineering
+    "01-02-01", "01-02-02", "01-02-03", "01-02-04", "01-02-05",
+    "01-02-06", "01-02-07", "01-02-08", "01-02-09", "01-02-10",
+    # QA and testing
+    "01-03-01", "01-03-02", "01-03-03",
+    # Infrastructure, SRE, and security
+    "01-04-01", "01-04-02", "01-04-03", "01-04-04", "01-04-05",
+    "01-04-06", "01-04-07", "01-04-08", "01-04-09",
+    # IT and technical support
+    "01-05-01", "01-05-02", "01-05-03", "01-05-04", "01-05-05", "01-05-06",
+    # Machine learning and AI
+    "01-06-01", "01-06-02", "01-06-03", "01-06-04", "01-06-05", "01-06-06",
+    "01-06-07", "01-06-08", "01-06-09", "01-06-10", "01-06-11",
+    # Technical product management
+    "01-07-03", "01-07-04",
+    # Data and analytics
+    "01-08-01", "01-08-02", "01-08-03", "01-08-04",
+    "01-08-05", "01-08-06", "01-08-07",
+    # Engineering management
+    "01-09-01", "01-09-02", "01-09-03", "01-09-04",
+    # Technical program management
+    "01-10-01", "01-10-02", "01-10-03",
+    # Embedded software
+    "02-01-03",
+)
+
+# Both Jobright tracks filter the same intern/new-grad taxonomy window, so one fetch
+# serves both. The cache only has to outlive a single concurrent collection pass; it
+# is far shorter than the feed interval, so consecutive polls always refetch.
+JOBRIGHT_WINDOW_CACHE_SECONDS = 120
+
+# Jobright throttles by source address. Escalate the feed's own interval when it does,
+# so a blocked deployment stops adding traffic instead of retrying into the block.
+# One minute of rest first, then five, then ten, then five more each time. The
+# last entry is the ceiling: a source that keeps refusing is retried hourly, not
+# abandoned.
+JOBRIGHT_BLOCK_BACKOFF_STEPS = (60, *(minutes * 60 for minutes in range(5, 61, 5)))
+
+# Optional egress pool for Jobright only. A deployment whose own address Jobright has
+# stopped serving (a datacenter range, or one that tripped the throttle) can name one
+# or more ISP proxies here; every other feed keeps leaving through the host address.
+#
+# The list normally lives in its own file named by ``JOBRIGHT_PROXY_FILE``, one entry
+# per line, so a provider's export can be dropped in unedited and the credentials stay
+# out of the process environment. ``JOBRIGHT_PROXY_URLS`` takes the same entries inline
+# for a short pool, and the shared username/password pair fills in for entries that
+# carry no credentials of their own.
+# Where Jobright's own transitions are announced -- boot, degradation, each egress
+# rotation, and recovery. A Discord webhook URL is the expected value; with it unset
+# the same lines still reach the application log.
+JOBRIGHT_STATUS_WEBHOOK_ENV = "JOBRIGHT_STATUS_WEBHOOK_URL"
+
+JOBRIGHT_PROXY_FILE_ENV = "JOBRIGHT_PROXY_FILE"
+JOBRIGHT_PROXY_URLS_ENV = "JOBRIGHT_PROXY_URLS"
+JOBRIGHT_PROXY_USERNAME_ENV = "JOBRIGHT_PROXY_USERNAME"
+JOBRIGHT_PROXY_PASSWORD_ENV = "JOBRIGHT_PROXY_PASSWORD"
+
+# How many addresses one poll may try before giving up and backing off. A pool can hold
+# hundreds of addresses; walking all of them when Jobright itself is down would turn a
+# single poll into a burst of hundreds of requests. Three is enough to step over a few
+# poisoned addresses, and the sticky index means later polls resume further along the
+# pool rather than re-testing the same head every time.
+JOBRIGHT_MAX_EGRESS_ATTEMPTS = 3
+
+# Failures that are properties of the address the request left through, rather than of
+# Jobright or of the query. Only these justify moving to the next endpoint; a malformed
+# payload or an empty window would repeat identically from every address.
+JOBRIGHT_EGRESS_SCOPED_FAILURES = frozenset(
+    {"blocked", "throttled", "timeout", "proxy_error"}
+)
 JOBRIGHT_NEW_GRAD_SIGNALS = (
     "new grad",
     "new graduate",
@@ -135,6 +231,9 @@ class FeedFetchResult:
     content_sha: str | None
     not_modified: bool = False
     skipped: bool = False
+    # Set when a source produced a usable but incomplete snapshot, so operators can
+    # tell a healthy poll from one that only reached a fallback surface.
+    degraded_reason: str | None = None
 
 
 def _sequence(value: object) -> Sequence[object]:
@@ -646,6 +745,117 @@ def _jobright_is_repost(job: Mapping[str, object]) -> bool:
     return False
 
 
+def _dedupe_jobright_cards(cards: Sequence[object]) -> list[object]:
+    """Collapse repeated cards by job id, keeping first-seen order."""
+    unique_cards: list[object] = []
+    seen_ids: set[str] = set()
+    for card in cards:
+        job = card.get("jobResult") if isinstance(card, Mapping) else None
+        job_id = clean_feed_text(job.get("jobId")) if isinstance(job, Mapping) else ""
+        key = job_id or hashlib.sha256(
+            json.dumps(card, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
+        if key in seen_ids:
+            continue
+        seen_ids.add(key)
+        unique_cards.append(card)
+    return unique_cards
+
+
+def build_jobright_public_query() -> dict[str, object]:
+    """Build the anonymous visitor query for computer-science intern/new-grad roles.
+
+    Jobright's public endpoint takes its filters from the request body rather than
+    from an account, so naming the taxonomies here is what replaces the personalized
+    recommendation feed.
+
+    The id selects the job function and the ``title`` text is never matched against
+    anything -- but it must not be empty. An empty title returns zero rows with
+    ``success: true`` and no error code, which reads exactly like a genuinely empty
+    result. The id is repeated into it so the field is self-evidently a placeholder.
+    """
+    return {
+        "value": "",
+        "jobTaxonomyList": [
+            {"taxonomyId": taxonomy_id, "title": taxonomy_id}
+            for taxonomy_id in JOBRIGHT_TAXONOMY_IDS
+        ],
+        "locations": [],
+        "jobTypes": [],
+        "seniority": list(JOBRIGHT_PUBLIC_SENIORITY),
+        "workModel": [],
+    }
+
+
+def classify_jobright_failure(error: BaseException) -> str:
+    """Name why a visitor window failed so operators can act on the right cause.
+
+    Jobright answers a throttled source address with ``403``/``errorCode 43004`` and
+    an address it has stopped serving with a connection timeout. Both previously
+    reached the logs as one undifferentiated warning, which is how a blocked
+    deployment ran for weeks on a silently truncated snapshot.
+
+    A configured proxy adds a third party that can fail. Its failures are named
+    first, because an unreachable proxy is a broken egress rather than a slow
+    Jobright, and the two call for different operator action. The HTTP client wraps
+    transport errors in ``RuntimeError``, so the chained cause carries the only
+    reliable evidence of which one it was.
+    """
+    chain = _exception_chain(error)
+    text = " ".join(str(item) for item in chain).lower()
+    if any(
+        isinstance(item, (aiohttp.ClientProxyConnectionError, aiohttp.ClientHttpProxyError))
+        for item in chain
+    ) or "cannot connect to proxy" in text or "returned 407" in text:
+        return "proxy_error"
+    if (
+        "timeout" in text
+        or "timed out" in text
+        or any(isinstance(item, TimeoutError) for item in chain)
+    ):
+        return "timeout"
+    if "returned 403" in text or "43004" in text:
+        return "blocked"
+    if "returned 429" in text:
+        return "throttled"
+    if "returned 5" in text:
+        return "upstream_error"
+    if "invalid payload" in text:
+        return "malformed"
+    return "unavailable"
+
+
+def _exception_chain(error: BaseException) -> list[BaseException]:
+    """The error plus the causes it was raised from, without cycling."""
+    chain: list[BaseException] = []
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        chain.append(current)
+        current = current.__cause__ or current.__context__
+    return chain
+
+
+def extract_http_status(error: BaseException | str) -> int | None:
+    """Recover the HTTP status from a failure, when the request got one at all.
+
+    Transport-level failures -- a timeout, a TLS handshake, a refused proxy connect --
+    never receive a response, so they have no status to report. Returning ``None``
+    for those keeps an alert honest instead of inventing a code.
+    """
+    match = re.search(r"returned (\d{3})\b", str(error))
+    return int(match.group(1)) if match else None
+
+
+def jobright_backoff_seconds(consecutive_failures: int) -> int:
+    """Escalate the feed interval while Jobright keeps refusing this source address."""
+    if consecutive_failures <= 0:
+        return JOBRIGHT_POLL_INTERVAL_SECONDS
+    index = min(consecutive_failures, len(JOBRIGHT_BLOCK_BACKOFF_STEPS)) - 1
+    return JOBRIGHT_BLOCK_BACKOFF_STEPS[index]
+
+
 def _jobright_page_props(
     payload: object,
     definition: FeedDefinition,
@@ -785,6 +995,94 @@ FEED_BY_ID = {feed.source_id: feed for feed in FEEDS}
 
 
 class GitHubFeedFetcher:
+    def __init__(
+        self,
+        *,
+        jobright_proxies: Sequence[ProxyEndpoint] | None = None,
+        jobright_notifier: Notifier | None = None,
+    ) -> None:
+        # Both Jobright tracks read the same taxonomy window within one collection
+        # pass. The lock keeps the concurrent pair to a single upstream request.
+        self._jobright_window_lock = asyncio.Lock()
+        self._jobright_window_cards: list[object] | None = None
+        self._jobright_window_fetched_at = 0.0
+        self._jobright_consecutive_failures = 0
+        self._jobright_retry_after = 0.0
+        # Jobright is the only source that throttles this deployment by address, so
+        # the optional ISP-proxy pool is scoped to it. An empty pool means every
+        # request leaves through the host's own address, as it always has.
+        self._jobright_proxies: tuple[ProxyEndpoint, ...] = (
+            tuple(jobright_proxies)
+            if jobright_proxies is not None
+            else load_proxy_pool(
+                JOBRIGHT_PROXY_URLS_ENV,
+                file_env=JOBRIGHT_PROXY_FILE_ENV,
+                username_env=JOBRIGHT_PROXY_USERNAME_ENV,
+                password_env=JOBRIGHT_PROXY_PASSWORD_ENV,
+            )
+        )
+        # Sticky: a working address is kept until it is refused, so a healthy pool
+        # does not spread this feed's traffic across every address it owns.
+        self._jobright_proxy_index = 0
+        self._logger = logging.getLogger(self.__class__.__name__)
+        if self._jobright_proxies:
+            # The pool is read once, at construction: replacing the list file takes
+            # effect on the next restart, not mid-run.
+            self._logger.info(
+                "jobright_proxy_pool_loaded count=%s endpoints=%s",
+                len(self._jobright_proxies),
+                describe_proxy_pool(self._jobright_proxies),
+            )
+        self._jobright_health = SourceHealthReporter(
+            "Jobright",
+            jobright_notifier
+            or load_notifier(JOBRIGHT_STATUS_WEBHOOK_ENV, logger_name="jobright_status"),
+        )
+
+    def jobright_seconds_until_retry(self) -> float:
+        """Seconds remaining before Jobright should be contacted again.
+
+        Jobright throttles by source address, so retrying a refused deployment on the
+        normal cadence only adds traffic to a door that is already closed.
+        """
+        return max(0.0, self._jobright_retry_after - time.monotonic())
+
+    def jobright_egress(self) -> ProxyEndpoint | None:
+        """The proxy Jobright requests currently leave through, if any."""
+        if not self._jobright_proxies:
+            return None
+        return self._jobright_proxies[self._jobright_proxy_index % len(self._jobright_proxies)]
+
+    def jobright_egress_label(self) -> str:
+        """Name the current egress for logs, without exposing credentials."""
+        endpoint = self.jobright_egress()
+        return endpoint.label if endpoint else "direct"
+
+    def _jobright_request_kwargs(self) -> dict[str, Any]:
+        endpoint = self.jobright_egress()
+        return endpoint.request_kwargs() if endpoint else {}
+
+    def _rotate_jobright_egress(self, reason: str) -> bool:
+        """Move to the next proxy after an address-scoped refusal.
+
+        Returns whether another untried endpoint is now current. With no pool, or
+        after every endpoint in it has been refused within one attempt, the caller
+        falls through to the existing backoff instead of cycling addresses.
+        """
+        if len(self._jobright_proxies) <= 1:
+            return False
+        previous = self.jobright_egress_label()
+        self._jobright_proxy_index = (self._jobright_proxy_index + 1) % len(
+            self._jobright_proxies
+        )
+        self._logger.warning(
+            "jobright_egress_rotated reason=%s from=%s to=%s",
+            reason,
+            previous,
+            self.jobright_egress_label(),
+        )
+        return True
+
     async def fetch(
         self,
         definition: FeedDefinition,
@@ -806,12 +1104,9 @@ class GitHubFeedFetcher:
         if definition.provider == "amazon":
             return await self._fetch_amazon_board(definition, http_client)
         if definition.provider == "jobright":
-            return await self._fetch_jobright_public_windows(
-                definition,
-                http_client,
-                etag=etag,
-                last_modified=last_modified,
-            )
+            # Deliberately unconditional: the listing page's cache validators can be
+            # unchanged while the dynamic window behind it has moved on entirely.
+            return await self._fetch_jobright_public_windows(definition, http_client)
         headers: dict[str, str] = {}
         if etag:
             headers["If-None-Match"] = etag
@@ -845,105 +1140,215 @@ class GitHubFeedFetcher:
         self,
         definition: FeedDefinition,
         http_client: AsyncHttpClient,
-        *,
-        etag: str | None,
-        last_modified: str | None,
     ) -> FeedFetchResult:
-        """Expand Jobright's small SSR snapshot with bounded public visitor windows.
+        """Collect Jobright's anonymous computer-science intern and new-grad window.
 
-        The SEO pages render only 16--20 cards despite listing far more results. The
-        same anonymous visitor endpoint used by the page accepts a larger bounded
-        result window. We merge its relevance and recency windows (100 cards each),
-        avoiding an unbounded crawl while catching fresh postings within the poll
-        interval. If Jobright's visitor API is temporarily unavailable, the validated
-        SSR snapshot remains a safe fallback.
+        The query names its taxonomies directly instead of deriving them from a
+        server-rendered listing page, whose ``00-00-00`` fallback taxonomy limited the
+        source to one broad software-engineering slice. Both tracks share the single
+        window, so the whole integration now costs one request per poll instead of six.
+        The validated listing snapshot remains a fallback, but reaching it is recorded
+        as a degraded poll rather than a healthy one.
         """
-        # The HTML snapshot can be unchanged even when roles beyond its tiny
-        # first page have changed. Do not let its cache validators suppress the
-        # dynamic visitor windows that make this source useful.
-        headers: dict[str, str] = {}
-        text, response_headers, status = await http_client.get_text(
-            definition.raw_url,
-            headers=headers,
-        )
-        soup = BeautifulSoup(text, "html.parser")
-        data_node = soup.find("script", id="__NEXT_DATA__")
-        if data_node is None or not data_node.string:
-            raise ValueError(f"{definition.source_id} is missing its Next.js payload")
-        try:
-            payload = json.loads(data_node.string)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"{definition.source_id} returned invalid Next.js JSON") from exc
-        page_props = _jobright_page_props(payload, definition)
-        job_list = list(page_props["jobList"])
-        query = page_props.get("query")
-        if not isinstance(query, Mapping):
-            observations, rejected = parse_jobright_public_cards(job_list, definition)
+        remaining = self.jobright_seconds_until_retry()
+        if remaining > 0:
+            self._logger.warning(
+                "jobright_backoff_active source=%s seconds_until_retry=%s consecutive_failures=%s",
+                definition.source_id,
+                int(remaining),
+                self._jobright_consecutive_failures,
+            )
             return FeedFetchResult(
                 definition=definition,
-                observations=observations,
-                rejected=rejected,
-                etag=response_headers.get("ETag"),
-                last_modified=response_headers.get("Last-Modified"),
-                content_sha=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                observations=[],
+                rejected=0,
+                etag=None,
+                last_modified=None,
+                content_sha=None,
+                skipped=True,
+                degraded_reason="backoff",
             )
 
+        try:
+            cards = await self._jobright_taxonomy_window(http_client)
+        except (RuntimeError, TimeoutError) as exc:
+            return await self._fetch_jobright_listing_snapshot(
+                definition,
+                http_client,
+                degraded_reason=classify_jobright_failure(exc),
+                error=exc,
+            )
+
+        observations, rejected = parse_jobright_public_cards(cards, definition)
+        payload = json.dumps({"jobList": cards}, sort_keys=True, default=str)
+        return FeedFetchResult(
+            definition=definition,
+            observations=observations,
+            rejected=rejected,
+            etag=None,
+            last_modified=None,
+            content_sha=hashlib.sha256(payload.encode("utf-8")).hexdigest(),
+        )
+
+    async def _jobright_taxonomy_window(
+        self,
+        http_client: AsyncHttpClient,
+    ) -> list[object]:
+        """Request the shared taxonomy window, reusing it across both tracks.
+
+        When an ISP-proxy pool is configured, a refusal that belongs to the address
+        rather than to the query moves the attempt to the next endpoint. Backoff is
+        only reached once every endpoint has been refused, so one poisoned address
+        costs a retry instead of the whole poll.
+        """
+        async with self._jobright_window_lock:
+            now = time.monotonic()
+            if (
+                self._jobright_window_cards is not None
+                and now - self._jobright_window_fetched_at < JOBRIGHT_WINDOW_CACHE_SECONDS
+            ):
+                return self._jobright_window_cards
+
+            query = build_jobright_public_query()
+            attempts = min(
+                max(1, len(self._jobright_proxies)), JOBRIGHT_MAX_EGRESS_ATTEMPTS
+            )
+            last_error: BaseException | None = None
+            for attempt in range(attempts):
+                egress = self.jobright_egress_label()
+                try:
+                    collected, status = await self._jobright_window_request(
+                        http_client, query
+                    )
+                except (RuntimeError, TimeoutError) as exc:
+                    last_error = exc
+                    reason = classify_jobright_failure(exc)
+                    status = extract_http_status(exc)
+                    if reason not in JOBRIGHT_EGRESS_SCOPED_FAILURES:
+                        raise
+                    self._logger.warning(
+                        "jobright_window_refused egress=%s reason=%s error=%s",
+                        egress,
+                        reason,
+                        exc,
+                    )
+                    # On the final attempt the pool is exhausted: rotating here would
+                    # announce a retry that never happens and leave the reported egress
+                    # pointing at an address this attempt never used.
+                    if attempt == attempts - 1 or not self._rotate_jobright_egress(reason):
+                        raise
+                    # Announced per rotation: which address was refused and why is the
+                    # one thing an operator needs to retire a burnt address.
+                    await self._jobright_health.record_rotation(
+                        from_egress=egress,
+                        to_egress=self.jobright_egress_label(),
+                        reason=reason,
+                        error=exc,
+                        status=status,
+                    )
+                    continue
+
+                unique_cards = _dedupe_jobright_cards(collected)
+                self._jobright_window_cards = unique_cards
+                self._jobright_window_fetched_at = now
+                self._jobright_consecutive_failures = 0
+                self._jobright_retry_after = 0.0
+                await self._jobright_health.record_success(
+                    egress=egress,
+                    observations=len(unique_cards),
+                    status=status,
+                )
+                return unique_cards
+
+            # Unreachable in practice: the loop either returns or raises above.
+            raise last_error or RuntimeError("visitor API returned no window")
+
+    async def _jobright_window_request(
+        self,
+        http_client: AsyncHttpClient,
+        query: Mapping[str, object],
+    ) -> tuple[list[object], int | None]:
+        """Call the visitor endpoint once, through the current egress address."""
+        request_kwargs = self._jobright_request_kwargs()
+        collected: list[object] = []
+        last_status: int | None = None
         for sort_condition in JOBRIGHT_PUBLIC_SORT_CONDITIONS:
             url = (
                 "https://jobright.ai/swan/recommend/visitor-list/jobs"
                 f"?sortCondition={sort_condition}&count={JOBRIGHT_PUBLIC_WINDOW_SIZE}"
                 "&position=0&useLegacySearch=true"
             )
-            try:
-                response, _, _ = await http_client.post_json(url, json=dict(query))
-            except RuntimeError as exc:
-                self._log_jobright_window_failure(definition, sort_condition, exc)
-                continue
+            response, _, last_status = await http_client.post_json(
+                url, json=query, **request_kwargs
+            )
             result = response.get("result") if isinstance(response, Mapping) else None
             cards = result.get("jobList") if isinstance(result, Mapping) else None
-            if not isinstance(response, Mapping) or not response.get("success") or not isinstance(cards, list):
-                self._log_jobright_window_failure(
-                    definition,
-                    sort_condition,
-                    ValueError("visitor API returned an invalid payload"),
-                )
-                continue
-            job_list.extend(cards)
+            if not isinstance(response, Mapping) or not response.get("success"):
+                raise RuntimeError("visitor API returned an invalid payload")
+            if not isinstance(cards, list) or not cards:
+                raise RuntimeError("visitor API returned an empty result window")
+            collected.extend(cards)
+        return collected, last_status
 
-        unique_cards: list[object] = []
-        seen_ids: set[str] = set()
-        for card in job_list:
-            job = card.get("jobResult") if isinstance(card, Mapping) else None
-            job_id = clean_feed_text(job.get("jobId")) if isinstance(job, Mapping) else ""
-            key = job_id or hashlib.sha256(
-                json.dumps(card, sort_keys=True, default=str).encode("utf-8")
-            ).hexdigest()
-            if key in seen_ids:
-                continue
-            seen_ids.add(key)
-            unique_cards.append(card)
-        observations, rejected = parse_jobright_public_cards(unique_cards, definition)
-        combined_payload = json.dumps({"jobList": unique_cards}, sort_keys=True, default=str)
+    async def _fetch_jobright_listing_snapshot(
+        self,
+        definition: FeedDefinition,
+        http_client: AsyncHttpClient,
+        *,
+        degraded_reason: str,
+        error: BaseException,
+    ) -> FeedFetchResult:
+        """Fall back to the server-rendered listing and record the poll as degraded.
+
+        The listing renders roughly 16--20 cards where the taxonomy window returns
+        hundreds. That is a usable stopgap but never a healthy inventory, so it is
+        logged at error level with the reason Jobright refused the window.
+        """
+        self._jobright_consecutive_failures += 1
+        self._jobright_window_cards = None
+        backoff_seconds = jobright_backoff_seconds(self._jobright_consecutive_failures)
+        self._jobright_retry_after = time.monotonic() + backoff_seconds
+        self._logger.error(
+            "jobright_visitor_window_unavailable source=%s reason=%s egress=%s "
+            "consecutive_failures=%s next_attempt_seconds=%s error=%s",
+            definition.source_id,
+            degraded_reason,
+            self.jobright_egress_label(),
+            self._jobright_consecutive_failures,
+            backoff_seconds,
+            error,
+        )
+        await self._jobright_health.record_failure(
+            egress=self.jobright_egress_label(),
+            reason=degraded_reason,
+            error=error,
+            consecutive_failures=self._jobright_consecutive_failures,
+            next_attempt_seconds=backoff_seconds,
+            status=extract_http_status(error),
+        )
+
+        # The snapshot leaves through the same address as the window it replaces: a
+        # deployment Jobright refuses outright cannot reach the listing page either.
+        text, response_headers, _ = await http_client.get_text(
+            definition.raw_url,
+            headers={},
+            **self._jobright_request_kwargs(),
+        )
+        observations, rejected = parse_jobright_next_data(text, definition)
+        self._logger.warning(
+            "jobright_listing_snapshot_used source=%s reason=%s observations=%s",
+            definition.source_id,
+            degraded_reason,
+            len(observations),
+        )
         return FeedFetchResult(
             definition=definition,
             observations=observations,
             rejected=rejected,
             etag=response_headers.get("ETag"),
             last_modified=response_headers.get("Last-Modified"),
-            content_sha=hashlib.sha256(combined_payload.encode("utf-8")).hexdigest(),
-        )
-
-    def _log_jobright_window_failure(
-        self,
-        definition: FeedDefinition,
-        sort_condition: int,
-        error: Exception,
-    ) -> None:
-        logging.getLogger(self.__class__.__name__).warning(
-            "jobright_public_window_failed source=%s sort=%s error=%s",
-            definition.source_id,
-            sort_condition,
-            error,
+            content_sha=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            degraded_reason=degraded_reason,
         )
 
     async def _fetch_smartrecruiters_board(

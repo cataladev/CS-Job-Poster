@@ -27,8 +27,9 @@ digest-alert roles, plus personal company and location targets.
 - Records the first complete inventory silently and posts only later additions.
 - Fails closed when a feed is malformed, suspiciously empty, or unavailable.
 - Uses conditional GitHub requests (`ETag` and `Last-Modified`) to avoid reprocessing
-  unchanged repository feeds; Jobright's dynamic public windows are intentionally
-  checked each main poll.
+  unchanged repository feeds. Jobright's dynamic public window is requested
+  unconditionally, because the listing page's cache validators can be unchanged while
+  the window behind it has moved on; it keeps its own 45-minute interval.
 - Requires row-level U.S. evidence. Mixed-location rows retain only their U.S.
   locations; foreign, ambiguous, archived, and inactive rows are not published.
 - Applies no title, category, seniority, season, or job-age filter.
@@ -55,8 +56,8 @@ the runtime.
 | sndsh internships | `sndsh404/summer-2027-internships` — `main/README.md` | Markdown table |
 | Internship Engine | `zshah101/Automated-List-Of-Summer-2027-and-Fall-2026-Tech-Internships` — `main/docs/api/jobs.json` | JSON |
 | Internship Engine README | `zshah101/Automated-List-Of-Summer-2027-and-Fall-2026-Tech-Internships` — `main/README.md` | Markdown/HTML table |
-| Jobright software-engineering internships | `jobright.ai/jobs/software-engineer-intern-jobs-in-united-states` | Public SSR query + anonymous visitor API |
-| Jobright software-engineering new grad | `jobright.ai/jobs/software-engineer-new-graduate-jobs-in-united-states` | Public SSR query + anonymous visitor API |
+| Jobright computer-science internships | `jobright.ai` anonymous visitor API | Taxonomy-scoped JSON window (SSR listing fallback) |
+| Jobright computer-science new grad | `jobright.ai` anonymous visitor API | Taxonomy-scoped JSON window (SSR listing fallback) |
 
 In addition, the active runtime builds a reviewed direct-employer board index from the
 supported ATS URLs in `data/company_watchlist_seed.csv`: currently Greenhouse, Lever,
@@ -73,12 +74,49 @@ outbox, and Discord delivery path. Each source receives a silent first baseline,
 delivers new jobs independently even when a core GitHub or Jobright feed is unavailable.
 
 The fixed feed definitions live in `job_bot/github_feeds.py`. `config/sources.yaml`
-is deliberately not a runtime switchboard for the MVP. The Jobright integration derives
-its public U.S. search query from the server-rendered listing, then merges the first 100
-recommended and first 100 most-recent anonymous visitor results. This bounded scan is
-rate-limited to one attempt every 45 minutes, avoids account-specific recommendations
-and unbounded scraping, and falls back to the public listing snapshot if the visitor API
-is temporarily down.
+is deliberately not a runtime switchboard for the MVP. The Jobright integration names
+its computer-science job functions directly in the anonymous visitor query
+(`JOBRIGHT_TAXONOMY_IDS`) rather than deriving them from the server-rendered listing,
+whose `00-00-00` fallback taxonomy limited the source to one broad software-engineering
+slice. Both tracks share a single most-recent window, so the whole integration costs one
+request per attempt, bounded to one attempt every 45 minutes. It avoids account-specific
+recommendations and unbounded scraping. If the visitor API refuses the window, the
+listing snapshot is used as a stopgap, the poll is recorded as degraded rather than
+healthy, and the feed backs off progressively (45 minutes, then 90, 3 hours, 6 hours)
+until a window succeeds. Jobright throttles by source address, so a refused deployment
+stops adding traffic instead of retrying into the block.
+
+Because that throttle is per address, Jobright requests can optionally leave through an
+ISP proxy pool. `JOBRIGHT_PROXY_FILE` names a list file with one proxy per line, which
+is how a provider's export is used unedited; `JOBRIGHT_PROXY_URLS` takes the same
+entries inline, comma-separated, for a short pool. Both accept `host:port:user:pass`,
+`user:pass:host:port`, `user:pass@host:port`, bare `host:port`, and full `http://` URLs,
+with `#` comments and blank lines ignored and duplicates collapsed; entries carrying no
+credentials of their own fall back to `JOBRIGHT_PROXY_USERNAME`/`JOBRIGHT_PROXY_PASSWORD`.
+Keep the list beside the env file (`/etc/job-bot/jobright-proxies.txt`) rather than in
+the repository, so the credentials stay out of both git and the process environment; the
+pool is read at startup, so a replaced list takes effect on the next restart.
+
+Jobright's own transitions are announced rather than polled for: the first successful
+window after startup, entry into failure (with the reason, the address it failed
+through, the upstream error, and when the next attempt is due), each egress rotation
+naming the address that was refused and the one being tried next, and the recovery with
+how many attempts failed and how long the source was degraded. A steady feed, and a
+feed failing repeatedly for the same reason, both stay quiet — a channel that repeats
+itself every 45 minutes stops being read; a changed failure reason is announced again,
+because a block turning into a dead proxy is a different problem with a different fix.
+Set `JOBRIGHT_STATUS_WEBHOOK_URL` to a Discord webhook to receive these; unset, the same
+lines go to the application log. The webhook is best-effort — an unreachable or
+rejecting webhook is logged by host (never by URL, which is itself a credential) and
+never interrupts a poll.
+
+The pool applies to Jobright only; every other feed keeps using the host's address. One
+address is used until it is refused: a `403`, `429`, timeout, or proxy failure moves the
+attempt to the next address within the same poll, while a malformed or empty window —
+which would repeat from every address — is not retried elsewhere. Backoff begins only
+after every address has been refused, and the listing snapshot fallback uses the
+address of the last attempt. Logs and errors carry the proxy host only, never its
+credentials. With the variables unset the integration behaves exactly as before.
 Continuation rows inherit the preceding company, location cells are split and reduced to
 explicit U.S. locations, and every safe application link in a multi-apply row is observed
 before global deduplication. A second U.S.-only check runs immediately before Discord

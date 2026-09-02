@@ -149,3 +149,38 @@ async def test_concurrent_collectors_serialize_discord_publishing(config_factory
     release.set()
     await asyncio.gather(first, second)
     assert maximum_active == 1
+
+
+def test_client_defaults_to_no_mentions_so_nothing_can_ping_everyone() -> None:
+    # The baseline is "ping nothing". Each send site re-enables exactly the one
+    # role or the specific members it means to mention, so no job title, company
+    # name, or quoted upstream string can reach @everyone or @here.
+    captured: dict[str, object] = {}
+
+    original_init = discord.Client.__init__
+
+    def recording_init(self, **kwargs) -> None:
+        captured.update(kwargs)
+        original_init(self, **kwargs)
+
+    discord.Client.__init__ = recording_init  # type: ignore[method-assign]
+    try:
+        FeedDiscordClient(
+            config=SimpleNamespace(discord_channel_id=1, discord_new_grad_channel_id=2),
+            database=SimpleNamespace(),
+            pipeline=SimpleNamespace(),
+            company_source_pipeline=SimpleNamespace(),
+            publisher=SimpleNamespace(),
+        )
+    except Exception:
+        # Construction may fail later on the stubbed collaborators; the client
+        # arguments are already captured by then.
+        pass
+    finally:
+        discord.Client.__init__ = original_init  # type: ignore[method-assign]
+
+    allowed = captured.get("allowed_mentions")
+    assert allowed is not None
+    assert allowed.everyone is False
+    assert allowed.roles is False
+    assert allowed.users is False

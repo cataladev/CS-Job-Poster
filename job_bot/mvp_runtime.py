@@ -51,7 +51,14 @@ class FeedDiscordClient(discord.Client):
         intents = discord.Intents.default()
         intents.message_content = False
         intents.members = False
-        super().__init__(intents=intents)
+        # Nothing pings by default. Every mention this bot sends is an explicit
+        # allowlist at the send site (one digest role, or the members targeting a
+        # job), so @everyone and @here can never be reached -- not by a job title, a
+        # company name, or an upstream error string that happens to contain them.
+        super().__init__(
+            intents=intents,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
         self.config = config
         self.pipeline = pipeline
         self.company_source_pipeline = company_source_pipeline
