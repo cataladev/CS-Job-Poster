@@ -51,6 +51,7 @@ class FeedRunStats:
     deliveries_reconciled: int = 0
     direct_link_boards_fetched: int = 0
     baseline_completed: bool = False
+    source_errors: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
 
@@ -163,16 +164,21 @@ class FeedPipeline:
                     for feed in self.feeds
                 ]
                 results = await asyncio.gather(*tasks, return_exceptions=True)
-                stats.direct_link_boards_fetched = await self._prime_direct_link_cache(
+                (
+                    stats.direct_link_boards_fetched,
+                    direct_link_errors,
+                ) = await self._prime_direct_link_cache(
                     results,
                     http_client,
                     semaphore,
                 )
+                stats.source_errors.extend(direct_link_errors)
 
             for feed, result in zip(self.feeds, results):
                 stats.feeds_checked += 1
                 if isinstance(result, BaseException):
                     error = f"{feed.source_id}: {result}"
+                    stats.source_errors.append(error)
                     if feed.required_for_baseline:
                         stats.errors.append(error)
                     await self.database.record_feed_error(
@@ -220,6 +226,7 @@ class FeedPipeline:
                         f"{len(source_ingest_errors)} observation ingestion error(s); "
                         f"first: {source_ingest_errors[0]}"
                     )
+                    stats.source_errors.append(f"{feed.source_id}: {error}")
                     if feed.required_for_baseline:
                         stats.errors.append(f"{feed.source_id}: {error}")
                     await self.database.record_feed_error(
@@ -449,7 +456,7 @@ class FeedPipeline:
         results: list[FeedFetchResult | BaseException],
         http_client: AsyncHttpClient,
         semaphore: asyncio.Semaphore,
-    ) -> int:
+    ) -> tuple[int, list[str]]:
         """Fetch only stale ATS boards for companies in the current Jobright batch.
 
         Responses populate the local direct-link cache only; they are not ingested
@@ -457,7 +464,7 @@ class FeedPipeline:
         messages.
         """
         if not self._direct_link_feeds_by_company:
-            return 0
+            return 0, []
         target_feeds: dict[str, FeedDefinition] = {}
         targeted_queries: dict[str, set[str]] = {}
         for result in results:
@@ -477,7 +484,7 @@ class FeedPipeline:
             stale_before=(datetime.now(UTC) - DIRECT_ATS_CACHE_TTL).isoformat(),
         )
         if not due_source_ids:
-            return 0
+            return 0, []
         due_feeds = [target_feeds[source_id] for source_id in sorted(due_source_ids)]
         fetched = await asyncio.gather(
             *(
@@ -492,8 +499,10 @@ class FeedPipeline:
             return_exceptions=True,
         )
         successful = 0
+        errors: list[str] = []
         for feed, result in zip(due_feeds, fetched):
             if isinstance(result, BaseException):
+                errors.append(f"{feed.source_id}: {result}")
                 await self.database.record_direct_ats_cache_check(
                     source_id=feed.source_id,
                     provider=feed.provider or "unknown",
@@ -517,7 +526,7 @@ class FeedPipeline:
                 board_token=feed.path,
             )
             successful += 1
-        return successful
+        return successful, errors
 
     async def _fetch_direct_link_board(
         self,

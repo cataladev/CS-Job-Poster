@@ -9,4 +9,4 @@ description = "GitHub-first internship aggregator Discord bot"
 requires-python = ">=3.11"
 
 [tool.setuptools.packages.find]
-include = ["job_bot*"]
+include = ["job_bot*", "outsource*"]

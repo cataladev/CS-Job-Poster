@@ -142,7 +142,7 @@ database columns.
 | `locations` | Required | List of explicit U.S. locations |
 | `application_url` | Required | Safe direct company application/job URL |
 | `track` | Required | Exactly `internship` or `new_grad` |
-| `posted_date` | Strongly recommended | Posting date in `YYYY-MM-DD` form |
+| `posted_date` | Required for delivery | Posting date in `YYYY-MM-DD` form; missing or invalid dates are never posted |
 | `cycle` | Optional | Season/year such as `Summer 2027`, otherwise `None` |
 | `raw_data` | Recommended | Original API record for debugging and traceability |
 
@@ -160,7 +160,8 @@ An adapter must:
 - produce direct, sanitized company application URLs;
 - include only U.S. locations, using the existing location helpers;
 - reject malformed or incomplete records instead of inventing identity data;
-- parse posting dates when present;
+- parse and validate the source posting date for every deliverable record;
+- request only the current day's inventory when the API offers a reliable date filter;
 - preserve enough raw source data to debug mapping problems;
 - distinguish a valid empty result from an unexpected/malformed response; and
 - return a deterministic content hash when practical.
@@ -186,9 +187,12 @@ Before writing code:
 9. Test an empty result and determine how malformed/error payloads differ.
 
 Use server-side filters and newest-first sorting when supported, then keep defensive
-client-side validation. A new source should fetch enough pages to cover all eligible
-jobs posted within the seven-day ingestion window. IBM deliberately requests the
-newest 60 results in a single page because that was the agreed bounded scope.
+client-side validation. When the API exposes a reliable posting-date filter, request
+only jobs posted on the current day. Otherwise, stop pagination as soon as the
+newest-first results are older than the current day. A bounded inventory response may
+still contain older roles for deduplication, but those roles must never be backfilled
+to Discord. IBM deliberately requests the newest 60 results in a single page because
+that is its agreed bounded scope; the shared runner enforces the delivery date again.
 
 Do not store API keys or tokens in an adapter. If a legitimate source needs a secret,
 add a documented environment/config field, keep it out of Git, and pass it into the
@@ -344,13 +348,17 @@ company JSON
   -> Discord publisher
 ```
 
-### Seven-day posting window
+### Ingestion window versus delivery window
 
 If a usable `posted_date` is more than seven days old, shared ingestion rejects the
 record before database insertion and Discord delivery. A job exactly seven days old
-is still eligible. If a source supplies no valid posting date, the age is unknown,
-so the shared check cannot reject it; this is why adapters should parse the date when
-the API provides one.
+is still eligible for storage, but not for company-source delivery. If a source
+supplies no valid posting date, the age is unknown, so the shared check cannot reject
+it; this is why adapters should parse the date when the API provides one.
+
+That seven-day limit is only a storage/ingestion safety boundary. It does **not** make
+a company-source role eligible for Discord. Company-source delivery has a stricter
+same-day rule: the posting date must equal the current date in `SCHEDULE_TIMEZONE`.
 
 ### Dedupe order and identity
 
@@ -377,12 +385,19 @@ Database uniqueness is also handled conflict-safely: concurrent sources discover
 the same role should converge on the existing canonical instead of crashing on the
 unique fingerprint.
 
-### Silent first snapshot (baseline)
+### Same-day delivery and source baseline
 
 Each company source owns its own baseline in `feed_state`:
 
-- The first successful run stores current eligible jobs but suppresses their Discord
-  deliveries. This prevents a flood when a source is first enabled.
+- Every successful run stores current eligible jobs for deduplication, but only rows
+  whose source-provided `posted_date` is today in `SCHEDULE_TIMEZONE` may queue Discord
+  deliveries. Prior-day, missing, and malformed dates are stored with suppressed
+  deliveries.
+- This same-day rule also applies to the first run and whenever an existing adapter's
+  query scope expands, preventing older inventory from flooding Discord.
+- Company sources never backfill prior-day roles to Discord. A suppressed historical
+  delivery must not be promoted later merely because the source was disabled, delayed,
+  redeployed, or newly registered.
 - That run marks only that company source's baseline complete.
 - A later run can queue a genuinely new job even if Jobright or a GitHub feed is
   failing or has not completed its own baseline.
@@ -436,6 +451,24 @@ One source failure is logged in `source_errors`/`source_runs` and does not preve
 other registered sources from completing. The process-level company run lock also
 prevents overlapping company polling cycles.
 
+### Mandatory logging
+
+Logging is part of the company-source contract, not an optional debugging aid. Every
+production company-source cycle must produce:
+
+- structured application logs for start, completion, duration, source identity,
+  observations, rejected rows, new canonicals, duplicates, queued deliveries,
+  suppressed deliveries, sent deliveries, and errors;
+- a persisted `source_runs` success or failure record and updated `feed_state`/
+  `source_errors` state; and
+- one Discord scrape-status embed in the configured log channel.
+
+Production deployments must configure `DISCORD_LOG_CHANNEL_ID` and grant the bot View
+Channel, Send Messages, Embed Links, and Mention Everyone in that channel. Successful
+runs should not ping anyone; company-source failures must include useful error details
+and alert `@here`. Never log tokens, authenticated URLs, proxy credentials, or raw
+payload fields that may contain secrets.
+
 ## 10. Environment configuration
 
 Keep local values in the ignored `.env`. Start from the appropriate example file.
@@ -448,6 +481,7 @@ Relevant values include:
 DISCORD_TOKEN=...
 DISCORD_CHANNEL_ID=...
 DISCORD_NEW_GRAD_CHANNEL_ID=...
+DISCORD_LOG_CHANNEL_ID=...
 
 # Local Postgres
 POSTGRES_HOST_PORT=5434
@@ -542,10 +576,11 @@ make run-postgres
 ```
 
 Leave the terminal and Docker running. The process polls company sources immediately
-and then hourly. The Mac must remain awake and connected. The first snapshot for a
-new source is silent; to verify a Discord message, use a controlled new fixture/test
-job or wait for a genuinely new API posting. Do not weaken baseline or dedupe rules
-in production merely to force a test message.
+and then hourly. The Mac must remain awake and connected. On the first snapshot, only
+roles dated today may be sent; older and undated inventory remains suppressed. To
+verify a Discord message, use a controlled same-day fixture/test job or wait for a
+genuinely new API posting. Do not weaken the date or dedupe rules in production merely
+to force a test message.
 
 Useful log lines include:
 
@@ -649,8 +684,10 @@ bot or separate hourly service unless the deployment owner intentionally redesig
 the architecture. Production defaults already include the company-source interval,
 but the deployment owner should verify environment values and capacity.
 
-The first successful production run for a newly registered source will silently
-baseline its current jobs. Subsequent genuinely new jobs can be delivered.
+The first successful production run for a newly registered source stores its bounded
+inventory but may deliver only roles dated today. It must never backfill prior-day or
+undated jobs. Confirm the structured application logs, persisted run record, and
+Discord status embed after restart.
 
 ## 14. New-company checklist
 
@@ -662,6 +699,7 @@ Copy this checklist into the pull request:
 [ ] Documented method, endpoint, filters, sort, fields, and pagination
 [ ] Confirmed stable job ID and direct company application URL
 [ ] Confirmed posting-date and U.S.-location fields
+[ ] Limited the API query/pagination to today's jobs where the source supports it
 [ ] Added job_bot/company_sources/companies/<company>.py
 [ ] Used AsyncHttpClient and bounded pages/results
 [ ] Mapped records to the complete JobObservation contract
@@ -673,7 +711,10 @@ Copy this checklist into the pull request:
 [ ] Ran the full test suite
 [ ] Ran a live adapter-only smoke test
 [ ] Ran a local database-only two-pass dedupe test
+[ ] Verified same-day jobs queue and prior-day/missing-date jobs stay suppressed
 [ ] Verified baseline, source_runs, observations, canonicals, and delivery state
+[ ] Verified structured logs and the Discord scrape-status embed
+[ ] Confirmed DISCORD_LOG_CHANNEL_ID and log-channel permissions for production
 [ ] Confirmed no credentials, .env files, or sensitive payloads are staged
 [ ] Coordinated deployment/restart with the existing bot owner
 ```
@@ -683,7 +724,8 @@ Copy this checklist into the pull request:
 IBM currently demonstrates the complete path:
 
 - POSTs to `https://www-api.ibm.com/search/api/v2`;
-- requests Software Engineering only;
+- requests Software Engineering, Infrastructure & Technology, Data & Analytics, and
+  Cloud career areas;
 - requests Internship and Entry Level only;
 - sorts by `dcdate` newest first, then score;
 - examines at most the first 60 hits;

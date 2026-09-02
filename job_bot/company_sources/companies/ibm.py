@@ -21,13 +21,22 @@ class IBMResponseError(ValueError):
 
 
 class IBMSource:
-    """Fetch early-career U.S. roles from IBM's first-party careers API."""
+    """Fetch selected early-career U.S. roles from IBM's careers API."""
 
     source_id = "company_api_ibm"
     company_name = "IBM"
     source_url = "https://www.ibm.com/careers"
     api_url = "https://www-api.ibm.com/search/api/v2"
     result_limit = 60
+    career_areas: ClassVar[tuple[str, ...]] = (
+        "Software Engineering",
+        "Infrastructure & Technology",
+        "Data & Analytics",
+        "Cloud",
+    )
+    career_area_keys: ClassVar[frozenset[str]] = frozenset(
+        area.casefold() for area in career_areas
+    )
     headers: ClassVar[dict[str, str]] = {
         "Accept": "application/json, text/plain, */*",
         "Content-Type": "application/json",
@@ -60,7 +69,11 @@ class IBMSource:
             "query": {
                 "bool": {
                     "must": [
-                        {"term": {"field_keyword_08": "Software Engineering"}},
+                        {
+                            "terms": {
+                                "field_keyword_08": list(cls.career_areas)
+                            }
+                        },
                         {
                             "terms": {
                                 "field_keyword_18": ["Internship", "Entry Level"]
@@ -155,7 +168,7 @@ class IBMSource:
         }.get(experience.casefold())
         if not title or not application_url or not external_id or not location:
             return None
-        if career_area.casefold() != "software engineering" or track is None:
+        if career_area.casefold() not in self.career_area_keys or track is None:
             return None
 
         posted_date = self._posted_date(source.get("dcdate"))

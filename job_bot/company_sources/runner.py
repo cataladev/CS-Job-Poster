@@ -4,6 +4,8 @@ import asyncio
 import logging
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from job_bot.company_sources.registry import (
     COMPANY_SOURCE_REGISTRY,
@@ -15,6 +17,28 @@ from job_bot.models import AppConfig
 from job_bot.utils.http import AsyncHttpClient
 
 HttpClientFactory = Callable[..., AsyncHttpClient]
+
+
+def _posted_today(posted_date: str | None, timezone_name: str) -> bool:
+    """Return whether a source-provided posting date is today locally.
+
+    Company inventories can contain several days of still-active roles. Only a
+    trustworthy same-day date is eligible for delivery; missing or malformed
+    dates remain persisted but are suppressed.
+    """
+    raw = str(posted_date or "").strip()
+    if not raw:
+        return False
+    try:
+        posted_at = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+
+    local_timezone = ZoneInfo(timezone_name)
+    today = datetime.now(local_timezone).date()
+    if posted_at.tzinfo is None:
+        return posted_at.date() == today
+    return posted_at.astimezone(local_timezone).date() == today
 
 
 @dataclass
@@ -114,23 +138,44 @@ class CompanySourceRunner:
                     and state["repository"] == source_repository
                     and state["path"] == source_path
                 )
-                # Company APIs own their baseline lifecycle. A failing GitHub or
-                # Jobright feed must not prevent a healthy first-party source
-                # from delivering jobs discovered after its silent snapshot.
-                suppress_delivery = not source_baselined
-
                 result = await source.fetch()
                 stats.pages_checked = result.pages_checked
                 stats.rejected += result.rejected
-                ingest = await self.pipeline.ingest_observations(
-                    result.observations,
-                    suppress_delivery=suppress_delivery,
-                )
-                stats.add_ingest(ingest)
-                if ingest.errors:
+
+                # Process today's rows first so a historical variant of the same
+                # canonical cannot create a suppressed delivery before the
+                # same-day observation gets a chance to queue it.
+                same_day_observations = []
+                historical_observations = []
+                for observation in result.observations:
+                    target = (
+                        same_day_observations
+                        if _posted_today(
+                            observation.posted_date,
+                            self.config.schedule_timezone,
+                        )
+                        else historical_observations
+                    )
+                    target.append(observation)
+
+                ingest_errors: list[str] = []
+                for observations, suppress_delivery in (
+                    (same_day_observations, False),
+                    (historical_observations, True),
+                ):
+                    if not observations:
+                        continue
+                    ingest = await self.pipeline.ingest_observations(
+                        observations,
+                        suppress_delivery=suppress_delivery,
+                    )
+                    stats.add_ingest(ingest)
+                    ingest_errors.extend(ingest.errors)
+
+                if ingest_errors:
                     raise RuntimeError(
-                        f"{len(ingest.errors)} observation ingestion error(s); "
-                        f"first: {ingest.errors[0]}"
+                        f"{len(ingest_errors)} observation ingestion error(s); "
+                        f"first: {ingest_errors[0]}"
                     )
                 await self.database.record_feed_success(
                     source_id=source.source_id,

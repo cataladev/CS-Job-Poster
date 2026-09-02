@@ -26,7 +26,8 @@ digest-alert roles, plus personal company and location targets.
   with direct mentions only for members targeting that company and track.
 - Sends one digest per track every four hours by default. Each digest links back to
   the original Discord job posts and can optionally ping a track-specific role.
-- Records the first complete inventory silently and posts only later additions.
+- Records the first complete core-feed inventory silently; company sources may post
+  only same-day listings and never backfill prior-day inventory.
 - Fails closed when a feed is malformed, suspiciously empty, or unavailable.
 - Uses conditional GitHub requests (`ETag` and `Last-Modified`) to avoid reprocessing
   unchanged repository feeds. Jobright's dynamic public window is requested
@@ -72,8 +73,10 @@ endpoints.
 First-party company sources live under `job_bot/company_sources/companies/`. They fetch
 company-owned careers APIs independently of Jobright, adapt results to the shared
 `JobObservation` contract, and enter the same normalization, deduplication, PostgreSQL
-outbox, and Discord delivery path. Each source receives a silent first baseline, then
-delivers new jobs independently even when a core GitHub or Jobright feed is unavailable.
+outbox, and Discord delivery path. They never backfill Discord: only listings dated
+today in `SCHEDULE_TIMEZONE` may be delivered, including on the first run or after an
+adapter's query expands. Older and undated rows may be retained for deduplication but
+remain suppressed.
 
 The fixed feed definitions live in `job_bot/github_feeds.py`. `config/sources.yaml`
 is deliberately not a runtime switchboard for the MVP. The Jobright integration names
@@ -241,8 +244,25 @@ Copy `.env.example` to `.env`. These values are required for production:
 DISCORD_TOKEN=replace-me
 DISCORD_CHANNEL_ID=123456789012345678
 DISCORD_NEW_GRAD_CHANNEL_ID=234567890123456789
+DISCORD_LOG_CHANNEL_ID=345678901234567890
 DATABASE_URL=postgresql://jobbot:jobbot@localhost:5432/jobbot
 ```
+
+To copy every successful internship and new-grad production post to a second
+pair of channels, set the optional outsource destinations:
+
+```dotenv
+OUTSOURCE_INTERNSHIP_CHANNEL_ID=345678901234567890
+OUTSOURCE_NEW_GRAD_CHANNEL_ID=456789012345678901
+```
+
+The existing Discord bot must have access to the destination channels and needs
+View Channel, Send Messages, and Embed Links permissions there. Job posts and daily
+digests are copied after the original succeeds. User and role mention text is kept,
+but Discord mentions are disabled on the copy so subscribers are not pinged twice.
+Leave either value blank to disable mirroring for that track. The implementation is
+isolated in `outsource/`; a failed copy is logged and does not retry or change the
+successful production delivery.
 
 Optional runtime settings:
 
@@ -269,9 +289,10 @@ sources run independently of Jobright and default to an hourly collection cycle.
 The alert-role environment values are optional and can be overridden live with
 `/set-job-alert-role`. `RECENT_CATCHUP_HOURS` is a one-time upgrade bridge: an
 already-baselined deployment queues suppressed roles whose source date falls in that
-window, while a fresh installation keeps its first inventory silent. SQLite remains supported for
-isolated tests and migration tooling, but the production publisher requires Postgres
-so a database advisory lock can prevent competing workers.
+window, while a fresh installation keeps its first core-feed inventory silent. This
+upgrade bridge does not make historical company-source roles deliverable. SQLite
+remains supported for isolated tests and migration tooling, but the production
+publisher requires Postgres so a database advisory lock can prevent competing workers.
 
 ## Development and production environments
 
@@ -302,8 +323,11 @@ make run-postgres
 
 On the first successful run, all current core inventories are saved with suppressed
 deliveries and nothing is posted. A partial core run cannot complete that shared
-baseline. Each first-party company API owns a separate silent first snapshot, so a
-failing core feed does not block new jobs from an already-baselined company source.
+baseline. First-party company APIs persist their complete eligible inventories for
+deduplication, but only listings whose source-provided posting date is today in the
+configured schedule timezone can be delivered. Missing, malformed, and prior-day
+posting dates are suppressed, including when a company source is first enabled or its
+query scope expands.
 
 Run the test suite with:
 
@@ -319,7 +343,14 @@ no separate Actions publisher: only the long-running service sends messages.
 Each poll writes structured, count-oriented logs for feed fetch status, accepted and
 rejected observations, new canonicals, merges, suppressed/queued deliveries, sent or
 reconciled messages, and failures. Upstream errors do not erase prior snapshots or
-create closure events.
+create closure events. Logging is mandatory for production source scrapers:
+`DISCORD_LOG_CHANNEL_ID` must be configured, and every core-feed and company-source
+scrape cycle sends a status embed to that channel. Successful runs do not mention
+anyone. Errors from the first-party `company_sources` scraper group include their
+details and send `@here`. Core-feed errors—including Jobright and Simplify—are logged
+as warnings without a ping. The bot therefore needs View Channel, Send Messages,
+Embed Links, and Mention Everyone permissions in the log channel for company-source
+failure pings to notify members.
 
 Existing production tables are preserved. Alembic migration
 `20260813_0004_feed_outbox` adds the authoritative observation, key, feed-state, and

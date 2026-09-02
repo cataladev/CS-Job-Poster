@@ -20,6 +20,8 @@ def test_load_config_defaults_to_a_one_minute_collection_tick(monkeypatch, tmp_p
         "DIGEST_INTERVAL_SECONDS",
         "DISCORD_INTERNSHIP_ALERT_ROLE_ID",
         "DISCORD_NEW_GRAD_ALERT_ROLE_ID",
+        "OUTSOURCE_INTERNSHIP_CHANNEL_ID",
+        "OUTSOURCE_NEW_GRAD_CHANNEL_ID",
         "DIRECT_ATS_POLL_INTERVAL_SECONDS",
         "COMPANY_SOURCE_POLL_INTERVAL_SECONDS",
     ]:
@@ -40,6 +42,8 @@ def test_load_config_defaults_to_a_one_minute_collection_tick(monkeypatch, tmp_p
     assert config.digest_timezone == "America/New_York"
     assert config.discord_internship_alert_role_id is None
     assert config.discord_new_grad_alert_role_id is None
+    assert config.outsource_internship_channel_id is None
+    assert config.outsource_new_grad_channel_id is None
     assert config.direct_ats_poll_interval_seconds == 900
     assert config.company_source_poll_interval_seconds == 3600
     assert config.company_blacklist == ["dice"]
@@ -79,6 +83,20 @@ def test_blank_digest_role_environment_values_disable_role_pings(monkeypatch, tm
 
     assert config.discord_internship_alert_role_id is None
     assert config.discord_new_grad_alert_role_id is None
+
+
+def test_outsource_channel_environment_values_enable_per_track_copies(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    Path("config").mkdir()
+    monkeypatch.setenv("OUTSOURCE_INTERNSHIP_CHANNEL_ID", "333")
+    monkeypatch.setenv("OUTSOURCE_NEW_GRAD_CHANNEL_ID", "444")
+
+    config = load_config()
+
+    assert config.outsource_channel_id_for_track("internship") == 333
+    assert config.outsource_channel_id_for_track("new_grad") == 444
 
 
 def test_direct_ats_poll_interval_has_safe_minimum(monkeypatch, tmp_path) -> None:

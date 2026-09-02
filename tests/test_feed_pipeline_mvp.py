@@ -603,6 +603,7 @@ async def test_optional_direct_ats_failure_does_not_block_required_baseline(conf
 
         assert result.baseline_completed
         assert result.errors == []
+        assert result.source_errors == ["direct_ashby_unavailable: board unavailable"]
         assert await database.is_initial_feed_baseline_complete()
     finally:
         await database.close()
