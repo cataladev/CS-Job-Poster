@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime, timedelta
 from typing import ClassVar
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -51,6 +52,7 @@ def _observation(
     source_url: str = MutableCompanySource.source_url,
     application_url: str | None = None,
     title: str = "Software Engineer Intern",
+    posted_date: str | None = None,
 ) -> JobObservation:
     return JobObservation(
         source_id=source_id,
@@ -65,12 +67,16 @@ def _observation(
         or f"https://test.example.com/jobs/{external_id}",
         track="internship",
         cycle="summer 2027",
-        posted_date=datetime.now(UTC).date().isoformat(),
+        posted_date=(
+            posted_date
+            if posted_date is not None
+            else datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+        ),
     )
 
 
 @pytest.mark.asyncio
-async def test_company_source_ignores_core_baseline_after_its_own_silent_snapshot(
+async def test_company_source_first_snapshot_queues_only_same_day_roles(
     config_factory,
     monkeypatch,
 ) -> None:
@@ -88,28 +94,44 @@ async def test_company_source_ignores_core_baseline_after_its_own_silent_snapsho
     runner = CompanySourceRunner(config=config, database=database, pipeline=pipeline)
     monkeypatch.setitem(COMPANY_SOURCE_REGISTRY, "test_corp", MutableCompanySource)
     MutableCompanySource.error = None
-    MutableCompanySource.observations = [_observation("one")]
+    yesterday = (
+        datetime.now(ZoneInfo(config.schedule_timezone)).date() - timedelta(days=1)
+    ).isoformat()
+    MutableCompanySource.observations = [
+        _observation("one"),
+        _observation(
+            "old",
+            title="Data Engineering Intern",
+            posted_date=yesterday,
+        ),
+        _observation(
+            "undated",
+            title="Infrastructure Engineering Intern",
+            posted_date="",
+        ),
+    ]
 
     try:
         first = await runner.run("test_corp", DummyHttpClient())  # type: ignore[arg-type]
         assert first.baseline_completed
-        assert first.canonical_created == 1
-        assert first.deliveries_suppressed == 1
-        assert await database.get_delivery_counts() == {"suppressed": 1}
+        assert first.canonical_created == 3
+        assert first.deliveries_queued == 1
+        assert first.deliveries_suppressed == 2
+        assert await database.get_delivery_counts() == {"pending": 1, "suppressed": 2}
 
         second = await runner.run("test_corp", DummyHttpClient())  # type: ignore[arg-type]
         assert not second.baseline_completed
-        assert second.duplicates == 1
-        assert await database.get_delivery_counts() == {"suppressed": 1}
+        assert second.duplicates == 3
+        assert await database.get_delivery_counts() == {"pending": 1, "suppressed": 2}
 
         MutableCompanySource.observations.append(
             _observation("two", title="Platform Engineering Intern")
         )
         third = await runner.run("test_corp", DummyHttpClient())  # type: ignore[arg-type]
-        assert third.duplicates == 1
+        assert third.duplicates == 3
         assert third.canonical_created == 1
         assert third.deliveries_queued == 1
-        assert await database.get_delivery_counts() == {"pending": 1, "suppressed": 1}
+        assert await database.get_delivery_counts() == {"pending": 2, "suppressed": 2}
     finally:
         await database.close()
 
@@ -229,7 +251,7 @@ async def test_company_ingest_error_keeps_healthy_rows_without_completing_snapsh
         assert "simulated company row conflict" in state["last_error"]
         assert len(await database.search_text("Platform Engineering Intern")) == 1
         assert await database.search_text("Data Engineering Intern") == []
-        delivery_state = "pending" if source_baselined else "suppressed"
+        delivery_state = "pending"
         assert await database.get_delivery_counts() == {delivery_state: 1}
         run = database._connection.execute(
             "SELECT * FROM source_runs WHERE source_name = ? ORDER BY id DESC LIMIT 1",

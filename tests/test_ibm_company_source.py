@@ -30,7 +30,7 @@ def _fixture(name: str) -> object:
     return json.loads((FIXTURES / name).read_text())
 
 
-def test_ibm_build_payload_filters_first_60_early_career_software_jobs() -> None:
+def test_ibm_build_payload_filters_selected_early_career_areas() -> None:
     payload = IBMSource.build_payload()
 
     assert payload["size"] == 60
@@ -39,7 +39,16 @@ def test_ibm_build_payload_filters_first_60_early_career_software_jobs() -> None
     assert payload["query"] == {
         "bool": {
             "must": [
-                {"term": {"field_keyword_08": "Software Engineering"}},
+                {
+                    "terms": {
+                        "field_keyword_08": [
+                            "Software Engineering",
+                            "Infrastructure & Technology",
+                            "Data & Analytics",
+                            "Cloud",
+                        ]
+                    }
+                },
                 {
                     "terms": {
                         "field_keyword_18": ["Internship", "Entry Level"]
@@ -170,6 +179,38 @@ def test_ibm_adapter_rejects_non_us_non_early_career_and_unsafe_jobs() -> None:
         field_keyword_19="Austin, TX",
     )
     assert source.to_observation(wrong_career_area) is None
+
+
+@pytest.mark.parametrize(
+    "career_area",
+    [
+        "Software Engineering",
+        "Infrastructure & Technology",
+        "Data & Analytics",
+        "Cloud",
+    ],
+)
+def test_ibm_adapter_accepts_each_selected_career_area(career_area: str) -> None:
+    source = IBMSource(FakeHttpClient([]))  # type: ignore[arg-type]
+    raw_job = {
+        "_id": "selected-area-intern",
+        "_source": {
+            "title": f"{career_area} Intern",
+            "url": (
+                "https://careers.ibm.com/careers/JobDetail?"
+                "jobId=selected-area-intern"
+            ),
+            "field_keyword_05": "United States",
+            "field_keyword_08": career_area,
+            "field_keyword_18": "Internship",
+            "field_keyword_19": "Austin, TX",
+        },
+    }
+
+    observation = source.to_observation(raw_job)
+
+    assert observation is not None
+    assert observation.track == "internship"
 
 
 def test_company_source_registry_constructs_ibm_and_rejects_unknown_keys() -> None:
