@@ -248,21 +248,54 @@ DISCORD_LOG_CHANNEL_ID=345678901234567890
 DATABASE_URL=postgresql://jobbot:jobbot@localhost:5432/jobbot
 ```
 
-To copy every successful internship and new-grad production post to a second
-pair of channels, set the optional outsource destinations:
+To provide a quieter view of successful internship and new-grad production posts,
+set the optional category-channel destinations:
 
 ```dotenv
-OUTSOURCE_INTERNSHIP_CHANNEL_ID=345678901234567890
-OUTSOURCE_NEW_GRAD_CHANNEL_ID=456789012345678901
+OUTSOURCE_INTERNSHIP_CHANNEL_ID=1500249793417580584
+OUTSOURCE_NEW_GRAD_CHANNEL_ID=1543286240491733073
 ```
 
-The existing Discord bot must have access to the destination channels and needs
-View Channel, Send Messages, and Embed Links permissions there. Job posts and daily
-digests are copied after the original succeeds. User and role mention text is kept,
-but Discord mentions are disabled on the copy so subscribers are not pinged twice.
-Leave either value blank to disable mirroring for that track. The implementation is
-isolated in `outsource/`; a failed copy is logged and does not retry or change the
-successful production delivery.
+Each destination gets the full set of nine Discord embed cards in the table's fixed
+order, with OTHER last, even when there are no matching jobs. At **11:59 PM New York
+time**, an independent scheduler prepares the **next day's** dated cards and threads.
+Startup creates today's missing cards immediately; a job arriving before setup
+finishes also ensures the complete set exists before routing into its thread.
+For example, **SWE 09/05/2026**
+has **Roles that belong here:** followed by its role description. Individual job
+embeds go into a public thread attached to that card. Existing cards and threads
+are recovered from bot-authored Discord history after restarts, including sets
+prepared the previous night. Existing cards are reused without moving or deleting
+their threads; missing cards are appended in the fixed order. Dates and the nightly schedule use
+`DIGEST_TIMEZONE` (default `America/New_York`); primary-channel digests are not copied.
+
+| Card | Roles that belong here |
+|---|---|
+| SWE | Software engineering, frontend, backend, full stack, mobile, embedded software, software systems engineering, platform engineering, SRE, DevOps, and test automation. |
+| DATA / AI | Data engineering, data science, machine learning, AI engineering, and applied research. |
+| PM | Product management, technical program management, and technical project management. |
+| IT / SECURITY | IT support, systems administration, network administration, cybersecurity, security operations, and cloud administration. |
+| QUANT | Quantitative research, quantitative trading, and explicitly quantitative developer roles. |
+| ANALYST | Business analysts, data analysts, business intelligence, product analysts, and financial analysts. |
+| HARDWARE | Electrical engineering, computer hardware, chip design, FPGA, and physical robotics engineering. |
+| DESIGN | UX/UI, product design, UX research, and interaction design. |
+| OTHER | Roles that don’t clearly fit an existing category or don’t provide enough information to classify confidently. |
+
+Classification happens only at the final mirror step; feeds and ingestion filters
+are unchanged. Each job goes to one category, prioritizing explicit title signals
+and using descriptions to resolve otherwise unclear roles. Software systems roles
+share SWE with backend developers; infrastructure administration belongs to IT /
+SECURITY and physical systems to HARDWARE. Company names do not determine categories.
+
+The bot needs View Channel, Send Messages, Embed Links, Read Message History,
+Create Public Threads, and Send Messages in Threads in the destination channels.
+Original company/location subscription pings and digest role pings stay in the primary
+channels. User mention text is retained in copied job embeds' messages, with Discord
+mentions disabled so subscribers are not pinged twice. Leave either destination blank
+to disable that track's mirror. This remains a best-effort secondary view: a failed
+copy is logged and does not retry or change the successful production delivery.
+Locked threads are respected; jobs are never dumped into the parent channel as a
+fallback. No historical posts are moved or backfilled by this change.
 
 Optional runtime settings:
 

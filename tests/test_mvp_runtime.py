@@ -85,6 +85,28 @@ async def test_runtime_can_start_independent_core_and_company_source_poll_tasks(
 
 
 @pytest.mark.asyncio
+async def test_category_scheduler_is_started_once_across_reconnects_and_can_stop() -> None:
+    shutdown = asyncio.Event()
+    calls = []
+
+    async def schedule(event):
+        calls.append(event)
+        await event.wait()
+
+    harness = SimpleNamespace(
+        _poll_tasks={}, _shutdown=shutdown,
+        publisher=SimpleNamespace(outsource_mirror=SimpleNamespace(run_category_schedule=schedule)),
+    )
+    FeedDiscordClient._ensure_category_task(harness)
+    FeedDiscordClient._ensure_category_task(harness)
+    await asyncio.sleep(0)
+    assert calls == [shutdown]
+    assert len(harness._poll_tasks) == 1
+    shutdown.set()
+    await asyncio.gather(*harness._poll_tasks.values())
+
+
+@pytest.mark.asyncio
 async def test_poll_loop_reports_each_completed_scrape_cycle() -> None:
     reports = []
 

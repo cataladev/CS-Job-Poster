@@ -426,6 +426,7 @@ class TrackChannelPublisher:
                 source_message_id=int(message.id),
                 content=target_content,
                 embed=embed,
+                job=job,
             )
             sent += 1
             self.logger.info(
