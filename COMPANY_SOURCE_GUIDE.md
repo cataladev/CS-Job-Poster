@@ -45,9 +45,20 @@ bot.py
                  -> validation and normalization
                  -> shared database dedupe and persistence
                  -> Discord delivery outbox
-            -> FeedPublisher
-                 -> internship or new-grad Discord channel
+            -> TrackChannelPublisher
+                 -> primary internship or new-grad Discord channel
+                 -> optional OutsourceMirror, after successful primary delivery
+                      -> role category card -> attached job thread
+       -> independent daily-category task (startup and 23:59 preparation)
 ```
+
+Category routing belongs to the final mirror step, not to company adapters. Every
+source uses the same role classifier and OTHER fallback. The full set of category
+cards and threads is created in a fixed order even without jobs; 23:59 in
+`DIGEST_TIMEZONE` prepares tomorrow's set, and startup fills in today's missing cards.
+Daily Briefs and company/location subscription pings remain in the primary channels.
+See [the category-channel configuration](README.md#configuration) for destinations,
+role families, thread permissions, and restart behavior.
 
 The source families differ at collection time and merge at shared ingestion:
 
@@ -526,9 +537,9 @@ Cover at least:
 IBM reference commands:
 
 ```bash
-.venv/bin/pytest tests/test_ibm_company_source.py -q
-.venv/bin/pytest tests/test_company_source_runner.py -q
-.venv/bin/pytest -q
+.venv/bin/python -m pytest tests/test_ibm_company_source.py -q
+.venv/bin/python -m pytest tests/test_company_source_runner.py -q
+.venv/bin/python -m pytest tests -q
 ```
 
 ### Live adapter-only smoke test
@@ -549,7 +560,7 @@ Start and migrate local Postgres:
 
 ```bash
 make postgres-up
-make db-migrate
+make db-migrate ALEMBIC=".venv/bin/python -m alembic"
 ```
 
 Then run the IBM shared-workflow test:
@@ -571,7 +582,7 @@ With valid dev bot/channel credentials:
 
 ```bash
 make postgres-up
-make db-migrate
+make db-migrate ALEMBIC=".venv/bin/python -m alembic"
 make run-postgres
 ```
 

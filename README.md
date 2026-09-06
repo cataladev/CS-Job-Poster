@@ -24,8 +24,12 @@ digest-alert roles, plus personal company and location targets.
   board with no matching roles is a healthy empty result, not a failed source.
 - Posts each newly discovered role immediately to its configured track channel,
   with direct mentions only for members targeting that company and track.
-- Sends one digest per track every four hours by default. Each digest links back to
-  the original Discord job posts and can optionally ping a track-specific role.
+- Sends one Daily Brief per track at 4 PM New York time by default when there are
+  new deliveries to summarize. Each brief links to the original Discord job posts
+  and can optionally ping a track-specific role. Briefs stay in the primary channels.
+- Provides optional quieter internship and new-grad channels with nine ordered
+  category cards and attached job threads. At 11:59 PM New York time, an independent
+  task prepares the next day's set; startup fills in today's missing cards.
 - Records the first complete core-feed inventory silently; company sources may post
   only same-day listings and never backfill prior-day inventory.
 - Fails closed when a feed is malformed, suspiciously empty, or unavailable.
@@ -35,7 +39,8 @@ digest-alert roles, plus personal company and location targets.
   the window behind it has moved on; it keeps its own one-minute interval.
 - Requires row-level U.S. evidence. Mixed-location rows retain only their U.S.
   locations; foreign, ambiguous, archived, and inactive rows are not published.
-- Applies no title, category, seniority, season, or job-age filter.
+- Groups mirrored jobs by role at the final posting step without adding category
+  exclusions to ingestion. Unclear roles go to OTHER.
 - Sends internships to `DISCORD_CHANNEL_ID` and new-grad roles to
   `DISCORD_NEW_GRAD_CHANNEL_ID`.
 - Suppresses new-grad delivery when its channel is unset or matches the internship
@@ -172,6 +177,11 @@ Read Message History is required for duplicate reconciliation. The bot fails clo
 before publishing if any permission is missing. Message Content Intent is not needed.
 Invite the bot with application-command support so the slash command is available.
 
+For the optional category channels, also grant **Create Public Threads** and
+**Send Messages in Threads**. These permissions let the bot create all nine cards
+and their threads even on days with no jobs. Category-channel failures are logged
+without interrupting primary-channel delivery.
+
 Server administrators can configure either posting channel without restarting:
 
 ```text
@@ -303,7 +313,8 @@ Optional runtime settings:
 POLL_INTERVAL_SECONDS=60
 DIRECT_ATS_POLL_INTERVAL_SECONDS=900
 COMPANY_SOURCE_POLL_INTERVAL_SECONDS=3600
-DIGEST_INTERVAL_SECONDS=14400
+DIGEST_HOUR_LOCAL=16
+DIGEST_TIMEZONE=America/New_York
 DISCORD_INTERNSHIP_ALERT_ROLE_ID=
 DISCORD_NEW_GRAD_ALERT_ROLE_ID=
 RECENT_CATCHUP_HOURS=48
@@ -316,8 +327,12 @@ USER_AGENT=cs-job-poster/2.0
 ```
 
 `POLL_INTERVAL_SECONDS` has a minimum of 30 seconds; `DIRECT_ATS_POLL_INTERVAL_SECONDS`
-and `COMPANY_SOURCE_POLL_INTERVAL_SECONDS` have a minimum of five minutes;
-`DIGEST_INTERVAL_SECONDS` has a minimum of 15 minutes. First-party company API
+and `COMPANY_SOURCE_POLL_INTERVAL_SECONDS` have a minimum of five minutes.
+`DIGEST_HOUR_LOCAL` sets the Daily Brief hour (0–23); `DIGEST_TIMEZONE` controls both
+the brief and category-card calendar. `America/New_York` follows EST/EDT automatically.
+The category preparation time is fixed at 23:59 and is independent of feed polling
+and the Daily Brief. `DIGEST_INTERVAL_SECONDS` is a legacy configuration value and
+does not control the active daily schedule. First-party company API
 sources run independently of Jobright and default to an hourly collection cycle.
 The alert-role environment values are optional and can be overridden live with
 `/set-job-alert-role`. `RECENT_CATCHUP_HOURS` is a one-time upgrade bridge: an
@@ -350,13 +365,28 @@ source .venv/bin/activate
 pip install -r requirements.txt
 cp deploy/dev.env.example .env
 make postgres-up
-make db-migrate
+make db-migrate ALEMBIC=".venv/bin/python -m alembic"
 make run-postgres
 ```
 
+For an existing setup, start Docker Desktop and run the combined target from the
+repository root:
+
+```bash
+make dev-postgres ALEMBIC=".venv/bin/python -m alembic"
+```
+
+This starts Postgres, applies migrations, and runs the bot. The module-based Alembic
+override also works if the checkout moved and its virtualenv launcher contains an
+old absolute path. Once the database is running and migrated, use `make run-postgres`
+alone. Stop the bot with Ctrl+C and run that command again after changing code.
+Keep Docker and the bot running for the nightly category schedule. The bot posts to
+the channels in your actual `.env`; use development channels when testing.
+
 On the first successful run, all current core inventories are saved with suppressed
-deliveries and nothing is posted. A partial core run cannot complete that shared
-baseline. First-party company APIs persist their complete eligible inventories for
+job deliveries. Category cards and threads still initialize independently, even
+with no job deliveries. A partial core run cannot complete that shared baseline.
+First-party company APIs persist their complete eligible inventories for
 deduplication, but only listings whose source-provided posting date is today in the
 configured schedule timezone can be delivered. Missing, malformed, and prior-day
 posting dates are suppressed, including when a company source is first enabled or its
@@ -365,7 +395,7 @@ query scope expands.
 Run the test suite with:
 
 ```bash
-pytest tests -q
+.venv/bin/python -m pytest tests -q
 ```
 
 GitHub Actions runs the complete suite against Postgres before deployment. There is
@@ -407,6 +437,8 @@ deployment workflow for adding another company careers API.
   independent collection pipeline.
 - `job_bot/database.py` — observations, canonical merging, delivery outbox.
 - `job_bot/feed_publisher.py` — Discord embeds and marker reconciliation.
+- `outsource/categories.py` — role classification, card descriptions, and fixed category order.
+- `outsource/mirror.py` — secondary-channel cards, job threads, and nightly preparation.
 - `job_bot/job_channel_commands.py` — persisted admin-only channel configuration.
 - `job_bot/mvp_runtime.py` — one-client scheduler, slash commands, and process lock.
 
