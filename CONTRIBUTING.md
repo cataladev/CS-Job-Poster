@@ -36,10 +36,11 @@ stale executable paths after a checkout moves.
 - Keep Discord sending behind the transactional outbox and marker reconciliation.
 - Keep optional category mirrors downstream of successful primary delivery. Preserve
   primary company/location pings and Daily Brief role pings; copies must not ping again.
-- Keep the fixed category order in `outsource/categories.py`, with OTHER last. Create
-  the whole set and its threads at startup when missing and prepare tomorrow at
-  23:59 in `DIGEST_TIMEZONE`, independently of feed runs. Reuse bot-authored markers
-  across restarts and partial setup; do not replace existing threads to reorder cards.
+- Create each category card and thread only when a matching job arrives; do not
+  pre-create empty categories at startup or on a timer. The posting day rolls over
+  at 00:01 in `DIGEST_TIMEZONE`; jobs before that minute use the prior day's threads.
+  Reuse bot-authored markers across restarts and interrupted card/thread creation,
+  including cards prepared by older versions. Cards follow job arrival order.
 - Classify roles at the mirror boundary, without narrowing upstream API requests
   for presentation. Unknown roles belong in OTHER. Daily Briefs remain only in the
   primary channels, never inside category threads.
@@ -71,9 +72,9 @@ make test-postgres ALEMBIC=".venv/bin/python -m alembic" PYTEST=".venv/bin/pytho
 Tests should cover real-format fixtures, schema drift, location handling, conditional
 `304` fetches, URL variants, cross-source duplication, partial and complete baselines,
 delivery retries, process restarts, and migration compatibility as applicable.
-For category changes, also cover fixed order when OTHER arrives first, empty-day
-setup, partial-set recovery, next-day preparation at 23:59, EST/EDT date boundaries,
-reuse after midnight, disabled destinations, thread permissions, and unchanged pings.
+For category changes, also cover creation on first arrival, no empty-day setup,
+interrupted creation, rollover at 00:01 across EST/EDT boundaries, reuse before and
+after midnight, disabled destinations, thread permissions, and unchanged pings.
 
 ## Pull requests and issues
 

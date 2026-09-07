@@ -39,11 +39,6 @@ CATEGORIES = {
     )
 }
 
-# Posting order is explicit and independent of which role arrives first.
-CATEGORY_ORDER = (
-    "swe", "data_ai", "pm", "it_security", "quant", "analyst", "hardware", "design", "other",
-)
-
 # Specific role families precede the broad software bucket. Company names are
 # deliberately excluded: a software engineer at a quant firm still belongs in SWE.
 ROLE_PATTERNS = {

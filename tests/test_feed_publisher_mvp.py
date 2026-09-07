@@ -366,7 +366,7 @@ async def test_outsource_channels_copy_both_tracks_without_repeating_mentions(
 
         assert await publisher.publish_pending() == (2, 0)
 
-        assert len(outsource_internship_channel.sent) == 9
+        assert len(outsource_internship_channel.sent) == 1
         assert outsource_internship_channel.sent[0].title.startswith("SWE ")
         assert "Roles that belong here:" in outsource_internship_channel.sent[0].description
         internship_thread = outsource_internship_channel.messages[0].thread
@@ -681,7 +681,7 @@ async def test_periodic_role_digest_links_back_to_individual_job_messages(config
         assert (sent, reconciled) == (2, 0)
         assert len(channel.sent) == 2
         assert channel.contents == [None, None]
-        assert len(outsource_channel.sent) == 9
+        assert len(outsource_channel.sent) == 1
         assert len(outsource_channel.messages[0].thread.sent) == 2
 
         cursor = (publisher._daily_digest_at(digest_now) - timedelta(days=1)).isoformat()
@@ -696,12 +696,12 @@ async def test_periodic_role_digest_links_back_to_individual_job_messages(config
         assert "https://discord.com/channels/123/111/1000" in digest.description
         assert channel.contents[-1] == "<@&555>"
         assert "jobbot:digest:" in digest.footer.text
-        assert len(outsource_channel.sent) == 9
+        assert len(outsource_channel.sent) == 1
         assert len(outsource_channel.messages[0].thread.sent) == 2
 
         assert await publisher.publish_pending() == (0, 0)
         assert len(channel.sent) == 3
-        assert len(outsource_channel.sent) == 9
+        assert len(outsource_channel.sent) == 1
     finally:
         await database.close()
 

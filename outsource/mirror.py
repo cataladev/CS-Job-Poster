@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import discord
 
 from job_bot.models import AppConfig, CanonicalJob
-from outsource.categories import CATEGORIES, CATEGORY_ORDER, Category, classify_role
+from outsource.categories import Category, classify_role
 
 
 class OutsourceMirror:
@@ -25,7 +25,6 @@ class OutsourceMirror:
         self.logger = logging.getLogger(self.__class__.__name__)
         self._lock = asyncio.Lock()
         self._cards: dict[tuple[int, str], discord.Message] = {}
-        self._prepared: set[tuple[int, str, date]] = set()
 
     def bind_client(self, client: discord.Client) -> None:
         self.client = client
@@ -81,7 +80,6 @@ class OutsourceMirror:
                 )
         except (RuntimeError, discord.HTTPException, asyncio.TimeoutError) as exc:
             self._cards.clear()
-            self._prepared.clear()
             self.logger.error(
                 "outsource_copy_failed track=%s source_channel=%s source_message=%s "
                 "destination_channel=%s error=%s",
@@ -115,63 +113,14 @@ class OutsourceMirror:
             zone = ZoneInfo("America/New_York")
         return self._now().astimezone(zone)
 
-    async def run_category_schedule(self, shutdown: asyncio.Event) -> None:
-        """Initialize on startup and prepare tomorrow at 23:59, without feeds."""
-        while not shutdown.is_set():
-            try:
-                await self.ensure_daily_categories()
-            except Exception:
-                # A secondary-view outage must not stop primary feed polling.
-                self.logger.exception("category_schedule_failed")
-            now = self._local_now()
-            scheduled = now.replace(hour=23, minute=59, second=0, microsecond=0)
-            if now >= scheduled:
-                scheduled += timedelta(days=1)
-            delay = min(60.0, (scheduled.astimezone(UTC) - now.astimezone(UTC)).total_seconds())
-            try:
-                await asyncio.wait_for(shutdown.wait(), timeout=max(0.1, delay))
-            except asyncio.TimeoutError:
-                pass
+    def _category_day(self) -> date:
+        """A posting day rolls over at 00:01 in the configured local timezone."""
+        return (self._local_now() - timedelta(minutes=1)).date()
 
-    async def ensure_daily_categories(self) -> None:
-        if self.client is None or self.client.user is None:
-            return
-        now = self._local_now()
-        days = [now.date()]
-        if now.hour == 23 and now.minute == 59:
-            days.append(now.date() + timedelta(days=1))
-        async with self._lock:
-            self._prune_cache(now.date())
-            for track in ("internship", "new_grad"):
-                channel_id = self.config.outsource_channel_id_for_track(track)
-                if channel_id is None:
-                    continue
-                if channel_id in {self.config.discord_channel_id, self.config.discord_new_grad_channel_id}:
-                    self.logger.error("category_destination_matches_primary channel=%s", channel_id)
-                    continue
-                for day in days:
-                    if (channel_id, track, day) in self._prepared:
-                        continue
-                    try:
-                        channel = self.client.get_channel(channel_id)
-                        if channel is None:
-                            channel = await self.client.fetch_channel(channel_id)
-                        if channel is None or not hasattr(channel, "history"):
-                            raise RuntimeError("Category destination is not a message channel")
-                        self._validate_permissions(channel)
-                        await self._ensure_category_set(channel, track, day)
-                    except (RuntimeError, discord.HTTPException, asyncio.TimeoutError):
-                        self.logger.exception(
-                            "category_setup_failed channel=%s track=%s date=%s", channel_id, track, day,
-                        )
-
-    def _prune_cache(self, today: date) -> None:
-        keep = {today, today + timedelta(days=1)}
-        self._prepared = {key for key in self._prepared if key[2] in keep}
-        day_strings = {day.isoformat() for day in keep}
+    def _prune_cache(self, day: date) -> None:
         self._cards = {
             key: card for key, card in self._cards.items()
-            if key[1].rsplit(":", 1)[-1] in day_strings
+            if key[1].rsplit(":", 1)[-1] == day.isoformat()
         }
 
     @staticmethod
@@ -192,46 +141,23 @@ class OutsourceMirror:
     async def _category_thread(
         self, channel: discord.TextChannel, category: Category, track: str,
     ) -> discord.Thread:
-        day = self._local_now().date()
+        day = self._category_day()
         self._prune_cache(day)
-        await self._ensure_category_set(channel, track, day)
         marker = self._category_marker(channel.id, track, category.key, day)
-        card = self._cards[(channel.id, marker)]
-        thread = await self._card_thread(card, category, day)
-        if thread.locked:
-            raise RuntimeError(f"Category thread {thread.id} is locked")
-        # Discord automatically unarchives unlocked threads when sending.
-        return thread
-
-    @staticmethod
-    def _category_marker(channel_id: int, track: str, key: str, day: date) -> str:
-        return f"jobbot:category:{channel_id}:{track}:{key}:{day.isoformat()}"
-
-    async def _ensure_category_set(
-        self, channel: discord.TextChannel, track: str, day: date,
-    ) -> None:
-        if (channel.id, track, day) in self._prepared:
-            return
-        markers = {
-            self._category_marker(channel.id, track, key, day): key for key in CATEGORY_ORDER
-        }
-        # Tomorrow's set may already have been created at 23:59 the day before.
-        # Include that minute when recovering from Discord history on restart.
-        midnight = datetime.combine(day, time.min, tzinfo=self._local_now().tzinfo)
-        async for message in channel.history(
-            limit=None, after=midnight - timedelta(minutes=2), oldest_first=True,
-        ):
-            if message.author.id != self.client.user.id:
-                continue
-            for embed in message.embeds:
-                marker = embed.footer.text or ""
-                if marker in markers:
-                    self._cards.setdefault((channel.id, marker), message)
-
-        for marker, key in markers.items():
-            category = CATEGORIES[key]
-            cache_key = (channel.id, marker)
-            card = self._cards.get(cache_key)
+        cache_key = (channel.id, marker)
+        card = self._cards.get(cache_key)
+        if card is None:
+            # Older versions prepared cards at 23:59 the previous day. Keep
+            # finding those cards on upgrade rather than duplicating their threads.
+            midnight = datetime.combine(day, time.min, tzinfo=self._local_now().tzinfo)
+            async for message in channel.history(
+                limit=None, after=midnight - timedelta(minutes=2), oldest_first=True,
+            ):
+                if message.author.id != self.client.user.id:
+                    continue
+                if any((embed.footer.text or "") == marker for embed in message.embeds):
+                    card = message
+                    break
             if card is None:
                 embed = discord.Embed(
                     title=f"{category.label} {day:%m/%d/%Y}",
@@ -241,8 +167,15 @@ class OutsourceMirror:
                 embed.set_footer(text=marker)
                 card = await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
             self._cards[cache_key] = card
-            await self._card_thread(card, category, day)
-        self._prepared.add((channel.id, track, day))
+        thread = await self._card_thread(card, category, day)
+        if thread.locked:
+            raise RuntimeError(f"Category thread {thread.id} is locked")
+        # Discord automatically unarchives unlocked threads when sending.
+        return thread
+
+    @staticmethod
+    def _category_marker(channel_id: int, track: str, key: str, day: date) -> str:
+        return f"jobbot:category:{channel_id}:{track}:{key}:{day.isoformat()}"
 
     @staticmethod
     async def _card_thread(card: discord.Message, category: Category, day: date) -> discord.Thread:

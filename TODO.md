@@ -36,9 +36,9 @@ operational ownership.
 
 ## Job lifecycle and presentation
 
-Already implemented: nine ordered category cards with attached job threads, an
-OTHER fallback, startup recovery, and preparation of tomorrow's set at 23:59 in
-`DIGEST_TIMEZONE`. Daily Briefs and subscription pings stay in the primary channels.
+Already implemented: nine role categories with cards and threads created on first
+job arrival, an OTHER fallback, restart recovery, and posting-day rollover at 00:01
+in `DIGEST_TIMEZONE`. Daily Briefs and subscription pings stay in the primary channels.
 See [README.md](README.md#configuration) for current behavior.
 
 - Add confirmed closure and reopen handling using repeated evidence rather than one

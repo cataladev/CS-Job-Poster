@@ -49,13 +49,13 @@ bot.py
                  -> primary internship or new-grad Discord channel
                  -> optional OutsourceMirror, after successful primary delivery
                       -> role category card -> attached job thread
-       -> independent daily-category task (startup and 23:59 preparation)
 ```
 
 Category routing belongs to the final mirror step, not to company adapters. Every
-source uses the same role classifier and OTHER fallback. The full set of category
-cards and threads is created in a fixed order even without jobs; 23:59 in
-`DIGEST_TIMEZONE` prepares tomorrow's set, and startup fills in today's missing cards.
+source uses the same role classifier and OTHER fallback. A category card and thread
+are created only when that category's first job arrives for the posting day.
+The day rolls over at 00:01 in `DIGEST_TIMEZONE`; jobs arriving before that minute
+use the previous day's threads. There is no bulk creation at startup or on a timer.
 Daily Briefs and company/location subscription pings remain in the primary channels.
 See [the category-channel configuration](README.md#configuration) for destinations,
 role families, thread permissions, and restart behavior.

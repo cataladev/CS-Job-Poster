@@ -3,12 +3,31 @@ from __future__ import annotations
 import asyncio
 import logging
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import discord
 import pytest
 
 from job_bot.feed_publisher import TrackChannelPublisher
 from job_bot.mvp_runtime import FeedDiscordClient
+
+
+@pytest.mark.asyncio
+async def test_ready_starts_only_feed_pollers_and_does_not_create_empty_categories(config_factory):
+    started = []
+    harness = SimpleNamespace(
+        config=config_factory(),
+        publisher=SimpleNamespace(configured_guild_id=AsyncMock(return_value=123)),
+        logger=logging.getLogger("test_ready"),
+        user=SimpleNamespace(id=42),
+        _guild_commands_synced=True,
+        change_presence=AsyncMock(),
+        _ensure_poll_task=lambda **kwargs: started.append(kwargs["name"]),
+        pipeline=object(),
+        company_source_pipeline=object(),
+    )
+    await FeedDiscordClient.on_ready(harness)
+    assert started == ["core", "company_sources"]
 
 
 @pytest.mark.asyncio
@@ -82,28 +101,6 @@ async def test_runtime_can_start_independent_core_and_company_source_poll_tasks(
     finally:
         release.set()
         await asyncio.gather(*harness._poll_tasks.values())
-
-
-@pytest.mark.asyncio
-async def test_category_scheduler_is_started_once_across_reconnects_and_can_stop() -> None:
-    shutdown = asyncio.Event()
-    calls = []
-
-    async def schedule(event):
-        calls.append(event)
-        await event.wait()
-
-    harness = SimpleNamespace(
-        _poll_tasks={}, _shutdown=shutdown,
-        publisher=SimpleNamespace(outsource_mirror=SimpleNamespace(run_category_schedule=schedule)),
-    )
-    FeedDiscordClient._ensure_category_task(harness)
-    FeedDiscordClient._ensure_category_task(harness)
-    await asyncio.sleep(0)
-    assert calls == [shutdown]
-    assert len(harness._poll_tasks) == 1
-    shutdown.set()
-    await asyncio.gather(*harness._poll_tasks.values())
 
 
 @pytest.mark.asyncio
