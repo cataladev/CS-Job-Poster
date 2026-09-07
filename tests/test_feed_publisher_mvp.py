@@ -516,6 +516,34 @@ async def test_ambiguous_send_stays_uncertain_until_marker_reconciliation(config
 
 
 @pytest.mark.asyncio
+async def test_queued_ibm_delivery_uses_working_link_in_title_and_apply_text(config_factory) -> None:
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    try:
+        await _create_pending_delivery(database, company="IBM", external_id="131799")
+        delivery = (await database.list_deliveries_for_send(111))[0]
+        # Simulate a job stored by the old sanitizer before this fix.
+        database._connection.execute(
+            "UPDATE canonical_jobs SET canonical_url = ? WHERE id = ?",
+            ("https://careers.ibm.com/careers/JobDetail?jobid=131799", delivery["canonical_id"]),
+        )
+        database._connection.commit()
+        channel = FakeChannel([])
+        publisher = TrackChannelPublisher(config, database)
+        publisher.bind_client(FakeClient(channel))
+        sent, _ = await publisher.publish_pending()
+        expected = "https://careers.ibm.com/en_US/careers/JobDetail?jobId=131799"
+        assert sent == 1
+        assert channel.sent[0].url == expected
+        assert channel.sent[0].description == f"[Apply here]({expected})"
+        assert await database.get_delivery_counts() == {"sent": 1}
+        assert await publisher.publish_pending() == (0, 0)
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_embed_omits_feed_credit_and_contains_safe_apply_link(config_factory) -> None:
     config = config_factory()
     database = Database(config.sqlite_db_path)

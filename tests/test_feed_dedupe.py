@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 import pytest
 
@@ -85,6 +85,40 @@ def _observation(
         cycle="Summer 2027",
         posted_date=posted_date,
     )
+
+
+@pytest.mark.asyncio
+async def test_ibm_url_repair_updates_existing_job_without_replaying_delivery(config_factory) -> None:
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    broken_url = "https://careers.ibm.com/careers/JobDetail?jobid=131799"
+    expected = "https://careers.ibm.com/en_US/careers/JobDetail?jobId=131799"
+    try:
+        first = await _ingest(database, replace(
+            _observation("jobright_internships", "jobright-copy", broken_url), company="IBM"
+        ))
+        delivery = (await database.list_deliveries_for_send(111))[0]
+        await database.mark_delivery_sent(
+            delivery_id=delivery["id"], canonical_id=first.canonical_id,
+            track="internship", channel_id=111, message_id=999,
+        )
+        database._connection.execute(
+            "UPDATE canonical_jobs SET canonical_url = ? WHERE id = ?",
+            (broken_url, first.canonical_id),
+        )
+        database._connection.commit()
+
+        second = await _ingest(database, replace(
+            _observation("company_api_ibm", "131799", expected), company="IBM"
+        ))
+
+        assert not second.created
+        assert second.canonical_id == first.canonical_id
+        assert (await database.get_canonical_jobs([first.canonical_id]))[0].canonical_url == expected
+        assert await database.get_delivery_counts() == {"sent": 1}
+    finally:
+        await database.close()
 
 
 @pytest.mark.asyncio

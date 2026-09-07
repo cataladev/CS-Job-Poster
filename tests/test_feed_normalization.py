@@ -5,8 +5,42 @@ from job_bot.utils.feed_normalization import (
     has_explicit_foreign_role_location,
     is_us_location,
     location_scoped_identity_keys,
+    normalize_ibm_application_url,
+    preferred_application_url,
     sanitize_application_url,
 )
+
+
+@pytest.mark.parametrize("url", [
+    "https://careers.ibm.com/careers/JobDetail?jobId=131799",
+    "https://careers.ibm.com/careers/JobDetail?jobid=131799",
+    "https://careers.ibm.com/en_US/careers/JobDetail?jobid=131799",
+    "https://careers.ibm.com/en_US/careers/JobDetail?jobId=131799&src=jobright&jr_id=tracking",
+])
+def test_ibm_links_preserve_working_parameter_case_and_job_identity(url):
+    expected = "https://careers.ibm.com/en_US/careers/JobDetail?jobId=131799"
+    safe = sanitize_application_url(url)
+    assert safe.url == expected
+    assert sanitize_application_url(safe.url).url == expected
+    assert external_identity_keys(url, company="ibm") == {"req:ibm:131799"}
+    assert external_identity_keys(safe.url, company="ibm") == {"req:ibm:131799"}
+    assert preferred_application_url(url, expected) == expected
+
+
+def test_ibm_link_repair_preserves_explicit_locale():
+    safe = sanitize_application_url("https://careers.ibm.com/fr_FR/careers/JobDetail?jobid=131799")
+    assert safe.url == "https://careers.ibm.com/fr_FR/careers/JobDetail?jobId=131799"
+
+
+@pytest.mark.parametrize("url", [
+    "https://careers.other-company.com/careers/JobDetail?jobid=131799",
+    "https://careers.ibm.com/en_US/careers/Login?jobid=131799",
+    "https://careers.ibm.com/careers/JobDetail",
+    "https://careers.ibm.com/careers/JobDetail?jobid=bad/value",
+    "https://user:secret@careers.ibm.com/careers/JobDetail?jobid=131799",
+])
+def test_ibm_repair_only_changes_valid_ibm_job_detail_links(url):
+    assert normalize_ibm_application_url(url) == url
 
 
 def test_application_url_removes_tracking_and_normalizes_scheme() -> None:
