@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from job_bot.database import Database, RECENT_FEED_CATCHUP_STATE_KEY
 from job_bot.feed_pipeline import FeedPipeline
@@ -13,8 +15,69 @@ from job_bot.github_feeds import (
     parse_markdown_table,
 )
 from job_bot.utils.normalization import normalize_job_posting
+from job_bot.scrape_status import ScrapeStatusReporter
 
 import pytest
+
+
+@pytest.mark.asyncio
+async def test_closed_database_failure_identifies_baseline_before_any_scraper(config_factory):
+    from psycopg import OperationalError
+
+    database = SimpleNamespace(
+        is_initial_feed_baseline_complete=AsyncMock(side_effect=OperationalError("the connection is closed"))
+    )
+    fetcher = SimpleNamespace(fetch=AsyncMock())
+    pipeline = FeedPipeline(
+        config=config_factory(), database=database, publisher=StubPublisher(),
+        feeds=(_feed("configured"),), direct_link_feeds=(), fetcher=fetcher,
+    )
+    with pytest.raises(OperationalError) as caught:
+        await pipeline.run()
+
+    failure = caught.value.scrape_failure
+    assert failure.source is None
+    assert failure.stage == "database baseline check"
+    assert failure.error_type == "OperationalError"
+    assert "job_bot/feed_pipeline.py:" in failure.location
+    assert caught.value.scrape_stats.feeds_checked == 0
+    assert [(source.source_id, source.status) for source in caught.value.scrape_stats.source_results] == [
+        ("configured", "not_run")
+    ]
+    assert not fetcher.fetch.called
+    assert not pipeline.running
+
+
+@pytest.mark.asyncio
+async def test_source_errors_and_partial_counts_survive_later_publisher_failure(config_factory):
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    pipeline = FeedPipeline(
+        config=config, database=database,
+        publisher=SimpleNamespace(publish_pending=AsyncMock(side_effect=RuntimeError("publisher unavailable"))),
+        feeds=(_feed("jobright_test"), _feed("simplify_test")), direct_link_feeds=(),
+        fetcher=StubFetcher({"jobright_test": TimeoutError(), "simplify_test": ValueError("invalid response")}),
+    )
+    try:
+        with pytest.raises(RuntimeError, match="publisher unavailable") as caught:
+            await pipeline.run()
+        stats = caught.value.scrape_stats
+        assert stats.feeds_checked == 2
+        assert [(source.source_id, source.status) for source in stats.source_results] == [
+            ("jobright_test", "failed"), ("simplify_test", "failed")
+        ]
+        assert {failure.source for failure in stats.failure_details} == {"jobright_test", "simplify_test"}
+        assert {failure.stage for failure in stats.failure_details} == {"fetch feed"}
+        details = ScrapeStatusReporter._errors(stats, caught.value)
+        assert len(details) == 3
+        errors = "\n".join(details)
+        assert "TimeoutError: No error message supplied" in errors
+        assert "ValueError: invalid response" in errors
+        assert "Shared pipeline (no individual scraper) • publish pending deliveries" in errors
+        assert "RuntimeError: publisher unavailable" in errors
+    finally:
+        await database.close()
 
 
 class StubPublisher:
@@ -34,6 +97,8 @@ class StubFetcher:
         value = self.snapshots[definition.source_id]
         if isinstance(value, BaseException):
             raise value
+        if isinstance(value, FeedFetchResult):
+            return value
         return FeedFetchResult(
             definition=definition,
             observations=value,
@@ -477,17 +542,56 @@ async def test_first_complete_snapshot_is_silent_then_new_job_queues(config_fact
 
         assert baseline.baseline_completed
         assert baseline.deliveries_suppressed == 2
+        assert all(source.duplicates == 0 for source in baseline.source_results)
         assert await database.get_delivery_counts() == {"suppressed": 2}
 
         fetcher.snapshots["one"] = [_job("one", "a"), _job("one", "new")]
+        fetcher.snapshots["two"] = [_job("two", "b"), _job("two", "new")]
         update = await pipeline.run()
 
         assert update.deliveries_queued == 1
+        assert [(source.source_id, source.new_jobs) for source in update.source_results] == [
+            ("one", 1), ("two", 0),  # The same new job appears in both feeds.
+        ]
+        assert sum(source.new_jobs for source in update.source_results) == update.canonical_created == 1
+        assert [(source.source_id, source.duplicates) for source in update.source_results] == [
+            ("one", 1), ("two", 2),  # The second feed sees the newly created job as a dupe.
+        ]
+        assert sum(source.duplicates for source in update.source_results) == update.duplicates == 3
         assert await database.get_delivery_counts() == {"pending": 1, "suppressed": 2}
 
         repeated = await pipeline.run()
         assert repeated.deliveries_queued == 0
+        assert all(source.new_jobs == 0 for source in repeated.source_results)
+        assert [source.duplicates for source in repeated.source_results] == [2, 2]
+        assert repeated.duplicates == 4
         assert await database.get_delivery_counts() == {"pending": 1, "suppressed": 2}
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_new_and_dupe_source_counts_survive_a_later_snapshot_recording_failure(config_factory, monkeypatch):
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    feed = _feed("jobright_internships")
+    fetcher = StubFetcher({feed.source_id: [_job(feed.source_id, "known")]})
+    pipeline = FeedPipeline(
+        config=config, database=database, publisher=StubPublisher(),
+        feeds=(feed,), fetcher=fetcher, direct_link_feeds=(),
+    )
+    try:
+        await pipeline.run()
+        fetcher.snapshots[feed.source_id] = [_job(feed.source_id, "known"), _job(feed.source_id, "new")]
+        monkeypatch.setattr(database, "record_feed_success", AsyncMock(side_effect=RuntimeError("database write failed")))
+        with pytest.raises(RuntimeError, match="database write failed") as caught:
+            await pipeline.run()
+        stats = caught.value.scrape_stats
+        assert stats.canonical_created == 1
+        assert stats.source_results[0].new_jobs == 1
+        assert stats.source_results[0].duplicates == stats.duplicates == 1
+        assert stats.source_results[0].source_id == feed.source_id
     finally:
         await database.close()
 
@@ -528,6 +632,8 @@ async def test_ingest_error_does_not_block_other_rows_or_pending_publication(
         result = await pipeline.run()
 
         assert result.deliveries_queued == 1
+        assert result.source_results[0].new_jobs == 1
+        assert result.source_results[0].duplicates == result.duplicates == 1
         assert result.errors == [
             "one: 1 observation ingestion error(s); "
             "first: external_id=broken: simulated row conflict"
@@ -570,8 +676,109 @@ async def test_direct_ats_feeds_wait_for_their_own_poll_interval(config_factory)
 
         assert first.baseline_completed
         assert second.feeds_checked == 1
+        assert first.source_results[0].status == "fetched"
+        assert first.source_results[0].observations == 1
+        assert second.source_results[0].status == "skipped"
+        assert second.source_results[0].new_jobs == 0
+        state = await database.get_feed_state(feed.source_id)
+        assert second.source_results[0].next_due_at == (
+            datetime.fromisoformat(state["last_checked_at"]) + timedelta(seconds=870)
+        )
         assert fetch_calls == 1
         assert await database.get_delivery_counts() == {"suppressed": 1}
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_run_retains_each_sources_fetch_outcome(config_factory):
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    feeds = (
+        _feed("fetched"), _feed("unchanged"),
+        _feed("not_due", poll_interval_seconds=900), _feed("failed"),
+    )
+    fetcher = StubFetcher({feed.source_id: [] for feed in feeds})
+    pipeline = FeedPipeline(
+        config=config, database=database, publisher=StubPublisher(),
+        feeds=feeds, fetcher=fetcher, direct_link_feeds=(),
+    )
+    try:
+        await pipeline.run()
+        fetcher.snapshots.update({
+            "fetched": [_job("fetched", "new")],
+            "unchanged": FeedFetchResult(
+                definition=feeds[1], observations=[], rejected=0, etag="same",
+                last_modified=None, content_sha=None, not_modified=True,
+            ),
+            "failed": TimeoutError("upstream timed out"),
+        })
+        stats = await pipeline.run()
+        assert [(source.source_id, source.status, source.observations) for source in stats.source_results] == [
+            ("fetched", "fetched", 1), ("unchanged", "unchanged", 0),
+            ("not_due", "skipped", 0), ("failed", "failed", 0),
+        ]
+        assert stats.feeds_unchanged == 1
+        assert stats.observations == 1
+        # Success, unchanged responses, and recorded failures all have a next check.
+        assert all(source.next_due_at is not None for source in stats.source_results)
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_skipped_feed_preserves_last_check_instead_of_resetting_timer(config_factory):
+    now = datetime.now(UTC)
+    last_checked = now - timedelta(seconds=120)
+    database = SimpleNamespace(get_feed_state=AsyncMock(return_value={
+        "last_checked_at": last_checked.isoformat(), "etag": None, "last_modified": None,
+    }))
+    fetcher = SimpleNamespace(fetch=AsyncMock())
+    feed = _feed("simplify_internships", poll_interval_seconds=300)
+    pipeline = FeedPipeline(
+        config=config_factory(), database=database, publisher=StubPublisher(),
+        feeds=(feed,), fetcher=fetcher, direct_link_feeds=(),
+    )
+    result = await pipeline._fetch_one(feed, None, asyncio.Semaphore(1))
+    assert result.skipped
+    assert result.next_due_at == last_checked + timedelta(seconds=270)
+    assert (result.next_due_at - now).total_seconds() == 150
+    fetcher.fetch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_jobright_backoff_is_preserved_in_source_schedule(config_factory):
+    from dataclasses import replace
+    from job_bot.github_feeds import FEED_BY_ID
+
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    feed = replace(FEED_BY_ID["jobright_internships"], poll_interval_seconds=0)
+    result = FeedFetchResult(
+        definition=feed, observations=[], rejected=0, etag=None, last_modified=None,
+        content_sha=None, skipped=True, degraded_reason="backoff",
+    )
+    fetcher = SimpleNamespace(fetch=AsyncMock(return_value=result), jobright_seconds_until_retry=lambda: 600)
+    pipeline = FeedPipeline(
+        config=config, database=database, publisher=StubPublisher(),
+        feeds=(feed,), fetcher=fetcher, direct_link_feeds=(),
+    )
+    try:
+        before = datetime.now(UTC)
+        stats = await pipeline.run()
+        after = datetime.now(UTC)
+        source = stats.source_results[0]
+        assert source.status == "skipped"
+        assert source.skip_reason == "retry backoff"
+        assert before + timedelta(seconds=600) <= source.next_due_at <= after + timedelta(seconds=600)
+
+        # A failed fetch also preserves the longer cooldown after its error is recorded.
+        fetcher.fetch.side_effect = TimeoutError("upstream refused the request")
+        stats = await pipeline.run()
+        assert stats.source_results[0].status == "failed"
+        assert (stats.source_results[0].next_due_at - datetime.now(UTC)).total_seconds() > 590
     finally:
         await database.close()
 

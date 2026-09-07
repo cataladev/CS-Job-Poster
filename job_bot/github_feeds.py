@@ -223,6 +223,14 @@ class FeedDefinition:
     # hour at best.
     poll_interval_seconds: int = 300
     required_for_baseline: bool = True
+    status_label: str = ""
+
+    @property
+    def scrape_label(self) -> str:
+        track = {"internship": "Internships", "new_grad": "New grads"}.get(
+            self.track, self.track.replace("_", " ")
+        )
+        return self.status_label or f"{self.source_label} · {track}"
 
     @property
     def source_url(self) -> str:
@@ -250,6 +258,7 @@ class FeedFetchResult:
     # Set when a source produced a usable but incomplete snapshot, so operators can
     # tell a healthy poll from one that only reached a fallback surface.
     degraded_reason: str | None = None
+    next_due_at: datetime | None = None
 
 
 def _sequence(value: object) -> Sequence[object]:
@@ -928,6 +937,7 @@ FEEDS: tuple[FeedDefinition, ...] = (
         "README-Off-Season.md",
         "internship",
         parse_markdown_table,
+        status_label="Simplify · Off-season internships",
     ),
     FeedDefinition(
         "speedy_internships",
@@ -957,6 +967,7 @@ FEEDS: tuple[FeedDefinition, ...] = (
         "internship",
         parse_markdown_table,
         cycle_hint="Summer 2027",
+        status_label="sndsh404 · Summer 2027 internships",
     ),
     FeedDefinition(
         "intern_engine",
@@ -966,6 +977,7 @@ FEEDS: tuple[FeedDefinition, ...] = (
         "docs/api/jobs.json",
         "internship",
         parse_intern_engine_json,
+        status_label="Internship Engine · JSON feed",
     ),
     FeedDefinition(
         "intern_engine_readme",
@@ -975,6 +987,7 @@ FEEDS: tuple[FeedDefinition, ...] = (
         "README.md",
         "internship",
         parse_markdown_table,
+        status_label="Internship Engine · README list",
     ),
     FeedDefinition(
         "applyguy_internships",

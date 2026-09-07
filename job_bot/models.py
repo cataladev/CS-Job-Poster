@@ -217,6 +217,7 @@ class AppConfig:
     discord_new_grad_alert_role_id: Optional[int] = None
     outsource_internship_channel_id: Optional[int] = None
     outsource_new_grad_channel_id: Optional[int] = None
+    bot_environment: str = "unknown"
 
     def channel_id_for_track(self, track: str) -> Optional[int]:
         if track == "new_grad":

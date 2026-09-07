@@ -756,7 +756,7 @@ def build_help_embed(page_index: int) -> discord.Embed:
 
 async def run_bot() -> None:
     config = load_config()
-    configure_logging(config.log_level)
+    configure_logging(config.log_level, config.bot_environment)
     logger = logging.getLogger("bot")
     instance_id = build_runtime_instance_id()
     startup_channel_defaults = {

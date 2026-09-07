@@ -251,6 +251,7 @@ duplicate-safe post. Location targets use the same 50-target-per-member and
 Copy `.env.example` to `.env`. These values are required for production:
 
 ```dotenv
+BOT_ENV=prod
 DISCORD_TOKEN=replace-me
 DISCORD_CHANNEL_ID=123456789012345678
 DISCORD_NEW_GRAD_CHANNEL_ID=234567890123456789
@@ -346,6 +347,36 @@ remains supported for isolated tests and migration tooling, but the production
 publisher requires Postgres so a database advisory lock can prevent competing workers.
 
 ## Development and production environments
+
+Set `BOT_ENV=arthur_dev` (or your own `[name]_dev`) locally and `BOT_ENV=prod` in
+the VPS env file, then restart the bot. Any environment name is accepted. This
+label appears on every Discord scrape status and application log line;
+unset values show `UNKNOWN` rather than guessing from the database or channels.
+Labels are trimmed and lowercased; `development`/`production` remain aliases for
+`dev`/`prod`. Discord displays labels in uppercase.
+Status footers identify the host and process so overlapping instances are visible.
+Failure titles name the scraper, followed by a plain-language reason. Technical
+details below retain the source ID, stage, exception type/message, and code location;
+counts are condensed into a run summary. Shared database or publishing failures are labeled separately from an
+individual scraper, and preserve counters and errors collected earlier in the run.
+Each status gives every configured source its own full-width field, named by feed
+and track. Each field name ends with a colon, followed by an indented em dash and its status: fetched (jobs read), checked
+but unchanged, skipped because it is not due,
+failed, or not run. The configured-source count includes feeds waiting for their
+next poll; it is not a count of HTTP requests. IBM appears in the separate company
+sources status. Application logs also name every configured core feed and any
+feeds skipped until their next poll.
+The separate `Run summary` field stays at the bottom and contains totals plus
+new and duplicate counts grouped by provider (for example, `Jobright: 12 new · 8 dupes`).
+New counts represent newly created jobs after filtering and deduplication; duplicate
+counts come from ingestion and exclude rejected jobs. `Jobs read` includes previously
+known listings, while queued and posted totals describe delivery. A job appearing
+in multiple feeds is credited to the feed that first creates it in the database.
+Source rows include `next run in: 3m 20s`, estimated at the log timestamp from the
+last recorded check, feed interval, polling cadence, and any Jobright retry
+backoff. When scheduling state is unavailable, the countdown says `unknown`.
+Core-feed errors remain quiet; company-source failures retain the `@here` alert.
+Discord shows up to five bounded error details; application logs retain tracebacks.
 
 Use distinct Discord channels, databases, and preferably separate Discord bot tokens.
 The committed templates contain no credentials:

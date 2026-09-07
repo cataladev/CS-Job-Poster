@@ -10,6 +10,8 @@ import pytest
 
 from job_bot.feed_publisher import TrackChannelPublisher
 from job_bot.mvp_runtime import FeedDiscordClient
+from job_bot.feed_pipeline import FeedRunStats
+from job_bot.scrape_diagnostics import scrape_context
 
 
 @pytest.mark.asyncio
@@ -139,6 +141,32 @@ async def test_poll_loop_reports_each_completed_scrape_cycle() -> None:
     assert reports[0]["feed_group"] == "core"
     assert reports[0]["stats"] is stats
     assert reports[0]["unexpected_error"] is None
+    assert reports[0]["poll_interval_seconds"] == 300
+
+
+@pytest.mark.asyncio
+async def test_poll_loop_reports_partial_stats_with_unexpected_failure(caplog):
+    stats = FeedRunStats(feeds_checked=3, observations=15)
+    shutdown = asyncio.Event()
+    reporter = SimpleNamespace(report=AsyncMock())
+    harness = SimpleNamespace(
+        _shutdown=shutdown, scrape_status_reporter=reporter,
+        logger=logging.getLogger("test_poll_failure"), is_closed=lambda: False,
+    )
+
+    async def fail():
+        shutdown.set()
+        async with scrape_context("publish pending deliveries", stats=stats):
+            raise RuntimeError("database connection lost")
+
+    await FeedDiscordClient._poll_loop(
+        harness, pipeline=SimpleNamespace(run=fail), interval_seconds=60, feed_group="company_sources",
+    )
+    payload = reporter.report.call_args.kwargs
+    assert payload["stats"] is stats
+    assert isinstance(payload["unexpected_error"], RuntimeError)
+    assert "source=shared_pipeline stage=publish pending deliveries" in caplog.text
+    assert "error_type=RuntimeError" in caplog.text
 
 
 @pytest.mark.asyncio
