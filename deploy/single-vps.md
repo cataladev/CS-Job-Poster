@@ -152,12 +152,11 @@ one step with `/create-job-channels` when the bot has **Manage Channels**.
 If using the optional `OUTSOURCE_*` destinations, grant the same four posting
 permissions there plus **Create Public Threads** and **Send Messages in Threads**.
 The supported categories are SWE, DATA / AI, PM, IT / SECURITY, QUANT, ANALYST,
-HARDWARE, DESIGN, and OTHER. A card and attached thread are created only when that
-category's first job arrives. Cards follow arrival order, with no empty categories
-or batch creation at startup. The posting day rolls over at 12:01 AM in
-`DIGEST_TIMEZONE`; jobs through 12:00:59 AM use the preceding day's threads.
-Existing cards and threads are reused, including cards prepared before midnight by
-older versions; older cards are not moved or deleted.
+HARDWARE, DESIGN, and OTHER. Startup creates the full set in that order, with SWE
+first and OTHER last, even without listings. Each category has one permanent card and thread,
+named without a date and reused across days and restarts. Recovery searches
+bot-authored history without a date cutoff. Older dated cards are kept separate
+and are not moved or deleted.
 
 Individual jobs are copied into the matching category thread after their primary
 send succeeds. Unknown roles go to OTHER. Company/location pings and the 4 PM Daily
@@ -175,10 +174,10 @@ sudo systemctl status job-bot.service
 sudo journalctl -u job-bot.service -n 100 --no-pager
 ```
 
-With category destinations enabled, a new job should create or reuse its category's
-card and thread. Startup and empty days do not produce category messages. If a copy
-fails, inspect logs for `outsource_copy_failed` and check destination IDs and thread
-permissions. The next matching job can recover an interrupted card/thread setup;
+With category destinations enabled, startup should create or recover the nine cards
+and threads in each destination. Later startups reuse them. If setup or a copy
+fails, inspect logs for `category_setup_failed` or `outsource_copy_failed` and check
+destination IDs and thread permissions. A reconnect or the next matching job can recover interrupted setup;
 individual mirror copies remain best-effort and are not backfilled after a failure.
 A locked thread is respected and does not cause jobs to appear in the parent channel.
 

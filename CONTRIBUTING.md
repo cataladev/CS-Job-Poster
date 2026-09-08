@@ -36,11 +36,11 @@ stale executable paths after a checkout moves.
 - Keep Discord sending behind the transactional outbox and marker reconciliation.
 - Keep optional category mirrors downstream of successful primary delivery. Preserve
   primary company/location pings and Daily Brief role pings; copies must not ping again.
-- Create each category card and thread only when a matching job arrives; do not
-  pre-create empty categories at startup or on a timer. The posting day rolls over
-  at 00:01 in `DIGEST_TIMEZONE`; jobs before that minute use the prior day's threads.
-  Reuse bot-authored markers across restarts and interrupted card/thread creation,
-  including cards prepared by older versions. Cards follow job arrival order.
+- Initialize every permanent category card and thread at startup in `CATEGORY_ORDER`,
+  with SWE first and OTHER last, independently of incoming listings. Cards and
+  threads use only the category name and persist across days. Reuse stable
+  bot-authored markers across restarts and interrupted creation without limiting
+  history by date. Keep older dated cards separate and preserve existing threads.
 - Classify roles at the mirror boundary, without narrowing upstream API requests
   for presentation. Unknown roles belong in OTHER. Daily Briefs remain only in the
   primary channels, never inside category threads.
@@ -72,9 +72,9 @@ make test-postgres ALEMBIC=".venv/bin/python -m alembic" PYTEST=".venv/bin/pytho
 Tests should cover real-format fixtures, schema drift, location handling, conditional
 `304` fetches, URL variants, cross-source duplication, partial and complete baselines,
 delivery retries, process restarts, and migration compatibility as applicable.
-For category changes, also cover creation on first arrival, no empty-day setup,
-interrupted creation, rollover at 00:01 across EST/EDT boundaries, reuse before and
-after midnight, disabled destinations, thread permissions, and unchanged pings.
+For category changes, also cover ordered startup setup without listings, concurrent
+setup and posting, interrupted creation, recovery of permanent cards and archived threads after
+restarts, disabled destinations, thread permissions, and unchanged pings.
 
 ## Pull requests and issues
 

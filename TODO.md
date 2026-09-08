@@ -1,7 +1,7 @@
 # Deferred work
 
 The runtime has two primary track channels, focused setup/subscription commands,
-and optional daily category-thread mirrors. The items below remain future work until
+and optional permanent category-thread mirrors. The items below remain future work until
 they are designed as maintainable modules with explicit permissions, tests, and
 operational ownership.
 
@@ -36,9 +36,9 @@ operational ownership.
 
 ## Job lifecycle and presentation
 
-Already implemented: nine role categories with cards and threads created on first
-job arrival, an OTHER fallback, restart recovery, and posting-day rollover at 00:01
-in `DIGEST_TIMEZONE`. Daily Briefs and subscription pings stay in the primary channels.
+Already implemented: nine role categories with permanent cards and threads initialized
+at startup in a fixed order, an OTHER fallback, and restart recovery without a date cutoff.
+Daily Briefs and subscription pings stay in the primary channels.
 See [README.md](README.md#configuration) for current behavior.
 
 - Add confirmed closure and reopen handling using repeated evidence rather than one

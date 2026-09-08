@@ -28,8 +28,8 @@ digest-alert roles, plus personal company and location targets.
   new deliveries to summarize. Each brief links to the original Discord job posts
   and can optionally ping a track-specific role. Briefs stay in the primary channels.
 - Provides optional quieter internship and new-grad channels with nine supported
-  role categories. Each card and attached thread is created when the first matching
-  job arrives. The posting day rolls over at 12:01 AM New York time.
+  role categories. Startup creates the full ordered set of permanent cards and
+  attached threads, with SWE first and OTHER last, and reuses it on later starts.
 - Records the first complete core-feed inventory silently; company sources may post
   only same-day listings and never backfill prior-day inventory.
 - Fails closed when a feed is malformed, suspiciously empty, or unavailable.
@@ -179,7 +179,7 @@ Invite the bot with application-command support so the slash command is availabl
 
 For the optional category channels, also grant **Create Public Threads** and
 **Send Messages in Threads**. These permissions let the bot create each category's
-card and thread when a matching job arrives. Category-channel failures are logged
+card and thread during startup setup. Category-channel failures are logged
 without interrupting primary-channel delivery.
 
 Server administrators can configure either posting channel without restarting:
@@ -259,29 +259,27 @@ DISCORD_LOG_CHANNEL_ID=345678901234567890
 DATABASE_URL=postgresql://jobbot:jobbot@localhost:5432/jobbot
 ```
 
-To provide a quieter view of successful internship and new-grad production posts,
-set the optional category-channel destinations:
+To provide a quieter view of successful internship and new-grad posts, set the
+optional category-channel destinations separately from the primary channels.
+These are the consolidated development channels; use your own destinations in production:
 
 ```dotenv
-OUTSOURCE_INTERNSHIP_CHANNEL_ID=1500249793417580584
-OUTSOURCE_NEW_GRAD_CHANNEL_ID=1543286240491733073
+OUTSOURCE_INTERNSHIP_CHANNEL_ID=1546612310225854504  # intern-consolidated (dev)
+OUTSOURCE_NEW_GRAD_CHANNEL_ID=1546612347693699183  # ng-consolidated (dev)
 ```
 
-Each destination creates a category's Discord embed card and attached thread only
-when the first matching job arrives for that posting day. Empty categories are not
-posted, and startup does not create a batch of cards. Cards appear in arrival order,
-so OTHER may appear first if its job arrives first.
+Startup creates the full set of nine permanent category cards and attached threads
+in the table's order, with **SWE first** and **OTHER last**, even before any listings
+arrive. Card and thread names contain only the category, such as **SWE** or **PM**,
+with no date. Every later listing goes into its category's existing thread.
+Restarts recover the same set and create only missing cards or threads; no daily
+setup or rollover is scheduled.
 
-The posting day rolls over at **12:01 AM New York time**. Until 12:00:59 AM, jobs
-continue in the previous posting day's threads; from 12:01 AM onward, each category's
-first job creates or reuses the new date's card. No message is sent solely because
-the clock reaches 12:01 AM. For example, **SWE 09/05/2026**
-has **Roles that belong here:** followed by its role description. Individual job
-embeds go into a public thread attached to that card. Existing cards and threads
-are recovered from bot-authored Discord history after restarts, including cards
-prepared the previous night by older versions. Existing cards are reused without
-moving or deleting their threads. The date and 12:01 AM boundary use
-`DIGEST_TIMEZONE` (default `America/New_York`); primary-channel digests are not copied.
+Each card has **Roles that belong here:** followed by its role description.
+Permanent cards are recovered from bot-authored Discord history without a date
+cutoff. Archived, unlocked threads are reused; locked threads are respected.
+Older dated cards remain separate from permanent cards. Primary-channel digests
+and subscription pings remain in the primary channels.
 
 | Card | Roles that belong here |
 |---|---|
@@ -332,10 +330,10 @@ USER_AGENT=cs-job-poster/2.0
 
 `POLL_INTERVAL_SECONDS` has a minimum of 30 seconds; `DIRECT_ATS_POLL_INTERVAL_SECONDS`
 and `COMPANY_SOURCE_POLL_INTERVAL_SECONDS` have a minimum of five minutes.
-`DIGEST_HOUR_LOCAL` sets the Daily Brief hour (0–23); `DIGEST_TIMEZONE` controls both
-the brief and category-card calendar. `America/New_York` follows EST/EDT automatically.
-The category posting-day boundary is fixed at 00:01; cards and threads are created
-on demand rather than by a scheduled batch. `DIGEST_INTERVAL_SECONDS` is a legacy configuration value and
+`DIGEST_HOUR_LOCAL` sets the Daily Brief hour (0–23); `DIGEST_TIMEZONE` controls
+the brief and the same-day company-listing filter. `America/New_York` follows
+EST/EDT automatically. Category cards and threads are permanent and have no daily
+rollover. `DIGEST_INTERVAL_SECONDS` is a legacy configuration value and
 does not control the active daily schedule. First-party company API
 sources run independently of Jobright and default to an hourly collection cycle.
 The alert-role environment values are optional and can be overridden live with
@@ -418,7 +416,7 @@ Keep Docker and the bot running to receive new jobs. The bot posts to
 the channels in your actual `.env`; use development channels when testing.
 
 On the first successful run, all current core inventories are saved with suppressed
-job deliveries. No category cards or threads are created without a job delivery.
+job deliveries. Category cards and empty threads initialize independently at startup.
 A partial core run cannot complete that shared baseline.
 First-party company APIs persist their complete eligible inventories for
 deduplication, but only listings whose source-provided posting date is today in the
@@ -472,7 +470,7 @@ deployment workflow for adding another company careers API.
 - `job_bot/database.py` — observations, canonical merging, delivery outbox.
 - `job_bot/feed_publisher.py` — Discord embeds and marker reconciliation.
 - `outsource/categories.py` — role classification and card descriptions.
-- `outsource/mirror.py` — category cards created on demand, job threads, and 00:01 date rollover.
+- `outsource/mirror.py` — permanent category cards, startup setup, and job threads.
 - `job_bot/job_channel_commands.py` — persisted admin-only channel configuration.
 - `job_bot/mvp_runtime.py` — one-client scheduler, slash commands, and process lock.
 

@@ -52,10 +52,10 @@ bot.py
 ```
 
 Category routing belongs to the final mirror step, not to company adapters. Every
-source uses the same role classifier and OTHER fallback. A category card and thread
-are created only when that category's first job arrives for the posting day.
-The day rolls over at 00:01 in `DIGEST_TIMEZONE`; jobs arriving before that minute
-use the previous day's threads. There is no bulk creation at startup or on a timer.
+source uses the same role classifier and OTHER fallback. Startup initializes all
+nine category cards and threads, with SWE first and OTHER last, before any listings
+are required. Each category keeps one permanent card and thread, named without
+dates and reused across days and restarts. There is no daily setup timer.
 Daily Briefs and company/location subscription pings remain in the primary channels.
 See [the category-channel configuration](README.md#configuration) for destinations,
 role families, thread permissions, and restart behavior.
