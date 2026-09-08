@@ -15,7 +15,7 @@ from job_bot.scrape_diagnostics import scrape_context
 
 
 @pytest.mark.asyncio
-async def test_ready_starts_only_feed_pollers_and_does_not_create_empty_categories(config_factory):
+async def test_ready_starts_category_setup_and_both_feed_pollers(config_factory):
     started = []
     harness = SimpleNamespace(
         config=config_factory(),
@@ -24,12 +24,38 @@ async def test_ready_starts_only_feed_pollers_and_does_not_create_empty_categori
         user=SimpleNamespace(id=42),
         _guild_commands_synced=True,
         change_presence=AsyncMock(),
+        _ensure_category_task=lambda: started.append("categories"),
         _ensure_poll_task=lambda **kwargs: started.append(kwargs["name"]),
         pipeline=object(),
         company_source_pipeline=object(),
     )
     await FeedDiscordClient.on_ready(harness)
-    assert started == ["core", "company_sources"]
+    assert started == ["categories", "core", "company_sources"]
+
+
+@pytest.mark.asyncio
+async def test_category_setup_does_not_overlap_on_reconnect():
+    release = asyncio.Event()
+    setup = AsyncMock()
+
+    async def initialize():
+        await setup()
+        await release.wait()
+
+    harness = SimpleNamespace(
+        _poll_tasks={},
+        publisher=SimpleNamespace(outsource_mirror=SimpleNamespace(ensure_categories=initialize)),
+    )
+    FeedDiscordClient._ensure_category_task(harness)
+    first = harness._poll_tasks["categories"]
+    FeedDiscordClient._ensure_category_task(harness)
+    try:
+        await asyncio.sleep(0)
+        assert harness._poll_tasks["categories"] is first
+        setup.assert_awaited_once()
+    finally:
+        release.set()
+        await first
 
 
 @pytest.mark.asyncio

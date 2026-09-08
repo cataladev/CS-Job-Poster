@@ -106,6 +106,7 @@ class FeedDiscordClient(discord.Client):
                 name="new U.S. jobs",
             ),
         )
+        self._ensure_category_task()
         self._ensure_poll_task(
             name="core",
             pipeline=self.pipeline,
@@ -146,6 +147,14 @@ class FeedDiscordClient(discord.Client):
             except asyncio.CancelledError:
                 pass
         await super().close()
+
+    def _ensure_category_task(self) -> None:
+        task = self._poll_tasks.get("categories")
+        if task is None or task.done():
+            self._poll_tasks["categories"] = asyncio.create_task(
+                self.publisher.outsource_mirror.ensure_categories(),
+                name="consolidated-category-setup",
+            )
 
     def _ensure_poll_task(
         self,
