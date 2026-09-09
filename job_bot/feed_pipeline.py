@@ -359,7 +359,11 @@ class FeedPipeline:
                 job.canonical_url or job.url,
             )
             resolved_direct_url = None
-            if is_jobright:
+            # A row Jobright itself resolved already points at the employer and
+            # carries its own fallback. Looking it up again would overwrite that
+            # fallback with the employer URL we just set.
+            already_resolved = bool(observation.raw_data.get("jobright_link_resolved"))
+            if is_jobright and not already_resolved:
                 jobright_url = job.canonical_url or job.url
                 resolved_direct_url = await self.database.find_cached_direct_link(
                     job=job,

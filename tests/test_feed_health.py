@@ -225,8 +225,9 @@ async def test_webhook_can_never_ping_everyone_or_here(monkeypatch) -> None:
 
     assert sent is True
     _url, payload = _FakeSession.posted[-1]
-    # An empty parse list forbids every mention type, whatever the content says.
-    assert payload["allowed_mentions"] == {"parse": []}
+    # An empty parse list forbids @everyone/@here whatever the content says, and no
+    # user id was addressed, so nothing at all can be pinged.
+    assert payload["allowed_mentions"] == {"parse": [], "users": []}
 
 
 @pytest.mark.asyncio
@@ -255,3 +256,55 @@ async def test_an_unset_webhook_falls_back_to_logging(caplog) -> None:
         assert await notifier.send("Jobright online") is True
 
     assert "Jobright online" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_only_failures_mention_the_operator() -> None:
+    notifier = RecordingNotifier()
+    reporter = SourceHealthReporter("Jobright", notifier, alert_mention="<@424242424242424242>")
+
+    await reporter.record_success(egress="direct", observations=30)
+    await reporter.record_rotation(
+        from_egress="a", to_egress="b", reason="blocked", error="403"
+    )
+    await reporter.record_failure(
+        egress="direct", reason="blocked", error="403", consecutive_failures=1
+    )
+    await reporter.record_success(egress="direct", observations=30)
+
+    online, rotated, degraded, recovered = notifier.messages
+    # Good news and a self-healing rotation must not wake anybody at 3am.
+    assert "<@424242424242424242>" not in online
+    assert "<@424242424242424242>" not in rotated
+    assert "<@424242424242424242>" not in recovered
+    assert degraded.endswith("<@424242424242424242>")
+
+
+@pytest.mark.asyncio
+async def test_no_mention_configured_leaves_alerts_unchanged() -> None:
+    notifier = RecordingNotifier()
+    reporter = SourceHealthReporter("Jobright", notifier)
+
+    await reporter.record_failure(
+        egress="direct", reason="blocked", error="403", consecutive_failures=1
+    )
+
+    assert "<@" not in notifier.messages[-1]
+
+
+@pytest.mark.asyncio
+async def test_webhook_pings_only_the_ids_the_message_addresses(monkeypatch) -> None:
+    _FakeSession.posted = []
+    monkeypatch.setattr("job_bot.utils.notify.aiohttp.ClientSession", _FakeSession)
+
+    await WebhookNotifier("https://discord.com/api/webhooks/secret").send(
+        "🔴 Jobright degraded @everyone @here <@424242424242424242>"
+    )
+
+    _url, payload = _FakeSession.posted[-1]
+    # parse stays empty, so @everyone and @here remain impossible; only the one id
+    # this message deliberately addresses is allowed through.
+    assert payload["allowed_mentions"] == {
+        "parse": [],
+        "users": ["424242424242424242"],
+    }

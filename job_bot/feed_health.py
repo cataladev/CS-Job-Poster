@@ -11,6 +11,10 @@ from job_bot.utils.notify import Notifier
 ERROR_DETAIL_LIMIT = 300
 
 
+# Kinds worth waking somebody for. A rotation is a partial failure that resolves
+# itself on the next address, and a recovery is good news; neither earns a ping.
+ALERTING_KINDS = frozenset({"degraded"})
+
 # Green for a working source, red for a refused one, orange for a move between
 # addresses that has not yet resolved either way.
 KIND_BADGES = {
@@ -60,9 +64,14 @@ class SourceHealthReporter:
         notifier: Notifier,
         *,
         clock: Callable[[], float] = time.monotonic,
+        alert_mention: str = "",
     ) -> None:
         self.source = source
         self._notifier = notifier
+        # Rendered into failure alerts only, so a channel someone watches can wake
+        # the person who can act. An expired session or a blocked address otherwise
+        # only shows up as a link quietly reverting, which nobody notices.
+        self._alert_mention = alert_mention.strip()
         self._clock = clock
         self._logger = logging.getLogger(self.__class__.__name__)
         # None means "nothing observed yet", which is what separates the boot
@@ -208,7 +217,12 @@ class SourceHealthReporter:
         )
         # A broken alert path must not break polling; the notifier logs its own errors.
         badge = KIND_BADGES.get(event.kind, "")
-        await self._notifier.send(f"{badge} {event.message}".strip())
+        mention = (
+            f" {self._alert_mention}"
+            if self._alert_mention and event.kind in ALERTING_KINDS
+            else ""
+        )
+        await self._notifier.send(f"{badge} {event.message}{mention}".strip())
         return event
 
 
