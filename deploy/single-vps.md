@@ -119,9 +119,13 @@ POSTGRES_PASSWORD=<long-random-password>
 DATABASE_URL=postgresql://jobbot:<long-random-password>@localhost:5432/jobbot
 DISCORD_CHANNEL_ID=<internship-channel-id>
 DISCORD_NEW_GRAD_CHANNEL_ID=<new-grad-channel-id>
-POLL_INTERVAL_SECONDS=300
+POLL_INTERVAL_SECONDS=60
 DIRECT_ATS_POLL_INTERVAL_SECONDS=900
-DIGEST_INTERVAL_SECONDS=14400
+DIGEST_HOUR_LOCAL=16
+DIGEST_TIMEZONE=America/New_York
+# Optional quieter views; use destinations separate from the primary channels.
+OUTSOURCE_INTERNSHIP_CHANNEL_ID=
+OUTSOURCE_NEW_GRAD_CHANNEL_ID=
 # Optional: mentioned only once per track digest; requires Mention Everyone.
 DISCORD_INTERNSHIP_ALERT_ROLE_ID=
 DISCORD_NEW_GRAD_ALERT_ROLE_ID=
@@ -145,6 +149,21 @@ bot **Manage Roles**, place its role above the two alert roles, and direct membe
 `/job-alert`. An administrator can create and configure both standard job channels in
 one step with `/create-job-channels` when the bot has **Manage Channels**.
 
+If using the optional `OUTSOURCE_*` destinations, grant the same four posting
+permissions there plus **Create Public Threads** and **Send Messages in Threads**.
+The supported categories are SWE, DATA / AI, PM, IT / SECURITY, QUANT, ANALYST,
+HARDWARE, DESIGN, and OTHER. Startup creates the full set in that order, with SWE
+first and OTHER last, even without listings. Each category has one permanent card and thread,
+named without a date and reused across days and restarts. Recovery searches
+bot-authored history without a date cutoff. Older dated cards are kept separate
+and are not moved or deleted.
+
+Individual jobs are copied into the matching category thread after their primary
+send succeeds. Unknown roles go to OTHER. Company/location pings and the 4 PM Daily
+Brief with its role ping stay in the primary channels; briefs are not copied into
+the quieter channels or their threads. The mirror disables mentions on copied job
+messages. No migration is needed for this presentation feature.
+
 ## 4. Verify the service
 
 Once the env file is filled in:
@@ -154,6 +173,13 @@ sudo systemctl restart job-bot.service
 sudo systemctl status job-bot.service
 sudo journalctl -u job-bot.service -n 100 --no-pager
 ```
+
+With category destinations enabled, startup should create or recover the nine cards
+and threads in each destination. Later startups reuse them. If setup or a copy
+fails, inspect logs for `category_setup_failed` or `outsource_copy_failed` and check
+destination IDs and thread permissions. A reconnect or the next matching job can recover interrupted setup;
+individual mirror copies remain best-effort and are not backfilled after a failure.
+A locked thread is respected and does not cause jobs to appear in the parent channel.
 
 If you have existing SQLite production data you want to preserve, import it once before the final restart:
 

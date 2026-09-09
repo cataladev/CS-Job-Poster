@@ -250,7 +250,45 @@ def sanitize_application_url(value: str) -> SafeUrl:
     sanitized = urlunsplit(("https", host, path or "/", query, ""))
     if len(sanitized) > 2_048:
         return SafeUrl("", host, "oversized-sanitized-url")
-    return SafeUrl(sanitized, host)
+    return SafeUrl(normalize_ibm_application_url(sanitized), host)
+
+
+def normalize_ibm_application_url(url: str) -> str:
+    """Use IBM's case-sensitive jobId parameter for clickable job links.
+
+    The general sanitizer lowercases identity keys for comparison, but IBM sends
+    lowercase jobid to its Error page. Also repair previously stored links when
+    choosing a canonical URL or rendering a queued Discord delivery.
+    """
+    try:
+        parsed = urlsplit(url)
+        if (
+            parsed.hostname != "careers.ibm.com"
+            or parsed.scheme not in {"http", "https"}
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.port not in {None, 443}
+        ):
+            return url
+        match = re.fullmatch(
+            r"/(?:(?P<locale>[a-z]{2}_[a-z]{2})/)?careers/JobDetail/?",
+            parsed.path,
+            re.IGNORECASE,
+        )
+        if match is None:
+            return url
+        params = parse_qsl(parsed.query, max_num_fields=64)
+    except ValueError:
+        return url
+    for key, value in params:
+        if key.casefold() == "jobid" and _QUERY_VALUE.fullmatch(value):
+            locale = match["locale"] or "en_US"
+            locale = f"{locale[:2].lower()}_{locale[3:].upper()}"
+            return urlunsplit((
+                "https", "careers.ibm.com", f"/{locale}/careers/JobDetail",
+                urlencode({"jobId": value}), "",
+            ))
+    return url
 
 
 def is_us_location(location: str, *, trusted_us: bool, context: str = "") -> bool:
@@ -281,7 +319,7 @@ def external_identity_keys(url: str, *, company: str = "") -> set[str]:
     parsed = urlsplit(url)
     host = (parsed.hostname or "").casefold()
     parts = [part for part in parsed.path.split("/") if part and part.casefold() != "apply"]
-    query = dict(parse_qsl(parsed.query))
+    query = {key.casefold(): value for key, value in parse_qsl(parsed.query)}
     keys: set[str] = set()
 
     if query.get("gh_jid"):
@@ -318,6 +356,8 @@ def external_identity_keys(url: str, *, company: str = "") -> set[str]:
 
 def preferred_application_url(existing_url: str, candidate_url: str) -> str:
     """Keep a direct application destination when an aggregator copy arrives."""
+    existing_url = normalize_ibm_application_url(existing_url)
+    candidate_url = normalize_ibm_application_url(candidate_url)
     if not existing_url:
         return candidate_url
     if not candidate_url:

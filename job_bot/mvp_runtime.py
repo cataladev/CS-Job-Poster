@@ -23,6 +23,7 @@ from job_bot.job_channel_commands import (
     register_job_channel_commands,
 )
 from job_bot.models import AppConfig
+from job_bot.scrape_diagnostics import ScrapeFailure
 from job_bot.scrape_status import ScrapeStatusReporter
 
 
@@ -105,6 +106,7 @@ class FeedDiscordClient(discord.Client):
                 name="new U.S. jobs",
             ),
         )
+        self._ensure_category_task()
         self._ensure_poll_task(
             name="core",
             pipeline=self.pipeline,
@@ -146,6 +148,14 @@ class FeedDiscordClient(discord.Client):
                 pass
         await super().close()
 
+    def _ensure_category_task(self) -> None:
+        task = self._poll_tasks.get("categories")
+        if task is None or task.done():
+            self._poll_tasks["categories"] = asyncio.create_task(
+                self.publisher.outsource_mirror.ensure_categories(),
+                name="consolidated-category-setup",
+            )
+
     def _ensure_poll_task(
         self,
         *,
@@ -179,8 +189,16 @@ class FeedDiscordClient(discord.Client):
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                self.logger.exception("feed_poll_failed feed_group=%s", feed_group)
-                stats = None
+                failure = ScrapeFailure.from_exception(exc)
+                self.logger.exception(
+                    "feed_poll_failed feed_group=%s source=%s stage=%s error_type=%s error=%s",
+                    feed_group,
+                    failure.source or "shared_pipeline",
+                    failure.stage,
+                    failure.error_type,
+                    failure.message,
+                )
+                stats = getattr(exc, "scrape_stats", None)
                 unexpected_error = exc
             elapsed = time.monotonic() - started
             try:
@@ -189,6 +207,7 @@ class FeedDiscordClient(discord.Client):
                     elapsed_seconds=elapsed,
                     stats=stats,
                     unexpected_error=unexpected_error,
+                    poll_interval_seconds=interval_seconds,
                 )
             except Exception:
                 self.logger.exception(
@@ -204,7 +223,7 @@ class FeedDiscordClient(discord.Client):
                 elapsed,
                 delay,
                 stats.deliveries_sent if stats is not None else 0,
-                len(stats.errors) if stats is not None else 1,
+                len(ScrapeStatusReporter._errors(stats, unexpected_error)),
             )
             try:
                 await asyncio.wait_for(self._shutdown.wait(), timeout=delay)
@@ -214,7 +233,7 @@ class FeedDiscordClient(discord.Client):
 
 async def run_bot() -> None:
     config = load_config()
-    configure_logging(config.log_level)
+    configure_logging(config.log_level, config.bot_environment)
     logger = logging.getLogger("mvp_runtime")
     if not config.discord_token:
         raise RuntimeError("DISCORD_TOKEN is required")

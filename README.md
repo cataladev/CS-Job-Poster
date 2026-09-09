@@ -24,8 +24,12 @@ digest-alert roles, plus personal company and location targets.
   board with no matching roles is a healthy empty result, not a failed source.
 - Posts each newly discovered role immediately to its configured track channel,
   with direct mentions only for members targeting that company and track.
-- Sends one digest per track every four hours by default. Each digest links back to
-  the original Discord job posts and can optionally ping a track-specific role.
+- Sends one Daily Brief per track at 4 PM New York time by default when there are
+  new deliveries to summarize. Each brief links to the original Discord job posts
+  and can optionally ping a track-specific role. Briefs stay in the primary channels.
+- Provides optional quieter internship and new-grad channels with nine supported
+  role categories. Startup creates the full ordered set of permanent cards and
+  attached threads, with SWE first and OTHER last, and reuses it on later starts.
 - Records the first complete core-feed inventory silently; company sources may post
   only same-day listings and never backfill prior-day inventory.
 - Fails closed when a feed is malformed, suspiciously empty, or unavailable.
@@ -35,7 +39,8 @@ digest-alert roles, plus personal company and location targets.
   the window behind it has moved on; it keeps its own one-minute interval.
 - Requires row-level U.S. evidence. Mixed-location rows retain only their U.S.
   locations; foreign, ambiguous, archived, and inactive rows are not published.
-- Applies no title, category, seniority, season, or job-age filter.
+- Groups mirrored jobs by role at the final posting step without adding category
+  exclusions to ingestion. Unclear roles go to OTHER.
 - Sends internships to `DISCORD_CHANNEL_ID` and new-grad roles to
   `DISCORD_NEW_GRAD_CHANNEL_ID`.
 - Suppresses new-grad delivery when its channel is unset or matches the internship
@@ -172,6 +177,11 @@ Read Message History is required for duplicate reconciliation. The bot fails clo
 before publishing if any permission is missing. Message Content Intent is not needed.
 Invite the bot with application-command support so the slash command is available.
 
+For the optional category channels, also grant **Create Public Threads** and
+**Send Messages in Threads**. These permissions let the bot create each category's
+card and thread during startup setup. Category-channel failures are logged
+without interrupting primary-channel delivery.
+
 Server administrators can configure either posting channel without restarting:
 
 ```text
@@ -241,6 +251,7 @@ duplicate-safe post. Location targets use the same 50-target-per-member and
 Copy `.env.example` to `.env`. These values are required for production:
 
 ```dotenv
+BOT_ENV=prod
 DISCORD_TOKEN=replace-me
 DISCORD_CHANNEL_ID=123456789012345678
 DISCORD_NEW_GRAD_CHANNEL_ID=234567890123456789
@@ -248,21 +259,55 @@ DISCORD_LOG_CHANNEL_ID=345678901234567890
 DATABASE_URL=postgresql://jobbot:jobbot@localhost:5432/jobbot
 ```
 
-To copy every successful internship and new-grad production post to a second
-pair of channels, set the optional outsource destinations:
+To provide a quieter view of successful internship and new-grad posts, set the
+optional category-channel destinations separately from the primary channels.
+These are the consolidated development channels; use your own destinations in production:
 
 ```dotenv
-OUTSOURCE_INTERNSHIP_CHANNEL_ID=345678901234567890
-OUTSOURCE_NEW_GRAD_CHANNEL_ID=456789012345678901
+OUTSOURCE_INTERNSHIP_CHANNEL_ID=1546612310225854504  # intern-consolidated (dev)
+OUTSOURCE_NEW_GRAD_CHANNEL_ID=1546612347693699183  # ng-consolidated (dev)
 ```
 
-The existing Discord bot must have access to the destination channels and needs
-View Channel, Send Messages, and Embed Links permissions there. Job posts and daily
-digests are copied after the original succeeds. User and role mention text is kept,
-but Discord mentions are disabled on the copy so subscribers are not pinged twice.
-Leave either value blank to disable mirroring for that track. The implementation is
-isolated in `outsource/`; a failed copy is logged and does not retry or change the
-successful production delivery.
+Startup creates the full set of nine permanent category cards and attached threads
+in the table's order, with **SWE first** and **OTHER last**, even before any listings
+arrive. Card and thread names contain only the category, such as **SWE** or **PM**,
+with no date. Every later listing goes into its category's existing thread.
+Restarts recover the same set and create only missing cards or threads; no daily
+setup or rollover is scheduled.
+
+Each card has **Roles that belong here:** followed by its role description.
+Permanent cards are recovered from bot-authored Discord history without a date
+cutoff. Archived, unlocked threads are reused; locked threads are respected.
+Older dated cards remain separate from permanent cards. Primary-channel digests
+and subscription pings remain in the primary channels.
+
+| Card | Roles that belong here |
+|---|---|
+| SWE | Software engineering, frontend, backend, full stack, mobile, embedded software, software systems engineering, platform engineering, SRE, DevOps, and test automation. |
+| DATA / AI | Data engineering, data science, machine learning, AI engineering, and applied research. |
+| PM | Product management, technical program management, and technical project management. |
+| IT / SECURITY | IT support, systems administration, network administration, cybersecurity, security operations, and cloud administration. |
+| QUANT | Quantitative research, quantitative trading, and explicitly quantitative developer roles. |
+| ANALYST | Business analysts, data analysts, business intelligence, product analysts, and financial analysts. |
+| HARDWARE | Electrical engineering, computer hardware, chip design, FPGA, and physical robotics engineering. |
+| DESIGN | UX/UI, product design, UX research, and interaction design. |
+| OTHER | Roles that don’t clearly fit an existing category or don’t provide enough information to classify confidently. |
+
+Classification happens only at the final mirror step; feeds and ingestion filters
+are unchanged. Each job goes to one category, prioritizing explicit title signals
+and using descriptions to resolve otherwise unclear roles. Software systems roles
+share SWE with backend developers; infrastructure administration belongs to IT /
+SECURITY and physical systems to HARDWARE. Company names do not determine categories.
+
+The bot needs View Channel, Send Messages, Embed Links, Read Message History,
+Create Public Threads, and Send Messages in Threads in the destination channels.
+Original company/location subscription pings and digest role pings stay in the primary
+channels. User mention text is retained in copied job embeds' messages, with Discord
+mentions disabled so subscribers are not pinged twice. Leave either destination blank
+to disable that track's mirror. This remains a best-effort secondary view: a failed
+copy is logged and does not retry or change the successful production delivery.
+Locked threads are respected; jobs are never dumped into the parent channel as a
+fallback. No historical posts are moved or backfilled by this change.
 
 Optional runtime settings:
 
@@ -270,7 +315,8 @@ Optional runtime settings:
 POLL_INTERVAL_SECONDS=60
 DIRECT_ATS_POLL_INTERVAL_SECONDS=900
 COMPANY_SOURCE_POLL_INTERVAL_SECONDS=3600
-DIGEST_INTERVAL_SECONDS=14400
+DIGEST_HOUR_LOCAL=16
+DIGEST_TIMEZONE=America/New_York
 DISCORD_INTERNSHIP_ALERT_ROLE_ID=
 DISCORD_NEW_GRAD_ALERT_ROLE_ID=
 RECENT_CATCHUP_HOURS=48
@@ -283,8 +329,12 @@ USER_AGENT=cs-job-poster/2.0
 ```
 
 `POLL_INTERVAL_SECONDS` has a minimum of 30 seconds; `DIRECT_ATS_POLL_INTERVAL_SECONDS`
-and `COMPANY_SOURCE_POLL_INTERVAL_SECONDS` have a minimum of five minutes;
-`DIGEST_INTERVAL_SECONDS` has a minimum of 15 minutes. First-party company API
+and `COMPANY_SOURCE_POLL_INTERVAL_SECONDS` have a minimum of five minutes.
+`DIGEST_HOUR_LOCAL` sets the Daily Brief hour (0–23); `DIGEST_TIMEZONE` controls
+the brief and the same-day company-listing filter. `America/New_York` follows
+EST/EDT automatically. Category cards and threads are permanent and have no daily
+rollover. `DIGEST_INTERVAL_SECONDS` is a legacy configuration value and
+does not control the active daily schedule. First-party company API
 sources run independently of Jobright and default to an hourly collection cycle.
 The alert-role environment values are optional and can be overridden live with
 `/set-job-alert-role`. `RECENT_CATCHUP_HOURS` is a one-time upgrade bridge: an
@@ -295,6 +345,36 @@ remains supported for isolated tests and migration tooling, but the production
 publisher requires Postgres so a database advisory lock can prevent competing workers.
 
 ## Development and production environments
+
+Set `BOT_ENV=arthur_dev` (or your own `[name]_dev`) locally and `BOT_ENV=prod` in
+the VPS env file, then restart the bot. Any environment name is accepted. This
+label appears on every Discord scrape status and application log line;
+unset values show `UNKNOWN` rather than guessing from the database or channels.
+Labels are trimmed and lowercased; `development`/`production` remain aliases for
+`dev`/`prod`. Discord displays labels in uppercase.
+Status footers identify the host and process so overlapping instances are visible.
+Failure titles name the scraper, followed by a plain-language reason. Technical
+details below retain the source ID, stage, exception type/message, and code location;
+counts are condensed into a run summary. Shared database or publishing failures are labeled separately from an
+individual scraper, and preserve counters and errors collected earlier in the run.
+Each status gives every configured source its own full-width field, named by feed
+and track. Each field name ends with a colon, followed by an indented em dash and its status: fetched (jobs read), checked
+but unchanged, skipped because it is not due,
+failed, or not run. The configured-source count includes feeds waiting for their
+next poll; it is not a count of HTTP requests. IBM appears in the separate company
+sources status. Application logs also name every configured core feed and any
+feeds skipped until their next poll.
+The separate `Run summary` field stays at the bottom and contains totals plus
+new and duplicate counts grouped by provider (for example, `Jobright: 12 new · 8 dupes`).
+New counts represent newly created jobs after filtering and deduplication; duplicate
+counts come from ingestion and exclude rejected jobs. `Jobs read` includes previously
+known listings, while queued and posted totals describe delivery. A job appearing
+in multiple feeds is credited to the feed that first creates it in the database.
+Source rows include `next run in: 3m 20s`, estimated at the log timestamp from the
+last recorded check, feed interval, polling cadence, and any Jobright retry
+backoff. When scheduling state is unavailable, the countdown says `unknown`.
+Core-feed errors remain quiet; company-source failures retain the `@here` alert.
+Discord shows up to five bounded error details; application logs retain tracebacks.
 
 Use distinct Discord channels, databases, and preferably separate Discord bot tokens.
 The committed templates contain no credentials:
@@ -317,13 +397,28 @@ source .venv/bin/activate
 pip install -r requirements.txt
 cp deploy/dev.env.example .env
 make postgres-up
-make db-migrate
+make db-migrate ALEMBIC=".venv/bin/python -m alembic"
 make run-postgres
 ```
 
+For an existing setup, start Docker Desktop and run the combined target from the
+repository root:
+
+```bash
+make dev-postgres ALEMBIC=".venv/bin/python -m alembic"
+```
+
+This starts Postgres, applies migrations, and runs the bot. The module-based Alembic
+override also works if the checkout moved and its virtualenv launcher contains an
+old absolute path. Once the database is running and migrated, use `make run-postgres`
+alone. Stop the bot with Ctrl+C and run that command again after changing code.
+Keep Docker and the bot running to receive new jobs. The bot posts to
+the channels in your actual `.env`; use development channels when testing.
+
 On the first successful run, all current core inventories are saved with suppressed
-deliveries and nothing is posted. A partial core run cannot complete that shared
-baseline. First-party company APIs persist their complete eligible inventories for
+job deliveries. Category cards and empty threads initialize independently at startup.
+A partial core run cannot complete that shared baseline.
+First-party company APIs persist their complete eligible inventories for
 deduplication, but only listings whose source-provided posting date is today in the
 configured schedule timezone can be delivered. Missing, malformed, and prior-day
 posting dates are suppressed, including when a company source is first enabled or its
@@ -332,7 +427,7 @@ query scope expands.
 Run the test suite with:
 
 ```bash
-pytest tests -q
+.venv/bin/python -m pytest tests -q
 ```
 
 GitHub Actions runs the complete suite against Postgres before deployment. There is
@@ -374,6 +469,8 @@ deployment workflow for adding another company careers API.
   independent collection pipeline.
 - `job_bot/database.py` — observations, canonical merging, delivery outbox.
 - `job_bot/feed_publisher.py` — Discord embeds and marker reconciliation.
+- `outsource/categories.py` — role classification and card descriptions.
+- `outsource/mirror.py` — permanent category cards, startup setup, and job threads.
 - `job_bot/job_channel_commands.py` — persisted admin-only channel configuration.
 - `job_bot/mvp_runtime.py` — one-client scheduler, slash commands, and process lock.
 

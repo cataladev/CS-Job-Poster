@@ -19,6 +19,11 @@ RUNTIME_CONFIG_NEW_GRAD_ALERT_ROLE_KEY = "discord_new_grad_alert_role_id"
 DEFAULT_COMPANY_BLACKLIST = ("dice",)
 
 
+def _parse_environment(value: str | None) -> str:
+    environment = (value or "unknown").strip().lower() or "unknown"
+    return {"development": "dev", "production": "prod"}.get(environment, environment)
+
+
 def _parse_bool(value: Optional[str], default: bool = False) -> bool:
     if value is None:
         return default
@@ -86,6 +91,7 @@ def load_config() -> AppConfig:
     )
 
     config = AppConfig(
+        bot_environment=_parse_environment(os.getenv("BOT_ENV")),
         discord_token=os.getenv("DISCORD_TOKEN", ""),
         discord_channel_id=int(os.getenv("DISCORD_CHANNEL_ID", "0")),
         discord_new_grad_channel_id=int(new_grad_channel_id) if new_grad_channel_id else None,
@@ -207,8 +213,13 @@ def is_new_grad_collection_enabled(config: AppConfig) -> bool:
     )
 
 
-def configure_logging(level: str) -> None:
+def configure_logging(level: str, environment: str = "unknown") -> None:
+    # A custom label is literal text, not a logging-format placeholder.
+    environment_label = _parse_environment(environment).replace("%", "%%")
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),
-        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+        format=(
+            f"%(asctime)s %(levelname)s [env={environment_label} "
+            "pid=%(process)d] [%(name)s] %(message)s"
+        ),
     )

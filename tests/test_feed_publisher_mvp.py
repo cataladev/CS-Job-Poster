@@ -31,6 +31,8 @@ class FakeChannel:
             embed_links=True,
             read_message_history=True,
             mention_everyone=True,
+            create_public_threads=True,
+            send_messages_in_threads=True,
         )
         self.send_error = send_error
 
@@ -43,9 +45,12 @@ class FakeChannel:
         self.sent.append(embed)
         self.contents.append(content)
         self.allowed_mentions.append(allowed_mentions)
-        return SimpleNamespace(id=999 + len(self.sent))
+        message = FakeMessage(self, embed, 999 + len(self.sent))
+        self.messages.append(message)
+        return message
 
     def history(self, **_kwargs):
+        self.history_kwargs = _kwargs
         async def generate():
             for message in self.messages:
                 yield message
@@ -63,6 +68,28 @@ class FakeClient:
 
     async def fetch_channel(self, channel_id):
         return self.channels.get(channel_id)
+
+
+class FakeMessage:
+    def __init__(self, channel, embed, message_id):
+        self.id = message_id
+        self.author = SimpleNamespace(id=42)
+        self.embeds = [embed]
+        self.channel = channel
+        self.thread = None
+
+    async def fetch_thread(self):
+        if self.thread is None:
+            raise discord.NotFound(SimpleNamespace(status=404, reason="Not Found"), "missing")
+        return self.thread
+
+    async def create_thread(self, *, name, auto_archive_duration):
+        assert self.thread is None
+        self.thread = FakeChannel([], channel_id=self.id)
+        self.thread.name = name
+        self.thread.locked = False
+        self.thread.archived = False
+        return self.thread
 
 
 def test_daily_digest_is_scheduled_for_four_pm_new_york_time(config_factory) -> None:
@@ -339,15 +366,22 @@ async def test_outsource_channels_copy_both_tracks_without_repeating_mentions(
 
         assert await publisher.publish_pending() == (2, 0)
 
-        assert outsource_internship_channel.contents == ["🎯 <@777>"]
-        assert outsource_new_grad_channel.contents == [None]
-        assert outsource_internship_channel.sent[0].to_dict() == (
+        assert len(outsource_internship_channel.sent) == 9
+        assert outsource_internship_channel.sent[0].title == "SWE"
+        assert "Roles that belong here:" in outsource_internship_channel.sent[0].description
+        internship_thread = outsource_internship_channel.messages[0].thread
+        new_grad_thread = outsource_new_grad_channel.messages[0].thread
+        assert internship_thread.name == new_grad_thread.name == "SWE"
+        assert internship_channel.contents == ["🎯 <@777>"]
+        assert internship_thread.contents == ["🎯 <@777>"]
+        assert new_grad_thread.contents == [None]
+        assert internship_thread.sent[0].to_dict() == (
             internship_channel.sent[0].to_dict()
         )
-        assert outsource_new_grad_channel.sent[0].to_dict() == (
+        assert new_grad_thread.sent[0].to_dict() == (
             new_grad_channel.sent[0].to_dict()
         )
-        copied_mentions = outsource_internship_channel.allowed_mentions[0]
+        copied_mentions = internship_thread.allowed_mentions[0]
         assert copied_mentions.everyone is False
         assert copied_mentions.users is False
         assert copied_mentions.roles is False
@@ -478,6 +512,34 @@ async def test_ambiguous_send_stays_uncertain_until_marker_reconciliation(config
         assert (sent, reconciled) == (0, 1)
         assert channel.sent == []
         assert await database.get_delivery_counts() == {"sent": 1}
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_queued_ibm_delivery_uses_working_link_in_title_and_apply_text(config_factory) -> None:
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    try:
+        await _create_pending_delivery(database, company="IBM", external_id="131799")
+        delivery = (await database.list_deliveries_for_send(111))[0]
+        # Simulate a job stored by the old sanitizer before this fix.
+        database._connection.execute(
+            "UPDATE canonical_jobs SET canonical_url = ? WHERE id = ?",
+            ("https://careers.ibm.com/careers/JobDetail?jobid=131799", delivery["canonical_id"]),
+        )
+        database._connection.commit()
+        channel = FakeChannel([])
+        publisher = TrackChannelPublisher(config, database)
+        publisher.bind_client(FakeClient(channel))
+        sent, _ = await publisher.publish_pending()
+        expected = "https://careers.ibm.com/en_US/careers/JobDetail?jobId=131799"
+        assert sent == 1
+        assert channel.sent[0].url == expected
+        assert channel.sent[0].description == f"[Apply here]({expected})"
+        assert await database.get_delivery_counts() == {"sent": 1}
+        assert await publisher.publish_pending() == (0, 0)
     finally:
         await database.close()
 
@@ -620,7 +682,8 @@ async def test_periodic_role_digest_links_back_to_individual_job_messages(config
         assert (sent, reconciled) == (2, 0)
         assert len(channel.sent) == 2
         assert channel.contents == [None, None]
-        assert len(outsource_channel.sent) == 2
+        assert len(outsource_channel.sent) == 9
+        assert len(outsource_channel.messages[0].thread.sent) == 2
 
         cursor = (publisher._daily_digest_at(digest_now) - timedelta(days=1)).isoformat()
         await database.set_digest_cursor(111, cursor)
@@ -634,14 +697,12 @@ async def test_periodic_role_digest_links_back_to_individual_job_messages(config
         assert "https://discord.com/channels/123/111/1000" in digest.description
         assert channel.contents[-1] == "<@&555>"
         assert "jobbot:digest:" in digest.footer.text
-        assert len(outsource_channel.sent) == 3
-        assert outsource_channel.sent[-1].to_dict() == digest.to_dict()
-        assert outsource_channel.contents[-1] == "<@&555>"
-        assert outsource_channel.allowed_mentions[-1].roles is False
+        assert len(outsource_channel.sent) == 9
+        assert len(outsource_channel.messages[0].thread.sent) == 2
 
         assert await publisher.publish_pending() == (0, 0)
         assert len(channel.sent) == 3
-        assert len(outsource_channel.sent) == 3
+        assert len(outsource_channel.sent) == 9
     finally:
         await database.close()
 

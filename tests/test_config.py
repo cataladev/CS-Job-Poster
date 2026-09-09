@@ -1,6 +1,37 @@
 from pathlib import Path
 
-from job_bot.config import load_config
+import logging
+
+import pytest
+
+from job_bot.config import configure_logging, load_config
+
+
+@pytest.mark.parametrize("raw, expected", [
+    (None, "unknown"), ("", "unknown"), ("dev", "dev"), (" Production ", "prod"),
+    ("development", "dev"), ("prod", "prod"), ("staging", "staging"), ("test", "test"),
+    ("arthur_dev", "arthur_dev"), (" Carlos_Dev ", "carlos_dev"),
+    ("preview-123", "preview-123"), ("   ", "unknown"),
+])
+def test_environment_label_is_explicit(monkeypatch, tmp_path, raw, expected) -> None:
+    monkeypatch.chdir(tmp_path)
+    if raw is None:
+        monkeypatch.delenv("BOT_ENV", raising=False)
+    else:
+        monkeypatch.setenv("BOT_ENV", raw)
+    assert load_config().bot_environment == expected
+
+
+@pytest.mark.parametrize("environment", ["prod", "arthur_dev", "preview%(custom)s"])
+def test_application_log_format_identifies_environment_and_process(monkeypatch, environment) -> None:
+    configured = {}
+    monkeypatch.setattr(logging, "basicConfig", lambda **kwargs: configured.update(kwargs))
+    configure_logging("INFO", environment)
+    formatter = logging.Formatter(configured["format"])
+    record = logging.LogRecord("FeedPipeline", logging.ERROR, __file__, 1, "feed failed", (), None)
+    message = formatter.format(record)
+    assert f"env={environment} pid={record.process}" in message
+    assert "[FeedPipeline] feed failed" in message
 
 
 def test_load_config_defaults_to_a_one_minute_collection_tick(monkeypatch, tmp_path) -> None:

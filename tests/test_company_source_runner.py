@@ -2,16 +2,56 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from typing import ClassVar
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from zoneinfo import ZoneInfo
 
 import pytest
 
 from job_bot.company_sources.base import CompanySourceResult
 from job_bot.company_sources.registry import COMPANY_SOURCE_REGISTRY
-from job_bot.company_sources.runner import CompanySourceRunner
+from job_bot.company_sources.runner import CompanySourcePipeline, CompanySourceRunner
 from job_bot.database import Database
 from job_bot.feed_pipeline import FeedPipeline
 from job_bot.github_feeds import JobObservation
+
+
+@pytest.mark.asyncio
+async def test_company_failure_retains_source_when_recording_and_publishing_also_fail(
+    config_factory, monkeypatch
+):
+    config = config_factory()
+    database = SimpleNamespace(
+        get_feed_state=AsyncMock(return_value=None),
+        record_feed_error=AsyncMock(side_effect=RuntimeError("database closed")),
+    )
+    publisher = SimpleNamespace(publish_pending=AsyncMock(side_effect=RuntimeError("publishing failed")))
+    feed_pipeline = FeedPipeline(
+        config=config, database=database, publisher=publisher, feeds=(), direct_link_feeds=(),
+    )
+    monkeypatch.setitem(COMPANY_SOURCE_REGISTRY, "test_corp", MutableCompanySource)
+    monkeypatch.setattr(MutableCompanySource, "error", ValueError("invalid careers response"))
+    pipeline = CompanySourcePipeline(
+        config=config, database=database, feed_pipeline=feed_pipeline, source_keys=("test_corp",),
+    )
+
+    with pytest.raises(RuntimeError, match="publishing failed") as caught:
+        await pipeline.run()
+
+    assert caught.value.scrape_failure.source is None
+    assert caught.value.scrape_failure.stage == "publish pending deliveries"
+    stats = caught.value.scrape_stats
+    assert stats.sources_checked == 1
+    assert [(source.source_id, source.label, source.status) for source in stats.source_results] == [
+        ("company_api_test_corp", "Test Corp", "failed")
+    ]
+    assert stats.errors == ["test_corp: invalid careers response"]
+    assert [(failure.stage, failure.error_type, failure.message) for failure in stats.failure_details] == [
+        ("fetch company source", "ValueError", "invalid careers response"),
+        ("record source error", "RuntimeError", "database closed"),
+    ]
+    assert all(failure.source == "test_corp (company_api_test_corp)" for failure in stats.failure_details)
+    assert not pipeline.running
 
 
 class StubPublisher:
@@ -42,6 +82,35 @@ class MutableCompanySource:
             pages_checked=1,
             content_sha="snapshot",
         )
+
+
+@pytest.mark.asyncio
+async def test_company_pipeline_reports_company_name_and_jobs_read(config_factory, monkeypatch):
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    feed_pipeline = FeedPipeline(
+        config=config, database=database, publisher=StubPublisher(),
+        feeds=(), direct_link_feeds=(),
+    )
+    monkeypatch.setitem(COMPANY_SOURCE_REGISTRY, "test_corp", MutableCompanySource)
+    monkeypatch.setattr(MutableCompanySource, "error", None)
+    monkeypatch.setattr(MutableCompanySource, "observations", [_observation("one")])
+    pipeline = CompanySourcePipeline(
+        config=config, database=database, feed_pipeline=feed_pipeline, source_keys=("test_corp",),
+    )
+    try:
+        stats = await pipeline.run()
+        assert [(source.source_id, source.label, source.status, source.observations) for source in stats.source_results] == [
+            ("company_api_test_corp", "Test Corp", "fetched", 1)
+        ]
+        assert stats.source_results[0].new_jobs == stats.canonical_created == 1
+        assert stats.source_results[0].duplicates == stats.duplicates == 0
+        repeated = await pipeline.run()
+        assert repeated.source_results[0].new_jobs == repeated.canonical_created == 0
+        assert repeated.source_results[0].duplicates == repeated.duplicates == 1
+    finally:
+        await database.close()
 
 
 def _observation(
@@ -239,8 +308,12 @@ async def test_company_ingest_error_keeps_healthy_rows_without_completing_snapsh
                 last_modified=None,
             )
 
-        with pytest.raises(RuntimeError, match="1 observation ingestion error"):
+        with pytest.raises(RuntimeError, match="1 observation ingestion error") as caught:
             await runner.run("test_corp", DummyHttpClient())  # type: ignore[arg-type]
+
+        partial_source = CompanySourcePipeline._source_result("test_corp", caught.value)
+        assert partial_source.status == "failed"
+        assert partial_source.new_jobs == 1
 
         state = await database.get_feed_state(MutableCompanySource.source_id)
         assert state is not None

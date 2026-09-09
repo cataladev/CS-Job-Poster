@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable, Iterable
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 from urllib.parse import urlsplit
@@ -18,6 +18,7 @@ from job_bot.github_feeds import (
     JobObservation,
 )
 from job_bot.models import AppConfig
+from job_bot.scrape_diagnostics import ScrapeFailure, ScrapeSourceResult, scrape_context
 from job_bot.utils.feed_normalization import (
     external_identity_keys,
     has_explicit_foreign_role_location,
@@ -53,6 +54,8 @@ class FeedRunStats:
     baseline_completed: bool = False
     source_errors: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    failure_details: list[ScrapeFailure] = field(default_factory=list)
+    source_results: list[ScrapeSourceResult] = field(default_factory=list)
 
 
 @dataclass
@@ -65,6 +68,7 @@ class ObservationIngestStats:
     deliveries_queued: int = 0
     deliveries_suppressed: int = 0
     errors: list[str] = field(default_factory=list)
+    failure_details: list[ScrapeFailure] = field(default_factory=list)
 
 
 HttpClientFactory = Callable[..., AsyncHttpClient]
@@ -140,19 +144,25 @@ class FeedPipeline:
         return self._lock.locked()
 
     async def run(self) -> FeedRunStats:
+        stats = FeedRunStats(source_results=[
+            ScrapeSourceResult(
+                source_id=feed.source_id, label=feed.scrape_label, provider_label=feed.source_label
+            )
+            for feed in self.feeds
+        ])
         if self._lock.locked():
-            stats = FeedRunStats()
             stats.errors.append("feed run already in progress")
             return stats
 
-        async with self._lock:
-            stats = FeedRunStats()
+        async with self._lock, scrape_context("database baseline check", stats=stats) as context:
             initial_baseline_complete = await self.database.is_initial_feed_baseline_complete()
             self.logger.info(
-                "feed_run_started feeds=%s initial_baseline_complete=%s",
+                "feed_run_started feeds=%s initial_baseline_complete=%s sources=%s",
                 len(self.feeds),
                 initial_baseline_complete,
+                ",".join(feed.source_id for feed in self.feeds),
             )
+            context.stage = "initialize HTTP client"
             async with self.http_client_factory(
                 timeout_seconds=self.config.request_timeout_seconds,
                 retries=self.config.request_retries,
@@ -164,6 +174,36 @@ class FeedPipeline:
                     for feed in self.feeds
                 ]
                 results = await asyncio.gather(*tasks, return_exceptions=True)
+                stats.feeds_checked = len(results)
+                stats.source_results = [
+                    ScrapeSourceResult(
+                        source_id=feed.source_id,
+                        label=feed.scrape_label,
+                        provider_label=feed.source_label,
+                        status=(
+                            "failed" if isinstance(result, BaseException)
+                            else "skipped" if result.skipped
+                            else "unchanged" if result.not_modified else "fetched"
+                        ),
+                        observations=0 if isinstance(result, BaseException) else len(result.observations),
+                        skip_reason=(
+                            "retry backoff" if isinstance(result, FeedFetchResult)
+                            and result.degraded_reason == "backoff" else "not due"
+                        ),
+                        next_due_at=None if isinstance(result, BaseException) else result.next_due_at,
+                    )
+                    for feed, result in zip(self.feeds, results)
+                ]
+                # Capture every completed fetch before any database write or
+                # direct-link lookup can abort the rest of the run.
+                for feed, result in zip(self.feeds, results):
+                    if isinstance(result, BaseException):
+                        failure = ScrapeFailure.from_exception(
+                            result, source=feed.source_id, stage="fetch feed"
+                        )
+                        stats.failure_details.append(failure)
+                        self.logger.error("feed_failed %s", failure.describe(), exc_info=result)
+                context.stage = "resolve direct links"
                 (
                     stats.direct_link_boards_fetched,
                     direct_link_errors,
@@ -171,32 +211,43 @@ class FeedPipeline:
                     results,
                     http_client,
                     semaphore,
+                    failure_details=stats.failure_details,
                 )
                 stats.source_errors.extend(direct_link_errors)
 
-            for feed, result in zip(self.feeds, results):
-                stats.feeds_checked += 1
+            for index, (feed, result) in enumerate(zip(self.feeds, results)):
+                context.source = feed.source_id
+                context.stage = "read feed state"
                 if isinstance(result, BaseException):
                     error = f"{feed.source_id}: {result}"
                     stats.source_errors.append(error)
                     if feed.required_for_baseline:
                         stats.errors.append(error)
+                    context.stage = "record feed error"
                     await self.database.record_feed_error(
                         source_id=feed.source_id,
                         repository=feed.repository,
                         path=feed.path,
                         error=str(result),
                     )
-                    self.logger.error("feed_failed source=%s error=%s", feed.source_id, result)
+                    stats.source_results[index] = replace(
+                        stats.source_results[index], next_due_at=self._next_due_at(feed)
+                    )
                     continue
 
                 if result.skipped:
-                    self.logger.debug("feed_not_due source=%s", feed.source_id)
+                    self.logger.info(
+                        "feed_not_due source=%s next_due_at=%s", feed.source_id, result.next_due_at
+                    )
                     continue
 
                 if result.not_modified:
+                    context.stage = "record unchanged feed"
                     stats.feeds_unchanged += 1
                     await self.database.record_feed_not_modified(feed.source_id)
+                    stats.source_results[index] = replace(
+                        stats.source_results[index], next_due_at=self._next_due_at(feed)
+                    )
                     self.logger.info("feed_unchanged source=%s", feed.source_id)
                     continue
 
@@ -208,6 +259,7 @@ class FeedPipeline:
                     and state["path"] == feed.path
                 )
                 suppress_delivery = not initial_baseline_complete or not feed_baselined
+                context.stage = "ingest observations"
                 ingest_stats = await self.ingest_observations(
                     result.observations,
                     suppress_delivery=suppress_delivery,
@@ -221,6 +273,13 @@ class FeedPipeline:
                 stats.deliveries_suppressed += ingest_stats.deliveries_suppressed
                 stats.rejected += result.rejected
                 source_ingest_errors = ingest_stats.errors
+                stats.failure_details.extend(ingest_stats.failure_details)
+                # Preserve source counts even if recording this snapshot fails.
+                stats.source_results[index] = replace(
+                    stats.source_results[index], new_jobs=ingest_stats.canonical_created,
+                    duplicates=ingest_stats.duplicates,
+                )
+                context.stage = "record feed result"
                 if source_ingest_errors:
                     error = (
                         f"{len(source_ingest_errors)} observation ingestion error(s); "
@@ -245,6 +304,9 @@ class FeedPipeline:
                         last_modified=result.last_modified,
                         baseline_complete=True,
                     )
+                stats.source_results[index] = replace(
+                    stats.source_results[index], next_due_at=self._next_due_at(feed)
+                )
                 self.logger.info(
                     "feed_finished source=%s observations=%s rejected=%s created=%s "
                     "duplicates=%s merged=%s ingest_errors=%s suppressed=%s",
@@ -258,6 +320,8 @@ class FeedPipeline:
                     suppress_delivery,
                 )
 
+            context.source = None
+            context.stage = "complete database baseline"
             if not initial_baseline_complete and not stats.errors:
                 stats.baseline_completed = await self.database.complete_initial_feed_baseline_if_ready(
                     feed.source_id for feed in self.feeds if feed.required_for_baseline
@@ -266,6 +330,7 @@ class FeedPipeline:
                     await self.database.mark_recent_suppressed_catchup_complete()
                     self.logger.info("initial_feed_baseline_completed")
 
+            context.stage = "promote recent deliveries"
             if initial_baseline_complete and not stats.errors:
                 cutoff_date = (
                     datetime.now(UTC) - timedelta(hours=self.config.recent_catchup_hours)
@@ -290,6 +355,7 @@ class FeedPipeline:
                         cutoff_date,
                     )
 
+            context.stage = "publish pending deliveries"
             sent, reconciled = await self.publisher.publish_pending()
             stats.deliveries_sent = sent
             stats.deliveries_reconciled = reconciled
@@ -419,6 +485,11 @@ class FeedPipeline:
                 )
             except Exception as exc:
                 stats.errors.append(f"external_id={observation.external_id}: {exc}")
+                stats.failure_details.append(ScrapeFailure.from_exception(
+                    exc,
+                    source=observation.source_id,
+                    stage=f"ingest observation {observation.external_id}",
+                ))
                 self.logger.exception(
                     "observation_ingest_failed source=%s external_id=%s",
                     observation.source_id,
@@ -456,6 +527,8 @@ class FeedPipeline:
         results: list[FeedFetchResult | BaseException],
         http_client: AsyncHttpClient,
         semaphore: asyncio.Semaphore,
+        *,
+        failure_details: list[ScrapeFailure] | None = None,
     ) -> tuple[int, list[str]]:
         """Fetch only stale ATS boards for companies in the current Jobright batch.
 
@@ -502,15 +575,16 @@ class FeedPipeline:
         errors: list[str] = []
         for feed, result in zip(due_feeds, fetched):
             if isinstance(result, BaseException):
+                failure = ScrapeFailure.from_exception(result, source=feed.source_id, stage="resolve direct links")
+                if failure_details is not None:
+                    failure_details.append(failure)
                 errors.append(f"{feed.source_id}: {result}")
+                self.logger.warning("direct_link_board_failed %s", failure.describe(), exc_info=result)
                 await self.database.record_direct_ats_cache_check(
                     source_id=feed.source_id,
                     provider=feed.provider or "unknown",
                     board_token=feed.path,
                     error=str(result),
-                )
-                self.logger.warning(
-                    "direct_link_board_failed source=%s error=%s", feed.source_id, result
                 )
                 continue
             for observation in result.observations:
@@ -536,7 +610,7 @@ class FeedPipeline:
         *,
         search_texts: Iterable[str] = (),
     ) -> FeedFetchResult:
-        async with semaphore:
+        async with semaphore, scrape_context("fetch direct-link board", source=feed.source_id):
             if feed.provider == "workday":
                 async with self._workday_fetch_lock:
                     if search_texts:
@@ -554,16 +628,28 @@ class FeedPipeline:
                 )
             return await self.fetcher.fetch(feed, http_client)
 
+    def _next_due_at(
+        self, feed: FeedDefinition, *, checked_at: datetime | None = None
+    ) -> datetime:
+        now = datetime.now(UTC)
+        due_at = (checked_at or now) + timedelta(
+            seconds=max(0, feed.poll_interval_seconds - FEED_INTERVAL_SLACK_SECONDS)
+        )
+        if feed.provider == "jobright":
+            retry_in = self.fetcher.jobright_seconds_until_retry()
+            due_at = max(due_at, now + timedelta(seconds=retry_in))
+        return due_at
+
     async def _fetch_one(
         self,
         feed: FeedDefinition,
         http_client: AsyncHttpClient,
         semaphore: asyncio.Semaphore,
     ) -> FeedFetchResult:
-        async with semaphore:
+        async with semaphore, scrape_context("read feed state", source=feed.source_id) as context:
             state = await self.database.get_feed_state(feed.source_id)
             if feed.poll_interval_seconds and state:
-                last_checked = state.get("last_checked_at")
+                last_checked = state["last_checked_at"]
                 try:
                     last_checked_at = datetime.fromisoformat(str(last_checked))
                     if last_checked_at.tzinfo is None:
@@ -581,19 +667,29 @@ class FeedPipeline:
                         definition=feed,
                         observations=[],
                         rejected=0,
-                        etag=state.get("etag"),
-                        last_modified=state.get("last_modified"),
+                        etag=state["etag"],
+                        last_modified=state["last_modified"],
                         content_sha=None,
                         skipped=True,
+                        next_due_at=self._next_due_at(feed, checked_at=last_checked_at),
                     )
             state_matches_feed = bool(
                 state
                 and state["repository"] == feed.repository
                 and state["path"] == feed.path
             )
-            return await self.fetcher.fetch(
+            context.stage = "fetch feed"
+            result = await self.fetcher.fetch(
                 feed,
                 http_client,
                 etag=state["etag"] if state_matches_feed else None,
                 last_modified=state["last_modified"] if state_matches_feed else None,
             )
+            if result.skipped and result.degraded_reason == "backoff":
+                result = replace(
+                    result,
+                    next_due_at=datetime.now(UTC) + timedelta(
+                        seconds=self.fetcher.jobright_seconds_until_retry()
+                    ),
+                )
+            return result

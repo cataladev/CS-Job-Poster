@@ -17,6 +17,7 @@ from job_bot.models import AppConfig, CanonicalJob
 from job_bot.utils.feed_normalization import (
     has_explicit_foreign_role_location,
     is_us_location,
+    normalize_ibm_application_url,
     sanitize_application_url,
 )
 from job_bot.utils.http import AsyncHttpClient
@@ -426,6 +427,7 @@ class TrackChannelPublisher:
                 source_message_id=int(message.id),
                 content=target_content,
                 embed=embed,
+                job=job,
             )
             sent += 1
             self.logger.info(
@@ -471,14 +473,15 @@ class TrackChannelPublisher:
         highlights = _job_highlights(job.title, job.season_term, job.remote_status)
         description_prefix = "🛰️ **REMOTE**\n" if job.remote_status.casefold() == "remote" else ""
         jobright_fallback_url = self._safe_thumbnail_url(metadata.get("jobright_fallback_url"))
+        application_url = normalize_ibm_application_url(job.canonical_url)
         apply_links = (
-            f"[Apply directly]({job.canonical_url})\n[Jobright fallback]({jobright_fallback_url})"
+            f"[Apply directly]({application_url})\n[Jobright fallback]({jobright_fallback_url})"
             if jobright_fallback_url
-            else f"[Apply here]({job.canonical_url})"
+            else f"[Apply here]({application_url})"
         )
         embed = discord.Embed(
             title=_truncate(job.title, 256),
-            url=job.canonical_url,
+            url=application_url,
             description=f"{description_prefix}{apply_links}",
             color=discord.Color.blurple(),
         )
@@ -570,7 +573,7 @@ class TrackChannelPublisher:
             if guild_id is not None and message_id:
                 url = f"https://discord.com/channels/{guild_id}/{channel.id}/{message_id}"
             else:
-                url = str(delivery["canonical_url"])
+                url = normalize_ibm_application_url(str(delivery["canonical_url"]))
             cycle = _truncate(delivery["season_term"] or "Cycle TBA", 40)
             highlights = _job_highlights(
                 str(delivery["title"]),

@@ -14,6 +14,7 @@ from job_bot.company_sources.registry import (
 from job_bot.database import Database
 from job_bot.feed_pipeline import FeedPipeline, ObservationIngestStats
 from job_bot.models import AppConfig
+from job_bot.scrape_diagnostics import ScrapeFailure, ScrapeSourceResult, scrape_context
 from job_bot.utils.http import AsyncHttpClient
 
 HttpClientFactory = Callable[..., AsyncHttpClient]
@@ -55,6 +56,7 @@ class CompanySourceRunStats:
     deliveries_suppressed: int = 0
     baseline_completed: bool = False
     skipped: bool = False
+    failure_details: list[ScrapeFailure] = field(default_factory=list)
 
     def add_ingest(self, ingest: ObservationIngestStats) -> None:
         self.observations += ingest.observations
@@ -64,6 +66,7 @@ class CompanySourceRunStats:
         self.canonicals_merged += ingest.canonicals_merged
         self.deliveries_queued += ingest.deliveries_queued
         self.deliveries_suppressed += ingest.deliveries_suppressed
+        self.failure_details.extend(ingest.failure_details)
 
 
 @dataclass
@@ -81,6 +84,8 @@ class CompanySourcePipelineStats:
     deliveries_reconciled: int = 0
     baselines_completed: int = 0
     errors: list[str] = field(default_factory=list)
+    failure_details: list[ScrapeFailure] = field(default_factory=list)
+    source_results: list[ScrapeSourceResult] = field(default_factory=list)
 
     def add_run(self, run: CompanySourceRunStats) -> None:
         self.sources_checked += 1
@@ -93,6 +98,7 @@ class CompanySourcePipelineStats:
         self.deliveries_queued += run.deliveries_queued
         self.deliveries_suppressed += run.deliveries_suppressed
         self.baselines_completed += int(run.baseline_completed)
+        self.failure_details.extend(run.failure_details)
 
 
 class CompanySourceRunner:
@@ -123,14 +129,16 @@ class CompanySourceRunner:
             )
             return CompanySourceRunStats(source_key=source_key, skipped=True)
 
-        async with lock:
+        async with lock, scrape_context("initialize source", source=source_key) as context:
             source = create_company_source(source_key, http_client)
+            context.source = f"{source_key} ({source.source_id})"
             source_repository = f"company-api/{source_key}"
             source_path = source.source_url
             stats = CompanySourceRunStats(
                 source_key=source_key, source_id=source.source_id
             )
             try:
+                context.stage = "read feed state"
                 state = await self.database.get_feed_state(source.source_id)
                 source_baselined = bool(
                     state
@@ -138,6 +146,7 @@ class CompanySourceRunner:
                     and state["repository"] == source_repository
                     and state["path"] == source_path
                 )
+                context.stage = "fetch company source"
                 result = await source.fetch()
                 stats.pages_checked = result.pages_checked
                 stats.rejected += result.rejected
@@ -158,6 +167,7 @@ class CompanySourceRunner:
                     )
                     target.append(observation)
 
+                context.stage = "ingest observations"
                 ingest_errors: list[str] = []
                 for observations, suppress_delivery in (
                     (same_day_observations, False),
@@ -177,6 +187,7 @@ class CompanySourceRunner:
                         f"{len(ingest_errors)} observation ingestion error(s); "
                         f"first: {ingest_errors[0]}"
                     )
+                context.stage = "record source success"
                 await self.database.record_feed_success(
                     source_id=source.source_id,
                     repository=source_repository,
@@ -217,29 +228,38 @@ class CompanySourceRunner:
                 )
                 return stats
             except Exception as exc:
-                await self.database.record_feed_error(
-                    source_id=source.source_id,
-                    repository=source_repository,
-                    path=source_path,
-                    error=str(exc),
-                )
-                await self.database.record_source_run(
-                    source_name=source.source_id,
-                    track="company_api",
-                    status="error",
-                    jobs_fetched=stats.observations,
-                    jobs_filtered=stats.rejected,
-                    jobs_new=stats.canonical_created,
-                    jobs_duplicates=stats.duplicates,
-                    metadata={
-                        "source_key": source_key,
-                        "pages_checked": stats.pages_checked,
-                    },
-                    error=str(exc),
-                )
+                exc.scrape_stats = stats
                 self.logger.exception(
-                    "company_source_failed source=%s", source.source_id
+                    "company_source_failed source=%s stage=%s error_type=%s error=%s",
+                    source.source_id, context.stage, type(exc).__name__, exc,
                 )
+                # A closed database must not hide the scraper's original error.
+                try:
+                    await self.database.record_feed_error(
+                        source_id=source.source_id,
+                        repository=source_repository,
+                        path=source_path,
+                        error=str(exc),
+                    )
+                    await self.database.record_source_run(
+                        source_name=source.source_id,
+                        track="company_api",
+                        status="error",
+                        jobs_fetched=stats.observations,
+                        jobs_filtered=stats.rejected,
+                        jobs_new=stats.canonical_created,
+                        jobs_duplicates=stats.duplicates,
+                        metadata={
+                            "source_key": source_key,
+                            "pages_checked": stats.pages_checked,
+                        },
+                        error=str(exc),
+                    )
+                except Exception as record_error:
+                    stats.failure_details.append(ScrapeFailure.from_exception(
+                        record_error, source=context.source, stage="record source error"
+                    ))
+                    self.logger.exception("company_source_error_record_failed source=%s", source.source_id)
                 raise
 
 
@@ -272,13 +292,15 @@ class CompanySourcePipeline:
         return self._lock.locked()
 
     async def run(self) -> CompanySourcePipelineStats:
+        stats = CompanySourcePipelineStats(source_results=[
+            self._source_result(source_key) for source_key in self.source_keys
+        ])
         if self._lock.locked():
-            stats = CompanySourcePipelineStats(sources_skipped=len(self.source_keys))
+            stats.sources_skipped = len(self.source_keys)
             stats.errors.append("company source run already in progress")
             return stats
 
-        async with self._lock:
-            stats = CompanySourcePipelineStats()
+        async with self._lock, scrape_context("initialize HTTP client", stats=stats) as context:
             semaphore = asyncio.Semaphore(max(1, self.config.source_concurrency))
             async with self.http_client_factory(
                 timeout_seconds=self.config.request_timeout_seconds,
@@ -290,18 +312,33 @@ class CompanySourcePipeline:
                     async with semaphore:
                         return await self.runner.run(source_key, http_client)
 
+                context.stage = "collect company sources"
                 results = await asyncio.gather(
                     *(run_one(source_key) for source_key in self.source_keys),
                     return_exceptions=True,
                 )
+                stats.source_results = [
+                    self._source_result(source_key, result)
+                    for source_key, result in zip(self.source_keys, results)
+                ]
 
             for source_key, result in zip(self.source_keys, results):
                 if isinstance(result, BaseException):
-                    stats.sources_checked += 1
+                    failure = ScrapeFailure.from_exception(
+                        result, source=source_key, stage="collect company source"
+                    )
+                    stats.failure_details.append(failure)
+                    partial_stats = getattr(result, "scrape_stats", None)
+                    if isinstance(partial_stats, CompanySourceRunStats):
+                        stats.add_run(partial_stats)
+                    else:
+                        stats.sources_checked += 1
+                        self.logger.error("company_source_failed %s", failure.describe(), exc_info=result)
                     stats.errors.append(f"{source_key}: {result}")
                     continue
                 stats.add_run(result)
 
+            context.stage = "publish pending deliveries"
             sent, reconciled = await self.feed_pipeline.publisher.publish_pending()
             stats.deliveries_sent = sent
             stats.deliveries_reconciled = reconciled
@@ -319,3 +356,22 @@ class CompanySourcePipeline:
                 len(stats.errors),
             )
             return stats
+
+    @staticmethod
+    def _source_result(
+        source_key: str, result: CompanySourceRunStats | BaseException | None = None
+    ) -> ScrapeSourceResult:
+        source_class = COMPANY_SOURCE_REGISTRY.get(source_key)
+        partial = getattr(result, "scrape_stats", None) if isinstance(result, BaseException) else result
+        return ScrapeSourceResult(
+            source_id=getattr(partial, "source_id", "") or getattr(source_class, "source_id", source_key),
+            label=getattr(source_class, "company_name", source_key),
+            status=(
+                "not_run" if result is None else "failed" if isinstance(result, BaseException)
+                else "skipped" if result.skipped else "fetched"
+            ),
+            observations=getattr(partial, "observations", 0),
+            new_jobs=getattr(partial, "canonical_created", 0),
+            duplicates=getattr(partial, "duplicates", 0),
+            skip_reason="already running",
+        )

@@ -81,7 +81,7 @@ async def test_ibm_fetch_adapts_early_career_us_jobs() -> None:
     assert [job.external_id for job in result.observations] == ["87892", "99001"]
     assert [job.track for job in result.observations] == ["internship", "new_grad"]
     assert result.observations[0].application_url == (
-        "https://careers.ibm.com/careers/JobDetail?jobid=87892"
+        "https://careers.ibm.com/en_US/careers/JobDetail?jobId=87892"
     )
     assert result.observations[0].locations == ["Austin, TX"]
     assert result.observations[0].cycle is None
