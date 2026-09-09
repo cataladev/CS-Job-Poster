@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import os
 from typing import Mapping, Optional, Protocol
 
@@ -10,6 +11,14 @@ import aiohttp
 WEBHOOK_TIMEOUT_SECONDS = 5
 # Discord rejects a webhook body over 2000 characters outright.
 WEBHOOK_CONTENT_LIMIT = 1900
+
+# Discord renders "<@123>" as a mention, but only pings when the id is also allowed.
+MENTION_PATTERN = re.compile(r"<@!?(\d{5,25})>")
+
+
+def _mentioned_user_ids(content: str) -> list[str]:
+    """Ids this message actually addresses, so only those can be pinged."""
+    return sorted(set(MENTION_PATTERN.findall(content)))
 
 
 class Notifier(Protocol):
@@ -44,11 +53,14 @@ class WebhookNotifier:
         self._logger = logging.getLogger(self.__class__.__name__)
 
     async def send(self, message: str) -> bool:
+        content = message[:WEBHOOK_CONTENT_LIMIT]
         payload = {
-            "content": message[:WEBHOOK_CONTENT_LIMIT],
+            "content": content,
             # Status lines quote upstream error text. An empty parse list forbids
             # every mention type, so no quoted string can ping @everyone or @here.
-            "allowed_mentions": {"parse": []},
+            # Only ids this message deliberately addresses are allowed back in, and
+            # a quoted "<@...>" from upstream text can at worst ping that one user.
+            "allowed_mentions": {"parse": [], "users": _mentioned_user_ids(content)},
         }
         timeout = aiohttp.ClientTimeout(total=self._timeout_seconds)
         try:

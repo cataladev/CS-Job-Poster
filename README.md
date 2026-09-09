@@ -72,8 +72,16 @@ supported ATS URLs in `data/company_watchlist_seed.csv`: currently Greenhouse, L
 Ashby, and SmartRecruiters boards. When a Jobright role's company has a matching board,
 the runtime requests that public API only if its local result is more than four hours old,
 then uses an unambiguous direct match while retaining Jobright as fallback. This avoids
-polling every employer board on every cycle and does not use HTML rendering or login-only
-endpoints.
+polling every employer board on every cycle and does not use HTML rendering.
+
+Jobright's own listings can additionally be resolved to the employer's application URL.
+Its public window carries only `jobright.ai` wrapper links, but a role's detail route
+returns the employer's posting to a signed-in session. Setting `JOBRIGHT_SESSION_ID`
+turns this on: each newly seen role costs one ~12 KB JSON request, the result is
+remembered for the life of the process, and the Jobright link is kept as the fallback
+shown beneath "Apply directly". Leaving it unset changes nothing — every link stays a
+Jobright link. The cookie expires; when it does, the bot reports it once, stops trying,
+and every link falls back, so a stale session degrades the links and never the feed.
 
 First-party company sources live under `job_bot/company_sources/companies/`. They fetch
 company-owned careers APIs independently of Jobright, adapt results to the shared

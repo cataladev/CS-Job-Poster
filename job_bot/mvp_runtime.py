@@ -32,7 +32,7 @@ from job_bot.scrape_status import ScrapeStatusReporter
 # like a job posted moments ago, and the whole backlog would be delivered at once. A new
 # epoch makes the next collection record everything in silence and deliver only what
 # appears after it. Sent deliveries are never replayed.
-FEED_BASELINE_EPOCH = "2026-09-02-jobright-taxonomy-window"
+FEED_BASELINE_EPOCH = "2026-09-02-jobright-employer-links"
 
 CHANNEL_RECOVERY_KEY = "restore_established_job_channels_20260819_v1"
 MISROUTED_CHANNELS = {

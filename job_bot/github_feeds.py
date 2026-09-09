@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -16,6 +17,12 @@ import markdown
 from bs4 import BeautifulSoup, Tag
 
 from job_bot.feed_health import SourceHealthReporter
+from job_bot.jobright_links import (
+    JOBRIGHT_ALERT_USER_ENV,
+    JOBRIGHT_SESSION_ENV,
+    JobrightLinkResolver,
+    alert_mention,
+)
 from job_bot.models import JobPosting
 from job_bot.utils.feed_normalization import (
     clean_feed_text,
@@ -704,9 +711,10 @@ def parse_jobright_public_cards(
 
         title = clean_feed_text(job.get("jobTitle"))
         company = clean_feed_text(company_data.get("companyName"))
-        # Keep Jobright as the canonical destination for its own listings. It
-        # provides the application handoff and does not require us to scrape or
-        # retain a user-authenticated employer URL.
+        # Jobright's window only ever carries its own wrapper link, so that is the
+        # canonical destination here. When a session is configured the resolver
+        # replaces it afterwards with the employer's posting and keeps this URL as
+        # the fallback; with no session it stays the destination, as it always was.
         application_url = _safe_url(job.get("applyLink") or job.get("url"))
         locations = _feed_locations(
             _sequence(job.get("jobLocations")) or (job.get("jobLocation"),),
@@ -1046,6 +1054,7 @@ class GitHubFeedFetcher:
         *,
         jobright_proxies: Sequence[ProxyEndpoint] | None = None,
         jobright_notifier: Notifier | None = None,
+        jobright_link_resolver: JobrightLinkResolver | None = None,
     ) -> None:
         # Both Jobright tracks read the same taxonomy window within one collection
         # pass. The lock keeps the concurrent pair to a single upstream request.
@@ -1079,11 +1088,24 @@ class GitHubFeedFetcher:
                 len(self._jobright_proxies),
                 describe_proxy_pool(self._jobright_proxies),
             )
-        self._jobright_health = SourceHealthReporter(
-            "Jobright",
-            jobright_notifier
-            or load_notifier(JOBRIGHT_STATUS_WEBHOOK_ENV, logger_name="jobright_status"),
+        notifier = jobright_notifier or load_notifier(
+            JOBRIGHT_STATUS_WEBHOOK_ENV, logger_name="jobright_status"
         )
+        mention = alert_mention(os.getenv(JOBRIGHT_ALERT_USER_ENV, ""))
+        self._jobright_health = SourceHealthReporter(
+            "Jobright", notifier, alert_mention=mention
+        )
+        # Optional: with a session configured, Jobright listings are pointed at the
+        # employer's own posting instead of Jobright's wrapper. Without one, nothing
+        # changes -- the resolver reports itself disabled and returns rows untouched.
+        self._jobright_links = jobright_link_resolver or JobrightLinkResolver(
+            os.getenv(JOBRIGHT_SESSION_ENV, ""),
+            notifier=notifier,
+            request_kwargs=self._jobright_request_kwargs,
+            alert_mention=mention,
+        )
+        if self._jobright_links.enabled:
+            self._logger.info("jobright_employer_links_enabled")
 
     def jobright_seconds_until_retry(self) -> float:
         """Seconds remaining before Jobright should be contacted again.
@@ -1226,6 +1248,7 @@ class GitHubFeedFetcher:
             )
 
         observations, rejected = parse_jobright_public_cards(cards, definition)
+        observations = await self._jobright_links.resolve(http_client, observations)
         payload = json.dumps({"jobList": cards}, sort_keys=True, default=str)
         return FeedFetchResult(
             definition=definition,
