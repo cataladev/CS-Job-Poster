@@ -164,6 +164,15 @@ Brief with its role ping stay in the primary channels; briefs are not copied int
 the quieter channels or their threads. The mirror disables mentions on copied job
 messages. No migration is needed for this presentation feature.
 
+The log channel (`DISCORD_LOG_CHANNEL_ID`) also needs **Read Message History**,
+**Create Public Threads**, and **Send Messages in Threads**, plus **Mention Everyone**
+for company-source error pings. Startup creates two permanent threads: **Core feeds**
+for core summaries and Jobright health/session alerts, and **Direct scrapers** for
+company-source summaries. Existing threads, including archived ones, are reused on
+restart. Locked threads leave errors in application logs without parent-channel posts.
+`JOBRIGHT_STATUS_WEBHOOK_URL` is used only by standalone scraper tools; the posting
+runtime routes those notifications through its bot into **Core feeds**.
+
 ## 4. Verify the service
 
 Once the env file is filled in:

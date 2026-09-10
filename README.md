@@ -127,8 +127,11 @@ how many attempts failed and how long the source was degraded. A steady feed, an
 feed failing repeatedly for the same reason, both stay quiet — a channel that repeats
 itself every minute stops being read; a changed failure reason is announced again,
 because a block turning into a dead proxy is a different problem with a different fix.
-Set `JOBRIGHT_STATUS_WEBHOOK_URL` to a Discord webhook to receive these; unset, the same
-lines go to the application log. The webhook is best-effort — an unreachable or
+The posting runtime sends these messages, including expired-session alerts, through
+the bot into the permanent **Core feeds** thread under `DISCORD_LOG_CHANNEL_ID`.
+They include the environment label and remain in the application log. Standalone
+scraper tools can still use `JOBRIGHT_STATUS_WEBHOOK_URL`; the posting runtime uses
+its log thread instead. The standalone webhook is best-effort — an unreachable or
 rejecting webhook is logged by host (never by URL, which is itself a credential) and
 never interrupts a poll.
 
@@ -450,13 +453,26 @@ Each poll writes structured, count-oriented logs for feed fetch status, accepted
 rejected observations, new canonicals, merges, suppressed/queued deliveries, sent or
 reconciled messages, and failures. Upstream errors do not erase prior snapshots or
 create closure events. Logging is mandatory for production source scrapers:
-`DISCORD_LOG_CHANNEL_ID` must be configured, and every core-feed and company-source
-scrape cycle sends a status embed to that channel. Successful runs do not mention
+`DISCORD_LOG_CHANNEL_ID` must be configured. Startup creates two permanent cards and
+threads in that parent channel, in this order:
+
+- **Core feeds** receives core-feed status embeds and Jobright health/session alerts.
+- **Direct scrapers** receives company-source status embeds, including IBM and Microsoft.
+
+Threads are reused across days, restarts, and environments sharing a log channel.
+Recovery uses bot-authored starter markers without a date cutoff, including archived
+threads and interrupted setup. Unlocked archived threads reopen on the next message.
+If a thread is locked or unavailable, errors stay in the application log; the bot
+does not send the status into the parent channel or create a replacement pair.
+Existing parent-channel history stays in place.
+
+Every scrape cycle sends its status embed into the corresponding thread. Successful runs do not mention
 anyone. Errors from the first-party `company_sources` scraper group include their
 details and send `@here`. Core-feed errors—including Jobright and Simplify—are logged
-as warnings without a ping. The bot therefore needs View Channel, Send Messages,
-Embed Links, and Mention Everyone permissions in the log channel for company-source
-failure pings to notify members.
+as warnings without a ping. Explicit Jobright operator alerts retain their configured
+user mention. The bot needs View Channel, Send Messages, Embed Links, Read Message
+History, Create Public Threads, and Send Messages in Threads in the log channel.
+Mention Everyone is also needed for company-source failure pings to notify members.
 
 Existing production tables are preserved. Alembic migration
 `20260813_0004_feed_outbox` adds the authoritative observation, key, feed-state, and

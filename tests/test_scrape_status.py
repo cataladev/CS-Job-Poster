@@ -9,27 +9,26 @@ import pytest
 from job_bot.scrape_status import ScrapeStatusReporter, _next_run_in
 from job_bot.github_feeds import FEEDS
 from job_bot.scrape_diagnostics import ScrapeFailure, ScrapeSourceResult
+from test_feed_publisher_mvp import FakeChannel, FakeClient as BaseFakeClient
 
 
 class FakeLogChannel:
     def __init__(self) -> None:
-        self.messages = []
+        self.parent = FakeChannel([])
 
-    async def send(self, *, content, embed, allowed_mentions):
-        self.messages.append((content, embed, allowed_mentions))
-        return SimpleNamespace(id=987)
+    @property
+    def messages(self):
+        return [
+            payload
+            for card in self.parent.messages if card.thread is not None
+            for payload in zip(card.thread.contents, card.thread.sent, card.thread.allowed_mentions)
+        ]
 
 
-class FakeClient:
+class FakeClient(BaseFakeClient):
     def __init__(self, channel_id: int, channel: FakeLogChannel) -> None:
-        self.channel_id = channel_id
-        self.channel = channel
-
-    def get_channel(self, channel_id: int):
-        return self.channel if channel_id == self.channel_id else None
-
-    async def fetch_channel(self, channel_id: int):
-        return self.get_channel(channel_id)
+        channel.parent.id = channel_id
+        super().__init__({channel_id: channel.parent})
 
 
 @pytest.mark.asyncio
@@ -55,7 +54,7 @@ async def test_successful_scrape_sends_a_quiet_status_embed(config_factory) -> N
         stats=stats,
     )
 
-    assert message_id == 987
+    assert message_id == 1000
     content, embed, allowed_mentions = channel.messages[0]
     assert content is None
     assert embed.title == "✅ [UNKNOWN] Core feeds scrape successful"

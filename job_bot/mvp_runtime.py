@@ -17,12 +17,13 @@ from job_bot.config import (
 from job_bot.database import Database
 from job_bot.feed_pipeline import FeedPipeline
 from job_bot.feed_publisher import TrackChannelPublisher
-from job_bot.github_feeds import FEEDS
+from job_bot.github_feeds import FEEDS, GitHubFeedFetcher
 from job_bot.health_commands import register_health_commands
 from job_bot.job_channel_commands import (
     JobChannelConfigurator,
     register_job_channel_commands,
 )
+from job_bot.log_threads import CoreLogNotifier, LogThreads
 from job_bot.models import AppConfig
 from job_bot.scrape_diagnostics import ScrapeFailure
 from job_bot.scrape_status import ScrapeStatusReporter
@@ -56,6 +57,7 @@ class FeedDiscordClient(discord.Client):
         pipeline: FeedPipeline,
         company_source_pipeline: CompanySourcePipeline,
         publisher: TrackChannelPublisher,
+        log_threads: LogThreads | None = None,
     ) -> None:
         intents = discord.Intents.default()
         intents.message_content = False
@@ -72,7 +74,8 @@ class FeedDiscordClient(discord.Client):
         self.pipeline = pipeline
         self.company_source_pipeline = company_source_pipeline
         self.publisher = publisher
-        self.scrape_status_reporter = ScrapeStatusReporter(config)
+        self.log_threads = log_threads or LogThreads(config)
+        self.scrape_status_reporter = ScrapeStatusReporter(config, log_threads=self.log_threads)
         self.scrape_status_reporter.bind_client(self)
         self.logger = logging.getLogger(self.__class__.__name__)
         self.tree = app_commands.CommandTree(self)
@@ -114,6 +117,7 @@ class FeedDiscordClient(discord.Client):
             ),
         )
         self._ensure_category_task()
+        self._ensure_log_thread_task()
         self._ensure_poll_task(
             name="core",
             pipeline=self.pipeline,
@@ -154,6 +158,13 @@ class FeedDiscordClient(discord.Client):
             except asyncio.CancelledError:
                 pass
         await super().close()
+
+    def _ensure_log_thread_task(self) -> None:
+        task = self._poll_tasks.get("log_threads")
+        if task is None or task.done():
+            self._poll_tasks["log_threads"] = asyncio.create_task(
+                self.log_threads.ensure_threads(), name="log-thread-setup",
+            )
 
     def _ensure_category_task(self) -> None:
         task = self._poll_tasks.get("categories")
@@ -299,6 +310,7 @@ async def run_bot() -> None:
         )
 
     publisher = TrackChannelPublisher(config, database)
+    log_threads = LogThreads(config)
     client: FeedDiscordClient
     direct_link_feeds = build_direct_ats_feeds(
         config.company_seed_path,
@@ -310,6 +322,7 @@ async def run_bot() -> None:
         publisher=publisher,
         feeds=FEEDS,
         direct_link_feeds=direct_link_feeds,
+        fetcher=GitHubFeedFetcher(jobright_notifier=CoreLogNotifier(log_threads)),
     )
     company_source_pipeline = CompanySourcePipeline(
         config=config,
@@ -327,6 +340,7 @@ async def run_bot() -> None:
         pipeline=pipeline,
         company_source_pipeline=company_source_pipeline,
         publisher=publisher,
+        log_threads=log_threads,
     )
     publisher.bind_client(client)
     try:
