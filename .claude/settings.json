@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "prompt",
+            "if": "Bash(git commit*)",
+            "prompt": "A git commit just completed. Review the committed changes and run /update-docs if any Python source files, configuration, or project structure changed. Skip if only documentation or non-code files were modified."
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -12,11 +12,16 @@ PYTHON := .venv/bin/python
 PYTEST := .venv/bin/pytest
 ALEMBIC := .venv/bin/alembic
 
-.PHONY: postgres-up postgres-down db-migrate db-import-sqlite dev-postgres test-postgres run-postgres
+.PHONY: setup postgres-up postgres-down db-migrate db-import-sqlite dev-postgres test-postgres run-postgres
+
+# Run once after cloning to enable post-commit doc hooks
+setup:
+	git config core.hooksPath .githooks
+	@echo "Git hooks enabled (.githooks/post-commit)"
 
 # The local dev database runs in Docker and defaults to host port 5432. Override
 # POSTGRES_HOST_PORT in .env when another local Postgres instance already owns it.
-postgres-up:
+postgres-up: setup
 	docker compose up -d postgres
 	$(PYTHON) scripts/wait_for_postgres.py
 

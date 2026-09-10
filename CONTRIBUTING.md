@@ -18,6 +18,10 @@ make db-migrate ALEMBIC=".venv/bin/python -m alembic"
 make run-postgres
 ```
 
+The post-commit hook that auto-updates `docs/STRUCTURE.md` is enabled automatically
+by `make setup` (which also runs as part of `make postgres-up` and `make dev-postgres`).
+To enable it manually: `git config core.hooksPath .githooks`.
+
 SQLite is supported for isolated unit tests only.
 Start Docker Desktop before the Make targets and configure the development `.env`
 before starting the bot. For an existing setup, the combined command is
