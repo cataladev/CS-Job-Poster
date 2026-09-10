@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import base64
-
 import pytest
+
+from curl_cffi import CurlError
 
 from job_bot.utils.http import (
     AsyncHttpClient,
+    CHROME_IMPERSONATION,
+    ImpersonatingHttpClient,
     describe_proxy_pool,
     load_proxy_pool,
     parse_proxy_endpoint,
@@ -77,8 +79,8 @@ def test_proxy_endpoint_keeps_credentials_out_of_the_url_and_label() -> None:
     assert "secret" not in repr(endpoint.url)
     kwargs = endpoint.request_kwargs()
     assert kwargs["proxy"] == "http://isp.example.com:8080"
-    expected = base64.b64encode(b"user:secret").decode("ascii")
-    assert kwargs["proxy_headers"] == {"Proxy-Authorization": f"Basic {expected}"}
+    # curl authenticates the proxy itself, from the pair rather than from a header.
+    assert kwargs["proxy_auth"] == ("user", "secret")
 
 
 def test_proxy_pool_applies_shared_credentials_and_skips_malformed_entries() -> None:
@@ -167,3 +169,126 @@ def test_proxy_pool_survives_an_unreadable_list_file(tmp_path, caplog) -> None:
     # A named-but-unreadable list is loud, but the runtime still starts.
     assert [endpoint.label for endpoint in pool] == ["198.51.100.20:8080"]
     assert "proxy_file_unreadable" in caplog.text
+
+
+class FakeCurlResponse:
+    def __init__(self, status_code: int, text: str = "", payload: object = None) -> None:
+        self.status_code = status_code
+        self.text = text
+        self.headers = {"Content-Type": "application/json"}
+        self._payload = payload
+
+    def json(self) -> object:
+        return self._payload
+
+
+class FakeCurlSession:
+    """Records what curl_cffi would have been asked to send."""
+
+    def __init__(self, responses: list[object]) -> None:
+        self.responses = responses
+        self.calls: list[dict] = []
+        self.closed = False
+
+    async def request(self, method, url, **kwargs):
+        self.calls.append({"method": method, "url": url, **kwargs})
+        answer = self.responses.pop(0)
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+def _impersonating(
+    responses: list[object], *, retries: int = 1
+) -> tuple[ImpersonatingHttpClient, FakeCurlSession]:
+    client = ImpersonatingHttpClient(timeout_seconds=5, retries=retries)
+    session = FakeCurlSession(responses)
+    client._session = session  # type: ignore[assignment]
+    return client, session
+
+
+@pytest.mark.asyncio
+async def test_impersonating_client_sends_the_proxy_and_the_configured_timeout() -> None:
+    client, session = _impersonating([FakeCurlResponse(200, payload={"ok": True})])
+    endpoint = parse_proxy_endpoint("http://user:secret@isp.example.com:8080")
+
+    payload, headers, status = await client.post_json(
+        "https://jobright.ai/swan/recommend/visitor-list/jobs",
+        json={"query": 1},
+        **endpoint.request_kwargs(),
+    )
+
+    assert (payload, status) == ({"ok": True}, 200)
+    assert headers["Content-Type"] == "application/json"
+    call = session.calls[0]
+    assert call["method"] == "POST"
+    assert call["json"] == {"query": 1}
+    assert call["proxy"] == "http://isp.example.com:8080"
+    assert call["proxy_auth"] == ("user", "secret")
+    assert call["timeout"] == 5
+
+
+def test_impersonating_client_opens_its_session_as_chrome() -> None:
+    # The whole point of this client: the handshake has to be Chrome's, not curl's,
+    # and a named build rather than the alias that tracks curl_cffi's newest profile.
+    assert ImpersonatingHttpClient(timeout_seconds=5, retries=0)._impersonate == CHROME_IMPERSONATION
+    assert CHROME_IMPERSONATION.startswith("chrome") and CHROME_IMPERSONATION != "chrome"
+
+
+@pytest.mark.asyncio
+async def test_impersonating_client_retries_a_transient_status_then_reports_it(
+    monkeypatch,
+) -> None:
+    client, session = _impersonating(
+        [FakeCurlResponse(503), FakeCurlResponse(200, payload={"ok": True})]
+    )
+
+    async def no_sleep(_delay):
+        return None
+
+    monkeypatch.setattr("job_bot.utils.http.asyncio.sleep", no_sleep)
+
+    payload, _, _ = await client.get_json("https://jobright.ai/feed")
+
+    assert payload == {"ok": True}
+    assert len(session.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_impersonating_client_reports_a_refused_status_the_way_callers_read_it() -> None:
+    client, _ = _impersonating([FakeCurlResponse(403, text="Access denied")])
+
+    # Jobright's failure classifier reads these strings, so their shape is load-bearing.
+    with pytest.raises(RuntimeError, match="returned 403: Access denied"):
+        await client.get_text("https://jobright.ai/feed")
+
+
+@pytest.mark.asyncio
+async def test_a_transport_failure_through_a_proxy_names_the_proxy() -> None:
+    refused = CurlError("Failed to connect to isp.example.com port 8080", code=7)
+    client, _ = _impersonating([refused], retries=0)
+
+    with pytest.raises(RuntimeError) as raised:
+        await client.get_text(
+            "https://jobright.ai/feed", proxy="http://isp.example.com:8080"
+        )
+
+    # curl phrases a dead proxy exactly as it phrases a dead host; only the request
+    # that used one can tell them apart, and the classifier needs the distinction.
+    assert "cannot connect to proxy" in str(raised.value)
+
+
+@pytest.mark.asyncio
+async def test_a_direct_transport_failure_is_not_blamed_on_a_proxy() -> None:
+    client, _ = _impersonating(
+        [CurlError("Failed to connect to jobright.ai port 443", code=7)], retries=0
+    )
+
+    with pytest.raises(RuntimeError) as raised:
+        await client.get_text("https://jobright.ai/feed")
+
+    assert "cannot connect to proxy" not in str(raised.value)
+    assert "HTTP request failed for https://jobright.ai/feed" in str(raised.value)

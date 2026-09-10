@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import logging
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence
 from urllib.parse import unquote, urlsplit, urlunsplit
 
 import aiohttp
+from curl_cffi import CurlError
+from curl_cffi.requests import AsyncSession, Response
 
 
 @dataclass(frozen=True)
@@ -34,19 +36,16 @@ class ProxyEndpoint:
         return f"{split.hostname}:{split.port}" if split.port else split.hostname
 
     def request_kwargs(self) -> Dict[str, Any]:
-        """Keyword arguments that route one aiohttp request through this proxy.
+        """Keyword arguments that route one request through this proxy.
 
-        The credentials go out as an explicit ``Proxy-Authorization`` header rather
-        than through ``proxy_auth``, which aiohttp deprecated in 3.14 and removes in
-        4.0. For an HTTPS target aiohttp carries these headers on the ``CONNECT``,
-        which is where an authenticating proxy expects them.
+        curl authenticates a proxy itself, from the pair handed to ``proxy_auth``,
+        rather than from a header the caller assembles: for an HTTPS target the
+        credentials belong on the ``CONNECT``, and only the client knows how to put
+        them there. They stay out of ``url`` so no log line or repr can carry them.
         """
         kwargs: Dict[str, Any] = {"proxy": self.url}
         if self.username is not None:
-            token = base64.b64encode(
-                f"{self.username}:{self.password or ''}".encode("utf-8")
-            ).decode("ascii")
-            kwargs["proxy_headers"] = {"Proxy-Authorization": f"Basic {token}"}
+            kwargs["proxy_auth"] = (self.username, self.password or "")
         return kwargs
 
 
@@ -189,6 +188,70 @@ def describe_proxy_pool(endpoints: Sequence[ProxyEndpoint]) -> str:
     return ",".join(endpoint.label for endpoint in endpoints) or "direct"
 
 
+# Why a request failed, in the vocabulary the Jobright alerts and logs are written
+# in. It lives here, beside the clients that raise these errors, so that every caller
+# reads one failure the same way -- the feed fetcher and the link resolver included.
+def classify_jobright_failure(error: BaseException) -> str:
+    """Name why a visitor window failed so operators can act on the right cause.
+
+    Jobright answers a throttled source address with ``403``/``errorCode 43004`` and
+    an address it has stopped serving with a connection timeout. Both previously
+    reached the logs as one undifferentiated warning, which is how a blocked
+    deployment ran for weeks on a silently truncated snapshot.
+
+    A configured proxy adds a third party that can fail. Its failures are named
+    first, because an unreachable proxy is a broken egress rather than a slow
+    Jobright, and the two call for different operator action. The HTTP client wraps
+    transport errors in ``RuntimeError``, so the chained cause carries the only
+    reliable evidence of which one it was.
+    """
+    chain = _exception_chain(error)
+    text = " ".join(str(item) for item in chain).lower()
+    if any(
+        isinstance(item, (aiohttp.ClientProxyConnectionError, aiohttp.ClientHttpProxyError))
+        for item in chain
+    ) or "cannot connect to proxy" in text or "returned 407" in text:
+        return "proxy_error"
+    if (
+        "timeout" in text
+        or "timed out" in text
+        or any(isinstance(item, TimeoutError) for item in chain)
+    ):
+        return "timeout"
+    if "returned 403" in text or "43004" in text:
+        return "blocked"
+    if "returned 429" in text:
+        return "throttled"
+    if "returned 5" in text:
+        return "upstream_error"
+    if "invalid payload" in text:
+        return "malformed"
+    return "unavailable"
+
+
+def _exception_chain(error: BaseException) -> list[BaseException]:
+    """The error plus the causes it was raised from, without cycling."""
+    chain: list[BaseException] = []
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        chain.append(current)
+        current = current.__cause__ or current.__context__
+    return chain
+
+
+def extract_http_status(error: BaseException | str) -> int | None:
+    """Recover the HTTP status from a failure, when the request got one at all.
+
+    Transport-level failures -- a timeout, a TLS handshake, a refused proxy connect --
+    never receive a response, so they have no status to report. Returning ``None``
+    for those keeps an alert honest instead of inventing a code.
+    """
+    match = re.search(r"returned (\d{3})\b", str(error))
+    return int(match.group(1)) if match else None
+
+
 class AsyncHttpClient:
     def __init__(
         self,
@@ -275,3 +338,137 @@ class AsyncHttpClient:
                 return None, dict(response.headers), response.status
             data = await response.json(content_type=None)
             return data, dict(response.headers), response.status
+
+
+# Jobright's edge screens the TLS and HTTP/2 handshake before it reads a single
+# header, so a request that only claims to be Chrome in its User-Agent is refused
+# no matter which address it leaves through. curl_cffi replays Chrome's actual
+# fingerprint.
+#
+# Pinned to a specific build rather than curl_cffi's unversioned ``chrome`` alias:
+# the alias tracks the newest profile it ships, and that profile is currently newer
+# than Jobright's edge has learned to recognize -- it answers it with a security
+# interstitial while every named build from chrome110 through chrome142 is served the
+# real page. Moving this forward is safe only against a live check.
+CHROME_IMPERSONATION = "chrome142"
+
+# curl reports a refused proxy exactly as it reports a refused host, so only the
+# knowledge that the attempt used one tells them apart: unresolved proxy name,
+# refused connection, dropped tunnel, and a proxy handshake that failed outright.
+# The failure classifier reads these strings, so a proxy failure has to name itself.
+_PROXY_TRANSPORT_CURL_CODES = frozenset({5, 7, 56, 97})
+
+
+def _proxy_aware_error(error: BaseException, *, via_proxy: bool) -> BaseException:
+    """Name a transport failure that belongs to the proxy rather than the host."""
+    if via_proxy and getattr(error, "code", None) in _PROXY_TRANSPORT_CURL_CODES:
+        return RuntimeError(f"cannot connect to proxy: {error}")
+    return error
+
+
+class ImpersonatingHttpClient:
+    """An HTTP client that presents itself as Chrome, down to the TLS handshake.
+
+    The surface matches :class:`AsyncHttpClient` -- the same ``get_text``,
+    ``get_json``, ``post_json``, the same retry policy, and the same error strings --
+    so a caller moved onto it reads its failures exactly as before. What differs is
+    the wire: aiohttp's handshake is recognizably not a browser's, which is what a
+    fingerprinting edge refuses before any header or address is considered.
+
+    A proxy is passed per request rather than held on the session, because the pool
+    rotates addresses between calls while the session lives for the whole process.
+    """
+
+    def __init__(
+        self,
+        timeout_seconds: int,
+        retries: int,
+        impersonate: str = CHROME_IMPERSONATION,
+    ) -> None:
+        self._timeout_seconds = timeout_seconds
+        self._retries = retries
+        self._impersonate = impersonate
+        self._session: Optional[AsyncSession] = None
+        self._session_lock = asyncio.Lock()
+
+    async def __aenter__(self) -> "ImpersonatingHttpClient":
+        await self._ensure_session()
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        await self.aclose()
+
+    async def _ensure_session(self) -> AsyncSession:
+        """Open the shared session on first use.
+
+        Callers that own this client for the life of the process never enter it as a
+        context manager, so the session cannot be built in ``__aenter__`` alone.
+        """
+        async with self._session_lock:
+            if self._session is None:
+                self._session = AsyncSession(
+                    impersonate=self._impersonate,
+                    # Proxies come from the configured pool and nowhere else. curl
+                    # would otherwise pick up ambient ``HTTPS_PROXY``, which aiohttp
+                    # never did, and route this traffic somewhere unannounced.
+                    trust_env=False,
+                )
+            return self._session
+
+    async def aclose(self) -> None:
+        session, self._session = self._session, None
+        if session is not None:
+            await session.close()
+
+    async def request(
+        self,
+        method: str,
+        url: str,
+        *,
+        expected_status: tuple[int, ...] = (200,),
+        **kwargs: Any,
+    ) -> Response:
+        session = await self._ensure_session()
+        via_proxy = bool(kwargs.get("proxy") or kwargs.get("proxies"))
+        attempt = 0
+        last_error: Optional[BaseException] = None
+        while attempt <= self._retries:
+            try:
+                response = await session.request(
+                    method, url, timeout=self._timeout_seconds, **kwargs
+                )
+                if response.status_code in expected_status:
+                    return response
+                if response.status_code in {429, 500, 502, 503, 504}:
+                    last_error = RuntimeError(f"{method} {url} returned {response.status_code}")
+                    if attempt >= self._retries:
+                        break
+                    await asyncio.sleep(min(2 ** attempt, 8))
+                    attempt += 1
+                    continue
+                raise RuntimeError(
+                    f"{method} {url} returned {response.status_code}: {response.text[:200]}"
+                )
+            except (CurlError, asyncio.TimeoutError) as exc:
+                last_error = _proxy_aware_error(exc, via_proxy=via_proxy)
+                if attempt >= self._retries:
+                    break
+                await asyncio.sleep(min(2 ** attempt, 8))
+                attempt += 1
+        # Chained, so callers can still see the original curl error -- a refused
+        # proxy and an unreachable host read identically as text otherwise.
+        raise RuntimeError(f"HTTP request failed for {url}: {last_error}") from last_error
+
+    async def get_text(self, url: str, **kwargs: Any) -> tuple[str, Dict[str, str], int]:
+        response = await self.request("GET", url, expected_status=(200, 304), **kwargs)
+        return response.text, dict(response.headers), response.status_code
+
+    async def get_json(self, url: str, **kwargs: Any) -> tuple[Any, Dict[str, str], int]:
+        response = await self.request("GET", url, expected_status=(200, 304), **kwargs)
+        return response.json(), dict(response.headers), response.status_code
+
+    async def post_json(self, url: str, **kwargs: Any) -> tuple[Any, Dict[str, str], int]:
+        response = await self.request("POST", url, expected_status=(200, 201, 304), **kwargs)
+        if response.status_code == 304:
+            return None, dict(response.headers), response.status_code
+        return response.json(), dict(response.headers), response.status_code

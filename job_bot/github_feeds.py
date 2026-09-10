@@ -12,7 +12,6 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import urlsplit
 
-import aiohttp
 import markdown
 from bs4 import BeautifulSoup, Tag
 
@@ -31,8 +30,11 @@ from job_bot.utils.feed_normalization import (
 )
 from job_bot.utils.http import (
     AsyncHttpClient,
+    ImpersonatingHttpClient,
     ProxyEndpoint,
+    classify_jobright_failure,
     describe_proxy_pool,
+    extract_http_status,
     load_proxy_pool,
 )
 from job_bot.utils.notify import Notifier, load_notifier
@@ -834,67 +836,6 @@ def build_jobright_public_query() -> dict[str, object]:
     }
 
 
-def classify_jobright_failure(error: BaseException) -> str:
-    """Name why a visitor window failed so operators can act on the right cause.
-
-    Jobright answers a throttled source address with ``403``/``errorCode 43004`` and
-    an address it has stopped serving with a connection timeout. Both previously
-    reached the logs as one undifferentiated warning, which is how a blocked
-    deployment ran for weeks on a silently truncated snapshot.
-
-    A configured proxy adds a third party that can fail. Its failures are named
-    first, because an unreachable proxy is a broken egress rather than a slow
-    Jobright, and the two call for different operator action. The HTTP client wraps
-    transport errors in ``RuntimeError``, so the chained cause carries the only
-    reliable evidence of which one it was.
-    """
-    chain = _exception_chain(error)
-    text = " ".join(str(item) for item in chain).lower()
-    if any(
-        isinstance(item, (aiohttp.ClientProxyConnectionError, aiohttp.ClientHttpProxyError))
-        for item in chain
-    ) or "cannot connect to proxy" in text or "returned 407" in text:
-        return "proxy_error"
-    if (
-        "timeout" in text
-        or "timed out" in text
-        or any(isinstance(item, TimeoutError) for item in chain)
-    ):
-        return "timeout"
-    if "returned 403" in text or "43004" in text:
-        return "blocked"
-    if "returned 429" in text:
-        return "throttled"
-    if "returned 5" in text:
-        return "upstream_error"
-    if "invalid payload" in text:
-        return "malformed"
-    return "unavailable"
-
-
-def _exception_chain(error: BaseException) -> list[BaseException]:
-    """The error plus the causes it was raised from, without cycling."""
-    chain: list[BaseException] = []
-    seen: set[int] = set()
-    current: BaseException | None = error
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        chain.append(current)
-        current = current.__cause__ or current.__context__
-    return chain
-
-
-def extract_http_status(error: BaseException | str) -> int | None:
-    """Recover the HTTP status from a failure, when the request got one at all.
-
-    Transport-level failures -- a timeout, a TLS handshake, a refused proxy connect --
-    never receive a response, so they have no status to report. Returning ``None``
-    for those keeps an alert honest instead of inventing a code.
-    """
-    match = re.search(r"returned (\d{3})\b", str(error))
-    return int(match.group(1)) if match else None
-
-
 def jobright_backoff_seconds(consecutive_failures: int) -> int:
     """Escalate the feed interval while Jobright keeps refusing this source address."""
     if consecutive_failures <= 0:
@@ -1055,6 +996,7 @@ class GitHubFeedFetcher:
         jobright_proxies: Sequence[ProxyEndpoint] | None = None,
         jobright_notifier: Notifier | None = None,
         jobright_link_resolver: JobrightLinkResolver | None = None,
+        jobright_http_client: ImpersonatingHttpClient | None = None,
     ) -> None:
         # Both Jobright tracks read the same taxonomy window within one collection
         # pass. The lock keeps the concurrent pair to a single upstream request.
@@ -1088,6 +1030,15 @@ class GitHubFeedFetcher:
                 len(self._jobright_proxies),
                 describe_proxy_pool(self._jobright_proxies),
             )
+        # Jobright is the one source that fingerprints the client, so its requests
+        # leave through a Chrome-impersonating connection instead of the shared
+        # aiohttp client every other feed uses. It is owned here rather than passed
+        # in because only the Jobright paths may use it. The transport settings are
+        # the runtime's own, read the way ``load_config`` reads them.
+        self._jobright_http = jobright_http_client or ImpersonatingHttpClient(
+            timeout_seconds=int(os.getenv("REQUEST_TIMEOUT_SECONDS", "20")),
+            retries=int(os.getenv("REQUEST_RETRIES", "2")),
+        )
         notifier = jobright_notifier or load_notifier(
             JOBRIGHT_STATUS_WEBHOOK_ENV, logger_name="jobright_status"
         )
@@ -1174,7 +1125,7 @@ class GitHubFeedFetcher:
         if definition.provider == "jobright":
             # Deliberately unconditional: the listing page's cache validators can be
             # unchanged while the dynamic window behind it has moved on entirely.
-            return await self._fetch_jobright_public_windows(definition, http_client)
+            return await self._fetch_jobright_public_windows(definition)
         headers: dict[str, str] = {}
         if etag:
             headers["If-None-Match"] = etag
@@ -1207,7 +1158,6 @@ class GitHubFeedFetcher:
     async def _fetch_jobright_public_windows(
         self,
         definition: FeedDefinition,
-        http_client: AsyncHttpClient,
     ) -> FeedFetchResult:
         """Collect Jobright's anonymous computer-science intern and new-grad window.
 
@@ -1238,17 +1188,16 @@ class GitHubFeedFetcher:
             )
 
         try:
-            cards = await self._jobright_taxonomy_window(http_client)
+            cards = await self._jobright_taxonomy_window()
         except (RuntimeError, TimeoutError) as exc:
             return await self._fetch_jobright_listing_snapshot(
                 definition,
-                http_client,
                 degraded_reason=classify_jobright_failure(exc),
                 error=exc,
             )
 
         observations, rejected = parse_jobright_public_cards(cards, definition)
-        observations = await self._jobright_links.resolve(http_client, observations)
+        observations = await self._jobright_links.resolve(self._jobright_http, observations)
         payload = json.dumps({"jobList": cards}, sort_keys=True, default=str)
         return FeedFetchResult(
             definition=definition,
@@ -1259,10 +1208,7 @@ class GitHubFeedFetcher:
             content_sha=hashlib.sha256(payload.encode("utf-8")).hexdigest(),
         )
 
-    async def _jobright_taxonomy_window(
-        self,
-        http_client: AsyncHttpClient,
-    ) -> list[object]:
+    async def _jobright_taxonomy_window(self) -> list[object]:
         """Request the shared taxonomy window, reusing it across both tracks.
 
         When an ISP-proxy pool is configured, a refusal that belongs to the address
@@ -1286,9 +1232,7 @@ class GitHubFeedFetcher:
             for attempt in range(attempts):
                 egress = self.jobright_egress_label()
                 try:
-                    collected, status = await self._jobright_window_request(
-                        http_client, query
-                    )
+                    collected, status = await self._jobright_window_request(query)
                 except (RuntimeError, TimeoutError) as exc:
                     last_error = exc
                     reason = classify_jobright_failure(exc)
@@ -1334,7 +1278,6 @@ class GitHubFeedFetcher:
 
     async def _jobright_window_request(
         self,
-        http_client: AsyncHttpClient,
         query: Mapping[str, object],
     ) -> tuple[list[object], int | None]:
         """Call the visitor endpoint once, through the current egress address."""
@@ -1347,7 +1290,7 @@ class GitHubFeedFetcher:
                 f"?sortCondition={sort_condition}&count={JOBRIGHT_PUBLIC_WINDOW_SIZE}"
                 "&position=0&useLegacySearch=true"
             )
-            response, _, last_status = await http_client.post_json(
+            response, _, last_status = await self._jobright_http.post_json(
                 url, json=query, **request_kwargs
             )
             result = response.get("result") if isinstance(response, Mapping) else None
@@ -1362,7 +1305,6 @@ class GitHubFeedFetcher:
     async def _fetch_jobright_listing_snapshot(
         self,
         definition: FeedDefinition,
-        http_client: AsyncHttpClient,
         *,
         degraded_reason: str,
         error: BaseException,
@@ -1398,7 +1340,7 @@ class GitHubFeedFetcher:
 
         # The snapshot leaves through the same address as the window it replaces: a
         # deployment Jobright refuses outright cannot reach the listing page either.
-        text, response_headers, _ = await http_client.get_text(
+        text, response_headers, _ = await self._jobright_http.get_text(
             definition.raw_url,
             headers={},
             **self._jobright_request_kwargs(),

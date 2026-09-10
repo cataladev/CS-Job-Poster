@@ -2,6 +2,7 @@ aiohttp>=3.9.5
 alembic>=1.16.0
 APScheduler>=3.10.4,<4.0
 beautifulsoup4>=4.12.3
+curl_cffi>=0.7.0
 discord.py>=2.4.0
 Markdown>=3.6
 playwright>=1.44.0

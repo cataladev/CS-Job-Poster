@@ -25,15 +25,19 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from dataclasses import replace
+import time
+from collections import Counter
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
+from urllib.parse import urlsplit
 
 from job_bot.utils.feed_normalization import sanitize_application_url
+from job_bot.utils.http import classify_jobright_failure, extract_http_status
 from job_bot.utils.notify import Notifier
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle only matters for type checkers
     from job_bot.github_feeds import JobObservation
-    from job_bot.utils.http import AsyncHttpClient
+    from job_bot.utils.http import ImpersonatingHttpClient
 
 JOBRIGHT_SESSION_ENV = "JOBRIGHT_SESSION_ID"
 JOBRIGHT_ALERT_USER_ENV = "JOBRIGHT_ALERT_USER_ID"
@@ -61,6 +65,77 @@ LINK_CACHE_LIMIT = 20_000
 # request, so a run of them is the signal worth acting on. Any signed-in answer clears
 # the count.
 FAILURE_STREAK_LIMIT = 8
+
+# A host Jobright refuses cannot load the deploy id either, and every job in the pass
+# would otherwise re-request the same 640 KB page. One failure parks it briefly so a
+# blocked deployment asks once, not thirty times a minute.
+BUILD_ID_RETRY_COOLDOWN_SECONDS = 120
+
+# Truncated so one upstream error cannot crowd out the rest of an alert.
+FAILURE_DETAIL_LIMIT = 200
+
+# What each cause means and what it asks of whoever reads the alert. Only a rejected
+# cookie is fixed by replacing the cookie: naming that as the remedy for a blocked
+# address or a challenged fingerprint sends someone after the wrong thing, which is
+# what this used to do for every failure alike.
+FAILURE_GUIDANCE: dict[str, tuple[str, str]] = {
+    "session_rejected": (
+        "Jobright answered a signed-out page to the configured cookie",
+        "Paste a fresh JOBRIGHT_SESSION_ID and restart.",
+    ),
+    "interstitial": (
+        "Jobright served a security check instead of its own page",
+        "The address or the client fingerprint is being challenged, not the cookie. "
+        "Check the Jobright egress and CHROME_IMPERSONATION.",
+    ),
+    "blocked": (
+        "Jobright refused the job detail route",
+        "Address-scoped: give the Jobright proxy pool an address it still serves.",
+    ),
+    "throttled": (
+        "Jobright is rate-limiting the job detail route",
+        "Address-scoped, and usually temporary. The links come back on their own once "
+        "it lifts; a restart is what re-enables resolution.",
+    ),
+    "proxy_error": (
+        "the Jobright proxy refused or dropped the request",
+        "The egress is broken, not the session. Check the proxy list and its credentials.",
+    ),
+    "timeout": (
+        "Jobright did not answer the job detail route in time",
+        "The session is fine. Check whether this host can reach jobright.ai at all.",
+    ),
+    "upstream_error": (
+        "Jobright answered the job detail route with a server error",
+        "Nothing to fix here; it recovers when Jobright does.",
+    ),
+    "unreadable_payload": (
+        "Jobright answered the job detail route with a payload that carried no session state",
+        "The route's shape may have changed. Check jobright_link_unresolved in the log.",
+    ),
+}
+
+# Said after any cause that is not the cookie, so nobody replaces a working session.
+DEFAULT_REMEDY = (
+    "The session itself is not the problem — check the log before replacing "
+    "JOBRIGHT_SESSION_ID."
+)
+
+
+@dataclass(frozen=True)
+class _Attempt:
+    """What one resolution attempt produced, and what it proved about the failure.
+
+    ``reason`` is empty exactly when the attempt worked. It is written in the same
+    vocabulary the window's own health alerts use, so one Jobright outage reads the
+    same way whether it hit the window or the links.
+    """
+
+    url: str = ""
+    verdict: str = "unknown"  # authenticated | anonymous | unknown
+    reason: str = ""
+    detail: str = ""
+    status: int | None = None
 
 
 def _detail_url(build_id: str, job_id: str) -> str:
@@ -119,6 +194,14 @@ class JobrightLinkResolver:
         # role Jobright has no employer URL for from being retried every poll.
         self._links: dict[str, str] = {}
         self._failure_streak = 0
+        # Why the failures happened, so the alert can name the real cause instead of
+        # blaming the cookie for a host that cannot reach Jobright at all.
+        self._failure_reasons: Counter[str] = Counter()
+        self._last_failure: _Attempt | None = None
+        # The deploy id is loaded once for the whole pass, so when it is what failed,
+        # every job in that pass failed for the reason recorded here.
+        self._build_id_failure: _Attempt | None = None
+        self._build_id_retry_after = 0.0
         # Set once a session is judged dead. Resolution stops entirely rather than
         # retrying every uncached job on every poll, which would turn a dead cookie
         # into thousands of pointless authenticated requests a day.
@@ -139,7 +222,16 @@ class JobrightLinkResolver:
     def _headers(self) -> dict[str, str]:
         return {"Cookie": f"SESSION_ID={self._session_id}"}
 
-    async def _ensure_build_id(self, http_client: "AsyncHttpClient") -> str | None:
+    def _egress_label(self) -> str:
+        """Name the address these requests leave through, for the alert.
+
+        Credentials never reach here: the proxy URL carries none, and curl is handed
+        the pair separately.
+        """
+        proxy = str(self._request_kwargs().get("proxy") or "")
+        return urlsplit(proxy).netloc or "direct"
+
+    async def _ensure_build_id(self, http_client: "ImpersonatingHttpClient") -> str | None:
         """Read Next.js' deploy id, which the data route is keyed by.
 
         It is shared by every page and changes only when Jobright deploys, so it is
@@ -148,30 +240,65 @@ class JobrightLinkResolver:
         async with self._build_id_lock:
             if self._build_id:
                 return self._build_id
+            if time.monotonic() < self._build_id_retry_after:
+                return None
             try:
-                text, _, _ = await http_client.get_text(
+                text, _, status = await http_client.get_text(
                     BUILD_ID_SOURCE_URL,
                     headers={},
                     **self._request_kwargs(),
                 )
             except (RuntimeError, TimeoutError) as exc:
-                self._logger.warning("jobright_build_id_unavailable error=%s", exc)
+                self._build_id_retry_after = (
+                    time.monotonic() + BUILD_ID_RETRY_COOLDOWN_SECONDS
+                )
+                reason = classify_jobright_failure(exc)
+                self._build_id_failure = _Attempt(
+                    reason=reason,
+                    detail=str(exc)[:FAILURE_DETAIL_LIMIT],
+                    status=extract_http_status(exc),
+                )
+                self._logger.warning(
+                    "jobright_build_id_unavailable reason=%s error=%s", reason, exc
+                )
                 return None
             match = BUILD_ID_PATTERN.search(text)
             if not match:
-                self._logger.warning("jobright_build_id_missing")
+                self._build_id_retry_after = (
+                    time.monotonic() + BUILD_ID_RETRY_COOLDOWN_SECONDS
+                )
+                # A page with no deploy id is not Jobright's page: an interstitial or
+                # a block page renders fine and parses to nothing.
+                self._build_id_failure = _Attempt(
+                    reason="interstitial",
+                    detail=(
+                        f"the deploy id page answered {len(text)} bytes carrying no "
+                        "buildId, so it was not Jobright's own page"
+                    ),
+                    # A challenge page is served with a perfectly ordinary status; the
+                    # size and the missing buildId are what give it away.
+                    status=status,
+                )
+                self._logger.warning(
+                    "jobright_build_id_missing bytes=%s -- not a Jobright page", len(text)
+                )
                 return None
             self._build_id = match.group(1)
+            self._build_id_failure = None
             self._logger.info("jobright_build_id_loaded build_id=%s", self._build_id)
             return self._build_id
 
     async def _resolve_one(
-        self, http_client: "AsyncHttpClient", job_id: str
-    ) -> tuple[str, str]:
-        """Return the employer URL and what the attempt proved about the session."""
+        self, http_client: "ImpersonatingHttpClient", job_id: str
+    ) -> _Attempt:
+        """Resolve one job, reporting why it failed when it does."""
         build_id = await self._ensure_build_id(http_client)
         if not build_id:
-            return "", "unknown"
+            # The deploy id is what failed, and it recorded its own cause.
+            return self._build_id_failure or _Attempt(
+                reason="interstitial",
+                detail="the deploy id could not be read from Jobright's listing page",
+            )
         try:
             payload, _, _ = await http_client.get_json(
                 _detail_url(build_id, job_id),
@@ -184,33 +311,86 @@ class JobrightLinkResolver:
             if "returned 404" in str(exc):
                 self._build_id = None
                 self._logger.info("jobright_build_id_stale reloading_on_next_resolve")
-            else:
-                self._logger.warning(
-                    "jobright_link_unresolved job_id=%s error=%s", job_id, exc
+                return _Attempt(
+                    reason="stale_build_id",
+                    detail="the deploy id 404s; it reloads on the next resolution",
+                    status=404,
                 )
-            return "", "unknown"
+            reason = classify_jobright_failure(exc)
+            self._logger.warning(
+                "jobright_link_unresolved job_id=%s reason=%s error=%s", job_id, reason, exc
+            )
+            return _Attempt(
+                reason=reason,
+                detail=str(exc)[:FAILURE_DETAIL_LIMIT],
+                status=extract_http_status(exc),
+            )
 
-        return _extract_original_url(payload)
-
-    async def _record_verdict(self, verdict: str) -> None:
-        """Track consecutive failures, and suspend once the session looks dead."""
+        url, verdict = _extract_original_url(payload)
         if verdict == "authenticated":
+            return _Attempt(url=url, verdict="authenticated")
+        if verdict == "anonymous":
+            return _Attempt(
+                verdict="anonymous",
+                reason="session_rejected",
+                detail=f"the detail route reported logined=false for job {job_id}",
+                status=200,
+            )
+        return _Attempt(
+            reason="unreadable_payload",
+            detail=f"the detail route answered job {job_id} with no session state",
+            status=200,
+        )
+
+    async def _record_attempt(self, attempt: _Attempt) -> None:
+        """Track consecutive failures, and suspend once resolution stops working.
+
+        Every way this fails needs a different answer, so the alert names the one that
+        actually happened and quotes the error behind it. A rejected cookie is fixed
+        by pasting a new one; a challenged fingerprint, a refused address, or a proxy
+        that will not connect are not cookie problems at all, and telling someone to
+        replace a working session sends them after the wrong thing.
+        """
+        if attempt.verdict == "authenticated":
             self._failure_streak = 0
+            self._failure_reasons.clear()
+            self._last_failure = None
             return
         self._failure_streak += 1
+        self._failure_reasons[attempt.reason or "unavailable"] += 1
+        self._last_failure = attempt
         if self._failure_streak < FAILURE_STREAK_LIMIT or self._suspended:
             return
         self._suspended = True
-        self._logger.error(
-            "jobright_session_unusable consecutive_failures=%s employer_links_disabled",
-            self._failure_streak,
+
+        reason, _ = self._failure_reasons.most_common(1)[0]
+        breakdown = ", ".join(
+            f"{name}={count}" for name, count in sorted(self._failure_reasons.items())
         )
-        if self._notifier is not None:
-            mention = f" {self._alert_mention}" if self._alert_mention else ""
-            await self._notifier.send(
-                "🔴 Jobright session expired — job links have fallen back to Jobright "
-                f"links. Set a fresh JOBRIGHT_SESSION_ID and restart to restore them.{mention}"
-            )
+        headline, remedy = FAILURE_GUIDANCE.get(
+            reason, (f"employer links are failing ({reason})", DEFAULT_REMEDY)
+        )
+        egress = self._egress_label()
+        status = f"HTTP {attempt.status}" if attempt.status is not None else "no response"
+        self._logger.error(
+            "jobright_links_suspended reason=%s status=%s egress=%s "
+            "consecutive_failures=%s breakdown=%s detail=%s",
+            reason,
+            attempt.status if attempt.status is not None else "none",
+            egress,
+            self._failure_streak,
+            breakdown,
+            attempt.detail,
+        )
+        if self._notifier is None:
+            return
+        mention = f" {self._alert_mention}" if self._alert_mention else ""
+        await self._notifier.send(
+            f"🔴 Jobright employer links disabled — {headline} "
+            f"({status}, egress {egress}) after {self._failure_streak} attempts. "
+            f"Links have fallen back to Jobright links.\n"
+            f"Reasons: {breakdown}\nLast failure: {attempt.detail}\n{remedy}{mention}"
+        )
 
     def _remember(self, job_id: str, url: str) -> None:
         if len(self._links) >= LINK_CACHE_LIMIT:
@@ -222,7 +402,7 @@ class JobrightLinkResolver:
 
     async def resolve(
         self,
-        http_client: "AsyncHttpClient",
+        http_client: "ImpersonatingHttpClient",
         observations: Sequence["JobObservation"],
     ) -> list["JobObservation"]:
         """Point observations at the employer, keeping Jobright as the fallback.
@@ -245,14 +425,14 @@ class JobrightLinkResolver:
         if pending:
             async def worker(job_id: str) -> None:
                 async with self._semaphore:
-                    url, verdict = await self._resolve_one(http_client, job_id)
-                await self._record_verdict(verdict)
-                if verdict == "authenticated":
+                    attempt = await self._resolve_one(http_client, job_id)
+                await self._record_attempt(attempt)
+                if attempt.verdict == "authenticated":
                     # Only a signed-in answer is worth remembering, including an empty
                     # one: it means Jobright genuinely has no employer URL for this
                     # role. A transient failure stays uncached so the next poll can
                     # try again instead of freezing the Jobright link in place.
-                    self._remember(job_id, url)
+                    self._remember(job_id, attempt.url)
 
             await asyncio.gather(*(worker(job_id) for job_id in pending))
 

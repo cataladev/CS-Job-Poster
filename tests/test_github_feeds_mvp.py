@@ -385,9 +385,9 @@ async def test_jobright_fetcher_requests_the_computer_science_taxonomy_window() 
             return {"success": True, "result": {"jobList": cards}}, {}, 200
 
     client = FakeHttpClient()
-    result = await GitHubFeedFetcher().fetch(
+    result = await GitHubFeedFetcher(jobright_http_client=client).fetch(  # type: ignore[arg-type]
         definition,
-        client,  # type: ignore[arg-type]
+        _UnusedHttpClient(),  # type: ignore[arg-type]
         etag='"old-page"',
         last_modified="Wed, 12 Aug 2026 12:00:00 GMT",
     )
@@ -430,10 +430,10 @@ async def test_jobright_fetcher_shares_one_window_across_both_tracks() -> None:
             return {"success": True, "result": {"jobList": cards}}, {}, 200
 
     client = CountingHttpClient()
-    fetcher = GitHubFeedFetcher()
+    fetcher = GitHubFeedFetcher(jobright_http_client=client)  # type: ignore[arg-type]
     internships, new_grads = await asyncio.gather(
-        fetcher.fetch(_jobright_definition("internship"), client),  # type: ignore[arg-type]
-        fetcher.fetch(_jobright_definition("new_grad"), client),  # type: ignore[arg-type]
+        fetcher.fetch(_jobright_definition("internship"), _UnusedHttpClient()),  # type: ignore[arg-type]
+        fetcher.fetch(_jobright_definition("new_grad"), _UnusedHttpClient()),  # type: ignore[arg-type]
     )
 
     assert client.post_count == 1
@@ -454,10 +454,10 @@ async def test_jobright_fetcher_marks_the_listing_fallback_as_degraded() -> None
                 "POST https://jobright.ai/swan/recommend/visitor-list/jobs returned 403"
             )
 
-    fetcher = GitHubFeedFetcher()
+    fetcher = GitHubFeedFetcher(jobright_http_client=BlockedWindowHttpClient())  # type: ignore[arg-type]
     result = await fetcher.fetch(
         definition,
-        BlockedWindowHttpClient(),  # type: ignore[arg-type]
+        _UnusedHttpClient(),  # type: ignore[arg-type]
     )
 
     assert [job.external_id for job in result.observations] == ["intern-1"]
@@ -481,23 +481,34 @@ async def test_jobright_fetcher_stops_contacting_a_refusing_source() -> None:
             self.post_attempts += 1
             raise TimeoutError("connection timed out")
 
-    fetcher = GitHubFeedFetcher()
+    client = BlockedWindowHttpClient()
+    fetcher = GitHubFeedFetcher(jobright_http_client=client)  # type: ignore[arg-type]
     assert fetcher.jobright_seconds_until_retry() == 0
 
-    client = BlockedWindowHttpClient()
-    first = await fetcher.fetch(definition, client)  # type: ignore[arg-type]
+    first = await fetcher.fetch(definition, _UnusedHttpClient())  # type: ignore[arg-type]
 
     assert first.degraded_reason == "timeout"
     assert client.post_attempts == 1
     assert fetcher.jobright_seconds_until_retry() > 0
 
     # The next poll must not add traffic to a door Jobright has already closed.
-    second = await fetcher.fetch(definition, client)  # type: ignore[arg-type]
+    second = await fetcher.fetch(definition, _UnusedHttpClient())  # type: ignore[arg-type]
 
     assert second.skipped is True
     assert second.degraded_reason == "backoff"
     assert second.observations == []
     assert client.post_attempts == 1
+
+
+class _UnusedHttpClient:
+    """Stands in for the pipeline's shared aiohttp client on a Jobright poll.
+
+    Jobright's requests leave through the fetcher's own Chrome-impersonating client,
+    so touching this one at all is the bug worth failing on.
+    """
+
+    def __getattr__(self, name: str):
+        raise AssertionError(f"Jobright must not use the shared HTTP client ({name})")
 
 
 class _RecordingJobrightClient:
@@ -547,16 +558,17 @@ async def test_jobright_announces_boot_rotation_degradation_and_recovery() -> No
     fetcher = GitHubFeedFetcher(
         jobright_proxies=[_proxy("isp-a.example.com"), _proxy("isp-b.example.com")],
         jobright_notifier=notifier,  # type: ignore[arg-type]
+        jobright_http_client=client,  # type: ignore[arg-type]
     )
 
-    await fetcher.fetch(definition, client)  # type: ignore[arg-type]
+    await fetcher.fetch(definition, _UnusedHttpClient())  # type: ignore[arg-type]
     assert "Jobright online" in notifier.messages[0]
     assert "isp-a.example.com:8080" in notifier.messages[0]
 
     # Both addresses start refusing: one rotation, then the degraded announcement.
     client.blocked_proxies = ("isp-a.example.com", "isp-b.example.com")
     fetcher._jobright_window_cards = None
-    await fetcher.fetch(definition, client)  # type: ignore[arg-type]
+    await fetcher.fetch(definition, _UnusedHttpClient())  # type: ignore[arg-type]
 
     assert "rotated egress" in notifier.messages[1]
     assert "blocked (HTTP 403) on isp-a.example.com:8080" in notifier.messages[1]
@@ -572,7 +584,7 @@ async def test_jobright_announces_boot_rotation_degradation_and_recovery() -> No
     client.blocked_proxies = ()
     fetcher._jobright_retry_after = 0.0
     fetcher._jobright_window_cards = None
-    await fetcher.fetch(definition, client)  # type: ignore[arg-type]
+    await fetcher.fetch(definition, _UnusedHttpClient())  # type: ignore[arg-type]
 
     assert "Jobright recovered" in notifier.messages[-1]
     assert "1 failed attempt" in notifier.messages[-1]
@@ -591,26 +603,29 @@ async def test_jobright_reads_its_proxy_pool_from_the_configured_list_file(
     monkeypatch.setenv("JOBRIGHT_PROXY_FILE", str(listing))
     client = _RecordingJobrightClient()
 
-    fetcher = GitHubFeedFetcher()
-    result = await fetcher.fetch(_jobright_definition(), client)  # type: ignore[arg-type]
+    fetcher = GitHubFeedFetcher(jobright_http_client=client)  # type: ignore[arg-type]
+    result = await fetcher.fetch(_jobright_definition(), _UnusedHttpClient())  # type: ignore[arg-type]
 
     assert result.degraded_reason is None
     assert fetcher.jobright_egress_label() == "198.51.100.10:8080"
     assert client.window_calls[0]["proxy"] == "http://198.51.100.10:8080"
-    assert "Proxy-Authorization" in client.window_calls[0]["proxy_headers"]
+    assert client.window_calls[0]["proxy_auth"] == ("isp-user", "isp-pass")
 
 
 @pytest.mark.asyncio
 async def test_jobright_window_leaves_through_the_configured_isp_proxy() -> None:
     client = _RecordingJobrightClient()
-    fetcher = GitHubFeedFetcher(jobright_proxies=[_proxy("isp-a.example.com", credentials=True)])
+    fetcher = GitHubFeedFetcher(
+        jobright_proxies=[_proxy("isp-a.example.com", credentials=True)],
+        jobright_http_client=client,  # type: ignore[arg-type]
+    )
 
-    result = await fetcher.fetch(_jobright_definition(), client)  # type: ignore[arg-type]
+    result = await fetcher.fetch(_jobright_definition(), _UnusedHttpClient())  # type: ignore[arg-type]
 
     assert result.degraded_reason is None
     assert [job.external_id for job in result.observations] == ["intern-1"]
     assert client.window_calls[0]["proxy"] == "http://isp-a.example.com:8080"
-    assert "Proxy-Authorization" in client.window_calls[0]["proxy_headers"]
+    assert client.window_calls[0]["proxy_auth"] == ("isp-user", "isp-secret")
     assert fetcher.jobright_egress_label() == "isp-a.example.com:8080"
 
 
@@ -618,9 +633,9 @@ async def test_jobright_window_leaves_through_the_configured_isp_proxy() -> None
 async def test_jobright_requests_stay_direct_when_no_proxy_is_configured() -> None:
     client = _RecordingJobrightClient()
 
-    result = await GitHubFeedFetcher().fetch(
+    result = await GitHubFeedFetcher(jobright_http_client=client).fetch(  # type: ignore[arg-type]
         _jobright_definition(),
-        client,  # type: ignore[arg-type]
+        _UnusedHttpClient(),  # type: ignore[arg-type]
     )
 
     assert result.degraded_reason is None
@@ -632,10 +647,11 @@ async def test_jobright_requests_stay_direct_when_no_proxy_is_configured() -> No
 async def test_jobright_rotates_to_the_next_address_when_one_is_blocked() -> None:
     client = _RecordingJobrightClient(blocked_proxies=("isp-a.example.com",))
     fetcher = GitHubFeedFetcher(
-        jobright_proxies=[_proxy("isp-a.example.com"), _proxy("isp-b.example.com")]
+        jobright_proxies=[_proxy("isp-a.example.com"), _proxy("isp-b.example.com")],
+        jobright_http_client=client,  # type: ignore[arg-type]
     )
 
-    result = await fetcher.fetch(_jobright_definition(), client)  # type: ignore[arg-type]
+    result = await fetcher.fetch(_jobright_definition(), _UnusedHttpClient())  # type: ignore[arg-type]
 
     # A blocked address costs one retry, not the poll: the window still arrives whole.
     assert result.degraded_reason is None
@@ -656,10 +672,11 @@ async def test_jobright_backs_off_once_every_address_is_refused() -> None:
         blocked_proxies=("isp-a.example.com", "isp-b.example.com")
     )
     fetcher = GitHubFeedFetcher(
-        jobright_proxies=[_proxy("isp-a.example.com"), _proxy("isp-b.example.com")]
+        jobright_proxies=[_proxy("isp-a.example.com"), _proxy("isp-b.example.com")],
+        jobright_http_client=client,  # type: ignore[arg-type]
     )
 
-    result = await fetcher.fetch(_jobright_definition(), client)  # type: ignore[arg-type]
+    result = await fetcher.fetch(_jobright_definition(), _UnusedHttpClient())  # type: ignore[arg-type]
 
     assert len(client.window_calls) == 2
     assert result.degraded_reason == "blocked"
@@ -673,9 +690,12 @@ async def test_jobright_backs_off_once_every_address_is_refused() -> None:
 async def test_jobright_caps_how_many_addresses_one_poll_may_try() -> None:
     hosts = tuple(f"isp-{index}.example.com" for index in range(10))
     client = _RecordingJobrightClient(blocked_proxies=hosts)
-    fetcher = GitHubFeedFetcher(jobright_proxies=[_proxy(host) for host in hosts])
+    fetcher = GitHubFeedFetcher(
+        jobright_proxies=[_proxy(host) for host in hosts],
+        jobright_http_client=client,  # type: ignore[arg-type]
+    )
 
-    result = await fetcher.fetch(_jobright_definition(), client)  # type: ignore[arg-type]
+    result = await fetcher.fetch(_jobright_definition(), _UnusedHttpClient())  # type: ignore[arg-type]
 
     # A large pool must not turn one poll into a burst across every address it owns.
     assert len(client.window_calls) == JOBRIGHT_MAX_EGRESS_ATTEMPTS
@@ -694,10 +714,11 @@ async def test_jobright_does_not_rotate_addresses_on_a_query_scoped_failure() ->
 
     client = MalformedWindowClient()
     fetcher = GitHubFeedFetcher(
-        jobright_proxies=[_proxy("isp-a.example.com"), _proxy("isp-b.example.com")]
+        jobright_proxies=[_proxy("isp-a.example.com"), _proxy("isp-b.example.com")],
+        jobright_http_client=client,  # type: ignore[arg-type]
     )
 
-    result = await fetcher.fetch(_jobright_definition(), client)  # type: ignore[arg-type]
+    result = await fetcher.fetch(_jobright_definition(), _UnusedHttpClient())  # type: ignore[arg-type]
 
     # An invalid payload repeats identically from every address; burning the pool on
     # it would hide the real cause and spend addresses for nothing.
@@ -718,11 +739,11 @@ async def test_jobright_backoff_clears_after_a_successful_window() -> None:
                 200,
             )
 
-    fetcher = GitHubFeedFetcher()
+    fetcher = GitHubFeedFetcher(jobright_http_client=HealthyHttpClient())  # type: ignore[arg-type]
     fetcher._jobright_consecutive_failures = 3
     fetcher._jobright_retry_after = 0.0
 
-    result = await fetcher.fetch(definition, HealthyHttpClient())  # type: ignore[arg-type]
+    result = await fetcher.fetch(definition, _UnusedHttpClient())  # type: ignore[arg-type]
 
     assert result.degraded_reason is None
     assert fetcher.jobright_seconds_until_retry() == 0
@@ -740,9 +761,9 @@ async def test_jobright_fetcher_treats_an_empty_window_as_unavailable() -> None:
         async def post_json(self, _url, *, json):
             return {"success": True, "result": {"jobList": []}}, {}, 200
 
-    result = await GitHubFeedFetcher().fetch(
+    result = await GitHubFeedFetcher(jobright_http_client=EmptyWindowHttpClient()).fetch(  # type: ignore[arg-type]
         definition,
-        EmptyWindowHttpClient(),  # type: ignore[arg-type]
+        _UnusedHttpClient(),  # type: ignore[arg-type]
     )
 
     # An empty window is a failed source, not evidence that every role disappeared.
