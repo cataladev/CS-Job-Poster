@@ -39,7 +39,7 @@ async def test_closed_database_failure_identifies_baseline_before_any_scraper(co
     assert failure.source is None
     assert failure.stage == "database baseline check"
     assert failure.error_type == "OperationalError"
-    assert "job_bot/feed_pipeline.py:" in failure.location
+    assert "feed_pipeline.py:" in failure.location
     assert caught.value.scrape_stats.feeds_checked == 0
     assert [(source.source_id, source.status) for source in caught.value.scrape_stats.source_results] == [
         ("configured", "not_run")
