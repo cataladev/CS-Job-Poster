@@ -11,6 +11,7 @@ from typing import Any
 
 import discord
 
+from job_bot.log_threads import LogThreads
 from job_bot.models import AppConfig
 from job_bot.scrape_diagnostics import ScrapeFailure, ScrapeSourceResult
 
@@ -192,14 +193,16 @@ def _add_source_fields(
 class ScrapeStatusReporter:
     """Send one quiet success or pinging failure update per scrape cycle."""
 
-    def __init__(self, config: AppConfig) -> None:
+    def __init__(self, config: AppConfig, *, log_threads: LogThreads | None = None) -> None:
         self.config = config
         self.client: discord.Client | None = None
         self.logger = logging.getLogger(self.__class__.__name__)
         self.instance = f"{socket.gethostname()}:{os.getpid()}"
+        self.log_threads = log_threads or LogThreads(config)
 
     def bind_client(self, client: discord.Client) -> None:
         self.client = client
+        self.log_threads.bind_client(client)
 
     async def report(
         self,
@@ -238,17 +241,14 @@ class ScrapeStatusReporter:
         )
 
         try:
-            channel = self.client.get_channel(channel_id)
-            if channel is None:
-                channel = await self.client.fetch_channel(channel_id)
-            if channel is None or not hasattr(channel, "send"):
-                raise RuntimeError(f"Log destination {channel_id} is not a message channel")
+            channel = await self.log_threads.thread_for(feed_group)
             message = await channel.send(
                 content=content,
                 embed=embed,
                 allowed_mentions=allowed_mentions,
             )
         except (RuntimeError, discord.HTTPException, asyncio.TimeoutError) as exc:
+            await self.log_threads.invalidate()
             self.logger.error(
                 "scrape_status_send_failed environment=%s feed_group=%s channel=%s error=%s",
                 self.config.bot_environment,
@@ -259,13 +259,14 @@ class ScrapeStatusReporter:
             return None
 
         self.logger.info(
-            "scrape_status_sent environment=%s feed_group=%s failed=%s alert=%s errors=%s channel=%s message=%s",
+            "scrape_status_sent environment=%s feed_group=%s failed=%s alert=%s errors=%s channel=%s thread=%s message=%s",
             self.config.bot_environment,
             feed_group,
             failed,
             alert,
             len(failures),
             channel_id,
+            channel.id,
             message.id,
         )
         return int(message.id)

@@ -25,12 +25,13 @@ async def test_ready_starts_category_setup_and_both_feed_pollers(config_factory)
         _guild_commands_synced=True,
         change_presence=AsyncMock(),
         _ensure_category_task=lambda: started.append("categories"),
+        _ensure_log_thread_task=lambda: started.append("log_threads"),
         _ensure_poll_task=lambda **kwargs: started.append(kwargs["name"]),
         pipeline=object(),
         company_source_pipeline=object(),
     )
     await FeedDiscordClient.on_ready(harness)
-    assert started == ["categories", "core", "company_sources"]
+    assert started == ["categories", "log_threads", "core", "company_sources"]
 
 
 @pytest.mark.asyncio
@@ -90,6 +91,30 @@ async def test_commands_are_synced_only_to_the_posting_guild() -> None:
         ("clear", 456),
         ("sync", 456),
     ]
+
+
+@pytest.mark.asyncio
+async def test_log_thread_setup_does_not_overlap_on_reconnect():
+    release = asyncio.Event()
+    setup = AsyncMock()
+
+    async def initialize():
+        await setup()
+        await release.wait()
+
+    harness = SimpleNamespace(
+        _poll_tasks={}, log_threads=SimpleNamespace(ensure_threads=initialize),
+    )
+    FeedDiscordClient._ensure_log_thread_task(harness)
+    first = harness._poll_tasks["log_threads"]
+    FeedDiscordClient._ensure_log_thread_task(harness)
+    try:
+        await asyncio.sleep(0)
+        assert harness._poll_tasks["log_threads"] is first
+        setup.assert_awaited_once()
+    finally:
+        release.set()
+        await first
 
 
 @pytest.mark.asyncio
