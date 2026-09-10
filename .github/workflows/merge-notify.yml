@@ -13,14 +13,28 @@ jobs:
       - name: Notify Discord
         env:
           WEBHOOK_URL: ${{ secrets.MERGE_NOTIFY_WEBHOOK_URL }}
+          PR_BODY: ${{ github.event.pull_request.body }}
         run: |
-          PR_TITLE="${{ github.event.pull_request.title }}"
-          PR_URL="${{ github.event.pull_request.html_url }}"
-          PR_AUTHOR="${{ github.event.pull_request.user.login }}"
-          PR_NUMBER="${{ github.event.pull_request.number }}"
+          # Truncate body to 2048 chars (Discord embed description limit)
+          DESCRIPTION=$(echo "$PR_BODY" | head -c 2048)
 
-          curl -s -H "Content-Type: application/json" \
-            -d "{
-              \"content\": \"**PR #${PR_NUMBER} merged** by **${PR_AUTHOR}** — pull latest before pushing\\n[${PR_TITLE}](${PR_URL})\"
-            }" \
-            "$WEBHOOK_URL"
+          # Build JSON payload with jq to handle special characters safely
+          PAYLOAD=$(jq -n \
+            --arg title "PR #${{ github.event.pull_request.number }} merged — pull latest before pushing" \
+            --arg url "${{ github.event.pull_request.html_url }}" \
+            --arg author "${{ github.event.pull_request.user.login }}" \
+            --arg avatar "${{ github.event.pull_request.user.avatar_url }}" \
+            --arg pr_title "${{ github.event.pull_request.title }}" \
+            --arg desc "$DESCRIPTION" \
+            '{
+              embeds: [{
+                title: $pr_title,
+                url: $url,
+                description: $desc,
+                color: 5025616,
+                author: { name: $author, icon_url: $avatar },
+                footer: { text: "Pull latest before pushing" }
+              }]
+            }')
+
+          curl -s -H "Content-Type: application/json" -d "$PAYLOAD" "$WEBHOOK_URL"
