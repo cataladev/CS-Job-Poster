@@ -14,7 +14,7 @@ Polls every `poll_interval_seconds` (default 300s, Jobright every 60s). Collects
 
 - **GitHub markdown feeds** -- parses README tables from repos like SimplifyJobs, SpeedyApply, sndsh404, ApplyGuy
 - **Jobright** -- queries the visitor API taxonomy window for intern/new-grad CS roles, falls back to listing page scrape on failure. Supports ISP proxy rotation for rate limiting.
-- **Direct ATS boards** -- Greenhouse, Lever, Ashby, SmartRecruiters, Workday, Oracle, ByteDance, Rippling, Amazon. Built from `data/companies.csv` seed + curated boards.
+- **Direct ATS lookup** -- employer boards from `data/company_watchlist_seed.csv` plus curated boards enrich current Jobright jobs with application links, with a four-hour cache. They are not independent discovery feeds.
 - **Internship Engine** -- JSON feed + README fallback
 
 Each feed has a `FeedDefinition` with source ID, parser, provider, and poll interval. `GitHubFeedFetcher` handles provider-specific API calls (conditional requests via ETag/Last-Modified for GitHub, POST APIs for Workday/ByteDance/Rippling/Jobright).
@@ -55,6 +55,14 @@ Multi-layer:
 - **Subscription alerts** -- `/target company` and `/target-location` let members get pinged for specific employers or cities
 - **Delivery reconciliation** -- recovers from bot crashes by checking channel history for message IDs
 
+## Operational Logs
+
+- `LogThreads` creates or recovers two permanent bot-authored starter cards and threads in `DISCORD_LOG_CHANNEL_ID` at startup.
+- `ScrapeStatusReporter` routes core summaries to **Core feeds** and company-source summaries to **Direct scrapers**.
+- `CoreLogNotifier` sends Jobright health transitions and session alerts through the same core thread, using the bot and an environment label; standalone tools retain optional webhook notifications.
+- A shared setup lock prevents overlapping startup, poll, and notification calls from creating extra threads. Marker recovery has no date cutoff and reuses archived threads and interrupted setup across restarts.
+- Company-source error mentions and configured Jobright operator mentions are preserved. Locked threads or permission failures are logged locally, without falling back to parent-channel messages.
+
 ## Commands
 
 All commands are guild-scoped (instant sync) and admin-only unless noted:
@@ -93,6 +101,7 @@ All configuration via environment variables (see `.env.example`):
 - `BOT_ENV` -- environment label shown in logs and health embeds
 - `POLL_INTERVAL_SECONDS`, `COMPANY_SOURCE_POLL_INTERVAL_SECONDS` -- collection frequency
 - `JOBRIGHT_SESSION`, `JOBRIGHT_PROXY_*` -- Jobright-specific auth and proxy config
-- `SCRAPE_STATUS_WEBHOOK_URL` -- Discord webhook for operational alerts
+- `DISCORD_LOG_CHANNEL_ID` -- parent channel for the permanent Core feeds and Direct scrapers log threads
+- `JOBRIGHT_STATUS_WEBHOOK_URL` -- optional operational-alert webhook for standalone scraper tools
 
 Runtime config (channel IDs, roles) stored in database and overridable via slash commands.
