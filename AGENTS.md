@@ -38,6 +38,19 @@ Keep docs concise -- bullet points and tables, no code snippets, no overlap betw
 - `.claude/` -- Claude Code configuration (hooks, skills, settings). Do not edit, delete, or overwrite any files in this directory.
 - `.env` -- local environment variables with secrets
 
+## MANDATORY: Post-Push Pull Request Generation
+
+**CRITICAL RULE: Every time you push a branch that is not `main`, you MUST generate and create a pull request if one doesn't already exist.** This saves the team from writing PR descriptions manually.
+
+Steps (run after EVERY `git push` to a non-main branch):
+
+1. Check if a PR already exists: `gh pr view --json url 2>/dev/null`
+2. If no PR exists, generate one:
+   - Title: under 70 characters, conventional style (`Add ...`, `Fix ...`, `Update ...`)
+   - Body: Summary bullets (what/why), changed files list, test plan checklist
+3. Create with: `gh pr create --title "..." --body "..."`
+4. If `gh` is not available, output the title and description as markdown for copy-paste
+
 ## Key Entry Points
 
 - `bot.py` -- starts the bot (`mvp_runtime.main()`)

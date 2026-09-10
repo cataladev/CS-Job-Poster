@@ -8,6 +8,11 @@
             "type": "prompt",
             "if": "Bash(git commit*)",
             "prompt": "A git commit just completed. Review the committed changes and run /update-docs if any Python source files, configuration, or project structure changed. Skip if only documentation or non-code files were modified."
+          },
+          {
+            "type": "prompt",
+            "if": "Bash(git push*)",
+            "prompt": "A git push just completed. If this branch is not main and no PR exists yet for it, run /generate-pr to create a pull request. Skip if a PR already exists (check with: gh pr view --json url 2>/dev/null)."
           }
         ]
       }

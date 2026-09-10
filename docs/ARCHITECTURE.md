@@ -48,7 +48,7 @@ Multi-layer:
 
 `TrackChannelPublisher` handles all Discord output:
 
-- **Job embeds** -- company logo, title, location, apply link, source attribution
+- **Job embeds** -- company logo, title, location, apply link, source code attribution (e.g. `GH-1`, `JB-13`, `DS-1`)
 - **Track routing** -- `internship` and `new_grad` channels configured via `/set-job-channel`
 - **Category mirrors** -- optional `outsource/mirror.py` creates 9 permanent threads (SWE, DATA/AI, PM, etc.) and cross-posts jobs to matching categories
 - **Daily digest** -- periodic summary embed with job counts and role alert mentions
