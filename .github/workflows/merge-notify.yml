@@ -1,0 +1,26 @@
+name: Merge notification
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+jobs:
+  notify:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notify Discord
+        env:
+          WEBHOOK_URL: ${{ secrets.MERGE_NOTIFY_WEBHOOK_URL }}
+        run: |
+          PR_TITLE="${{ github.event.pull_request.title }}"
+          PR_URL="${{ github.event.pull_request.html_url }}"
+          PR_AUTHOR="${{ github.event.pull_request.user.login }}"
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+
+          curl -s -H "Content-Type: application/json" \
+            -d "{
+              \"content\": \"**PR #${PR_NUMBER} merged** by **${PR_AUTHOR}** — pull latest before pushing\\n[${PR_TITLE}](${PR_URL})\"
+            }" \
+            "$WEBHOOK_URL"
