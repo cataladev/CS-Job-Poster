@@ -54,6 +54,9 @@ the runtime.
 
 ## Feeds
 
+Individual job footers include compact source codes after the `jobbot` delivery ID.
+See [SOURCE_CODES.md](SOURCE_CODES.md) for the GitHub, Jobright, and direct-scraper mappings.
+
 | Feed | Ref and file | Format |
 |---|---|---|
 | Simplify summer internships | `SimplifyJobs/Summer2027-Internships` — `dev/README.md` | Markdown/HTML table |

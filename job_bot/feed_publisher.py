@@ -14,6 +14,7 @@ import discord
 from job_bot.branding import BrandingResolver
 from job_bot.database import Database
 from job_bot.models import AppConfig, CanonicalJob
+from job_bot.source_codes import source_codes
 from job_bot.utils.feed_normalization import (
     has_explicit_foreign_role_location,
     is_us_location,
@@ -511,7 +512,9 @@ class TrackChannelPublisher:
             embed.add_field(name="Posted", value=metadata["posted_date"], inline=True)
         if logo_url:
             embed.set_thumbnail(url=logo_url)
-        embed.set_footer(text=f"Job Bot • {marker}")
+        codes = source_codes(job.source_names)
+        source_suffix = f" • {', '.join(codes)}" if codes else ""
+        embed.set_footer(text=f"Job Bot • {marker}{source_suffix}")
         return embed
 
     async def _resolve_logo_url(
