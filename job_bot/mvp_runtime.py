@@ -18,6 +18,7 @@ from job_bot.database import Database
 from job_bot.feed_pipeline import FeedPipeline
 from job_bot.feed_publisher import TrackChannelPublisher
 from job_bot.github_feeds import FEEDS
+from job_bot.health_commands import register_health_commands
 from job_bot.job_channel_commands import (
     JobChannelConfigurator,
     register_job_channel_commands,
@@ -79,6 +80,12 @@ class FeedDiscordClient(discord.Client):
         register_job_channel_commands(
             self.tree,
             configurator=self.channel_configurator,
+            publisher=publisher,
+        )
+        register_health_commands(
+            self.tree,
+            database=database,
+            config=config,
             publisher=publisher,
         )
         self._poll_tasks: dict[str, asyncio.Task[None]] = {}

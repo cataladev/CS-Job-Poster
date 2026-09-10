@@ -1,0 +1,40 @@
+#!/bin/sh
+#
+# Post-commit hook: auto-update docs/STRUCTURE.md and warn about stale docs.
+# Runs after every git commit. No AI needed.
+#
+# Setup (run once after cloning):
+#   git config core.hooksPath .githooks
+#
+
+# Find python -- try common locations
+PYTHON=""
+for candidate in python3 python .venv/bin/python .venv/Scripts/python; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+        PYTHON="$candidate"
+        break
+    fi
+done
+
+if [ -z "$PYTHON" ]; then
+    echo "[post-commit] WARNING: Python not found, skipping doc update"
+    exit 0
+fi
+
+# Check if any code files changed in the commit
+CODE_CHANGED=$(git diff-tree --no-commit-id --name-only -r HEAD | grep -E '\.(py|yaml|yml|toml|csv)$' | grep -v '__pycache__' || true)
+
+if [ -z "$CODE_CHANGED" ]; then
+    # Only docs/config/etc changed, skip
+    exit 0
+fi
+
+# Run the doc generator
+echo "[post-commit] Updating docs/STRUCTURE.md..."
+$PYTHON scripts/generate_docs.py
+
+# If STRUCTURE.md was updated, amend the commit to include it
+if git diff --name-only --cached | grep -q "docs/STRUCTURE.md"; then
+    git commit --amend --no-edit --no-verify >/dev/null 2>&1
+    echo "[post-commit] docs/STRUCTURE.md auto-committed"
+fi

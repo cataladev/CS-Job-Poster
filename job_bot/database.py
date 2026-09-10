@@ -1061,6 +1061,10 @@ class Database:
                 (source_id,),
             ).fetchone()
 
+    async def get_all_feed_states(self) -> List[DbRow]:
+        async with self._lock:
+            return self._connection.execute("SELECT * FROM feed_state").fetchall()
+
     async def record_feed_success(
         self,
         *,
