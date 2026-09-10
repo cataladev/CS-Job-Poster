@@ -126,12 +126,13 @@ async def _create_pending_delivery(
     title: str | None = None,
     cycle: str = "Summer 2027",
     raw_data: dict | None = None,
+    source_id: str = "source",
 ) -> None:
     title = title or (
         "Software Engineer Intern" if track == "internship" else "Software Engineer"
     )
     observation = JobObservation(
-        source_id="source",
+        source_id=source_id,
         source_label="Source",
         source_url="https://github.com/owner/source",
         external_id=external_id,
@@ -169,7 +170,10 @@ async def _create_pending_delivery(
 
 
 @pytest.mark.asyncio
-async def test_crash_window_reconciles_marker_without_second_send(config_factory) -> None:
+@pytest.mark.parametrize("source_suffix", ["", " • GH-1, JB-13"])
+async def test_crash_window_reconciles_marker_without_second_send(
+    config_factory, source_suffix
+) -> None:
     config = config_factory()
     database = Database(config.sqlite_db_path)
     await database.initialize()
@@ -186,7 +190,7 @@ async def test_crash_window_reconciles_marker_without_second_send(config_factory
         await database.mark_delivery_sending(int(delivery["id"]))
 
         embed = discord.Embed(title="Already delivered")
-        embed.set_footer(text=f"Job Bot • {delivery['marker']}")
+        embed.set_footer(text=f"Job Bot • {delivery['marker']}{source_suffix}")
         existing_message = SimpleNamespace(
             id=777,
             author=SimpleNamespace(id=42),
@@ -341,12 +345,15 @@ async def test_outsource_channels_copy_both_tracks_without_repeating_mentions(
             company="Example Corp",
             company_key="example",
         )
-        await _create_pending_delivery(database, track="internship", channel_id=111)
+        await _create_pending_delivery(
+            database, track="internship", channel_id=111, source_id="simplify_internships"
+        )
         await _create_pending_delivery(
             database,
             track="new_grad",
             channel_id=222,
             external_id="new-grad-1",
+            source_id="jobright_new_grad",
         )
         internship_channel = FakeChannel([], channel_id=111)
         new_grad_channel = FakeChannel([], channel_id=222)
@@ -381,6 +388,8 @@ async def test_outsource_channels_copy_both_tracks_without_repeating_mentions(
         assert new_grad_thread.sent[0].to_dict() == (
             new_grad_channel.sent[0].to_dict()
         )
+        assert internship_thread.sent[0].footer.text.endswith(" • GH-1")
+        assert new_grad_thread.sent[0].footer.text.endswith(" • JB-13")
         copied_mentions = internship_thread.allowed_mentions[0]
         assert copied_mentions.everyone is False
         assert copied_mentions.users is False
@@ -550,7 +559,7 @@ async def test_embed_omits_feed_credit_and_contains_safe_apply_link(config_facto
     database = Database(config.sqlite_db_path)
     await database.initialize()
     try:
-        await _create_pending_delivery(database)
+        await _create_pending_delivery(database, source_id="simplify_internships")
         delivery = (await database.list_deliveries_for_send(111))[0]
         job = (await database.get_canonical_jobs([int(delivery["canonical_id"])]))[0]
         metadata = await database.get_feed_observation_metadata(int(delivery["canonical_id"]))
@@ -571,7 +580,51 @@ async def test_embed_omits_feed_credit_and_contains_safe_apply_link(config_facto
         }
         assert all(field.name != "Source(s)" for field in embed.fields)
         assert "github.com/owner/source" not in str(embed.to_dict())
-        assert delivery["marker"] in embed.footer.text
+        assert embed.footer.text == f"Job Bot • {delivery['marker']} • GH-1"
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source_ids", "suffix"),
+    [
+        (["company_api_ibm"], " • DS-1"),
+        (["direct_greenhouse_abc123"], " • DS-1"),
+        (
+            [
+                "jobright_new_grad",
+                "applyguy_new_grad",
+                "simplify_new_grad",
+                "direct_greenhouse_abc123",
+                "direct_lever_def456",
+                "company_api_ibm",
+                "unmapped_source",
+            ],
+            " • DS-1, GH-2, GH-10, JB-13",
+        ),
+        (["unmapped_source"], ""),
+    ],
+)
+async def test_delivery_footer_uses_distinct_ingestion_source_codes(
+    config_factory, source_ids, suffix
+) -> None:
+    config = config_factory()
+    database = Database(config.sqlite_db_path)
+    await database.initialize()
+    try:
+        for source_id in source_ids:
+            await _create_pending_delivery(
+                database, source_id=source_id, track="new_grad", channel_id=222
+            )
+        delivery = (await database.list_deliveries_for_send(222))[0]
+        channel = FakeChannel([], channel_id=222)
+        publisher = TrackChannelPublisher(config, database)
+        publisher.bind_client(FakeClient({222: channel}))
+
+        assert await publisher.publish_pending() == (1, 0)
+        assert channel.sent[0].footer.text == f"Job Bot • {delivery['marker']}{suffix}"
+        assert all(source_id not in channel.sent[0].footer.text for source_id in source_ids)
     finally:
         await database.close()
 
@@ -585,6 +638,7 @@ async def test_embed_shows_verified_direct_link_with_jobright_fallback(config_fa
         await _create_pending_delivery(
             database,
             raw_data={"jobright_fallback_url": "https://jobright.ai/jobs/info/startup-role"},
+            source_id="jobright_internships",
         )
         delivery = (await database.list_deliveries_for_send(111))[0]
         job = (await database.get_canonical_jobs([int(delivery["canonical_id"])]))[0]
@@ -598,6 +652,7 @@ async def test_embed_shows_verified_direct_link_with_jobright_fallback(config_fa
             "[Apply directly](https://jobs.example.com/job-1)\n"
             "[Jobright fallback](https://jobright.ai/jobs/info/startup-role)"
         )
+        assert embed.footer.text == f"Job Bot • {delivery['marker']} • JB-13"
     finally:
         await database.close()
 
