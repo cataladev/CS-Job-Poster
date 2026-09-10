@@ -184,7 +184,11 @@ async def test_a_dead_session_is_reported_once_then_stops_resolving() -> None:
     assert unchanged == observations
     assert resolver.suspended is True
     assert len(notifier.messages) == 1
-    assert "session expired" in notifier.messages[0]
+    # A rejected cookie is the one case that should tell someone to replace it.
+    alert = notifier.messages[0]
+    assert "signed-out page" in alert
+    assert "session_rejected=8" in alert
+    assert "Paste a fresh JOBRIGHT_SESSION_ID" in alert
 
     requests_so_far = len(client.detail_requests)
     await resolver.resolve(client, observations)
@@ -208,3 +212,104 @@ async def test_a_stale_build_id_is_reloaded_after_a_404() -> None:
     # Jobright rotates the deploy id on every release; the route 404s until reloaded.
     assert client.build_id_requests == 2
     assert job.application_url == "https://boards.example.com/jobs/1"
+
+
+@pytest.mark.asyncio
+async def test_an_unreachable_host_is_not_blamed_on_the_cookie() -> None:
+    """A host Jobright will not answer is not a cookie problem.
+
+    Telling someone to paste a fresh session when the session is fine sends them
+    after the wrong thing, which is exactly what happened on the first deploy.
+    """
+    notifier = RecordingNotifier()
+    resolver = JobrightLinkResolver("cookie", notifier=notifier)
+    job_ids = [f"jr-{index}" for index in range(FAILURE_STREAK_LIMIT + 2)]
+    client = FakeHttpClient(
+        {job_id: RuntimeError("GET ... returned 503") for job_id in job_ids}
+    )
+
+    await resolver.resolve(client, [_observation(job_id) for job_id in job_ids])
+
+    assert resolver.suspended is True
+    assert len(notifier.messages) == 1
+    alert = notifier.messages[0]
+    # The cause, the status it came with, and the error itself -- not a guess.
+    assert "server error" in alert
+    assert "HTTP 503" in alert
+    assert "upstream_error=8" in alert
+    assert "returned 503" in alert
+    assert "JOBRIGHT_SESSION_ID" not in alert
+
+
+@pytest.mark.asyncio
+async def test_a_security_check_is_reported_as_one() -> None:
+    """A challenged fingerprint reads nothing like an expired cookie."""
+    notifier = RecordingNotifier()
+    resolver = JobrightLinkResolver("cookie", notifier=notifier)
+
+    class InterstitialClient(FakeHttpClient):
+        async def get_text(self, _url, *, headers, **_kw):
+            self.build_id_requests += 1
+            return "<html>Security check | Jobright</html>", {}, 200
+
+    client = InterstitialClient({})
+    await resolver.resolve(client, [_observation(f"jr-{i}") for i in range(12)])
+
+    assert len(notifier.messages) == 1
+    alert = notifier.messages[0]
+    assert "security check" in alert
+    assert "interstitial=8" in alert  # the alert fires the moment the streak trips
+    # The page's size is the evidence that it was not Jobright's own page.
+    assert "38 bytes" in alert
+    assert "CHROME_IMPERSONATION" in alert
+    assert "JOBRIGHT_SESSION_ID" not in alert
+
+
+@pytest.mark.asyncio
+async def test_a_refused_proxy_is_named_with_the_address_it_left_through() -> None:
+    notifier = RecordingNotifier()
+    resolver = JobrightLinkResolver(
+        "cookie",
+        notifier=notifier,
+        request_kwargs=lambda: {
+            "proxy": "http://isp-a.example.com:8080",
+            "proxy_auth": ("isp-user", "isp-secret"),
+        },
+    )
+    job_ids = [f"jr-{index}" for index in range(FAILURE_STREAK_LIMIT)]
+    client = FakeHttpClient(
+        {
+            job_id: RuntimeError(
+                "HTTP request failed for https://jobright.ai/_next/data/BUILD1/x.json: "
+                "cannot connect to proxy: Failed to connect to isp-a.example.com port 8080"
+            )
+            for job_id in job_ids
+        }
+    )
+
+    await resolver.resolve(client, [_observation(job_id) for job_id in job_ids])
+
+    alert = notifier.messages[0]
+    assert "proxy refused" in alert
+    assert "egress isp-a.example.com:8080" in alert
+    assert "no response" in alert  # a refused proxy never got a status
+    # Credentials must never reach an alert channel.
+    assert "isp-secret" not in alert
+    assert "JOBRIGHT_SESSION_ID" not in alert
+
+
+@pytest.mark.asyncio
+async def test_a_failed_build_id_is_not_refetched_for_every_job() -> None:
+    resolver = JobrightLinkResolver("cookie", notifier=RecordingNotifier())
+
+    class NoBuildIdClient(FakeHttpClient):
+        async def get_text(self, _url, *, headers, **_kw):
+            self.build_id_requests += 1
+            return "<html>Access denied</html>", {}, 200
+
+    client = NoBuildIdClient({})
+    await resolver.resolve(client, [_observation(f"jr-{i}") for i in range(12)])
+
+    # A blocked host would otherwise re-request the same 640 KB page once per job.
+    assert client.build_id_requests == 1
+    assert client.detail_requests == []

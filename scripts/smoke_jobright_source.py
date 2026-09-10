@@ -74,6 +74,8 @@ async def run(show: int) -> None:
         "window_size": JOBRIGHT_PUBLIC_WINDOW_SIZE,
         "tracks": {},
     }
+    # Jobright's own requests leave through the fetcher's Chrome-impersonating
+    # client; this one only satisfies the shared signature every other feed uses.
     async with AsyncHttpClient(
         timeout_seconds=30,
         retries=2,

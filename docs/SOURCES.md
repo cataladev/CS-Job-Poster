@@ -28,6 +28,10 @@ Live job aggregator API. Polled every 60 seconds. Uses the visitor taxonomy wind
 
 Features: ISP proxy rotation, exponential backoff, employer link resolution (replaces Jobright wrapper URLs with direct employer links when a session cookie is configured).
 
+When link resolution fails for eight attempts in a row it suspends itself and posts one alert to `JOBRIGHT_STATUS_WEBHOOK_URL` naming the cause -- `session_rejected`, `interstitial` (a security check instead of Jobright's page), `blocked`, `throttled`, `proxy_error`, `timeout`, `upstream_error`, `unreadable_payload` -- with the HTTP status, the egress it used, and the error itself. Only `session_rejected` asks for a new `JOBRIGHT_SESSION_ID`.
+
+Transport: every Jobright request -- window, listing fallback, and link resolution -- leaves through a Chrome-impersonating curl_cffi client (`ImpersonatingHttpClient`) rather than the shared aiohttp client the other feeds use, because Jobright's edge screens the TLS/HTTP2 handshake before it reads a header. The ISP proxy pool applies to that client per request, so egress rotation is unchanged.
+
 ## Company API Sources
 
 First-party career site APIs. Polled on the company source timer (separate from core feeds). Only deliver jobs with a same-day `posted_date`.
