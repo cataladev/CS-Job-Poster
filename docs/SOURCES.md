@@ -2,7 +2,7 @@
 
 ## GitHub Repository Feeds
 
-Parsed from markdown tables or JSON files in public GitHub repos. Polled every 5 minutes via conditional requests (ETag/Last-Modified).
+Parsed from markdown tables or JSON files in public GitHub repos. Polled every 5 minutes via conditional requests (ETag/Last-Modified). Each feed has a stable source code (e.g. `GH-1` through `GH-10`) shown in Discord footers — see `SOURCE_CODES.md` for the full mapping.
 
 | Source ID | Label | Repository | File | Track |
 |-----------|-------|-----------|------|-------|
