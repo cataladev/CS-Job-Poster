@@ -76,7 +76,7 @@ def test_simplify_parser_keeps_only_active_explicit_us_rows() -> None:
         parse_simplify_json,
     )
     jobs, rejected = parse_simplify_json(
-        (FIXTURES / "feed_simplify.json").read_text(),
+        (FIXTURES / "feed_simplify.json").read_text(encoding="utf-8"),
         definition,
     )
 
@@ -130,7 +130,7 @@ def test_markdown_parser_handles_html_and_markdown_apply_links() -> None:
         trusted_us=True,
     )
     jobs, rejected = parse_markdown_table(
-        (FIXTURES / "feed_speedy.md").read_text(),
+        (FIXTURES / "feed_speedy.md").read_text(encoding="utf-8"),
         definition,
     )
 
@@ -238,7 +238,7 @@ def test_jobright_parser_uses_public_us_listings_and_keeps_tracks_separate() -> 
         parse_jobright_next_data,
         fetch_url="https://jobright.ai/jobs/software-engineer-new-graduate-jobs-in-united-states",
     )
-    payload = (FIXTURES / "feed_jobright.html").read_text()
+    payload = (FIXTURES / "feed_jobright.html").read_text(encoding="utf-8")
 
     internships, internship_rejected = parse_jobright_next_data(payload, internship_definition)
     new_grads, new_grad_rejected = parse_jobright_next_data(payload, new_grad_definition)
@@ -840,7 +840,7 @@ def test_intern_engine_parser_accepts_structured_jobs_object() -> None:
         trusted_us=True,
     )
     jobs, rejected = parse_intern_engine_json(
-        (FIXTURES / "feed_intern_engine.json").read_text(),
+        (FIXTURES / "feed_intern_engine.json").read_text(encoding="utf-8"),
         definition,
     )
 

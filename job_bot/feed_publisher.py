@@ -595,8 +595,9 @@ class TrackChannelPublisher:
         local_zone = self._digest_timezone()
         local_started_at = started_at.astimezone(local_zone)
         local_scheduled_at = scheduled_at.astimezone(local_zone)
-        window_start = local_started_at.strftime("%b %d, %-I:%M %p %Z")
-        digest_day = local_scheduled_at.strftime("%a, %b %-d")
+        _no_pad = "#" if __import__("sys").platform == "win32" else "-"
+        window_start = local_started_at.strftime(f"%b %d, %{_no_pad}I:%M %p %Z")
+        digest_day = local_scheduled_at.strftime(f"%a, %b %{_no_pad}d")
         highlight = f" · 🔥 {priority_count} priority" if priority_count else ""
         embed = discord.Embed(
             title=f"{track_label} Daily Brief — {digest_day}",
