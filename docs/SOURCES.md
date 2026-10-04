@@ -40,10 +40,23 @@ First-party career site APIs. Polled on the company source timer (separate from 
 |---------|-----------|-------------|-------------------|--------|
 | IBM | `company_api_ibm` | `https://www-api.ibm.com/search/api/v2` | Internship, Entry Level | internship, new_grad |
 | Microsoft | `company_api_microsoft` | `https://apply.careers.microsoft.com/api/pcsx/search` | Intern, Recent Graduate | internship, new_grad |
+| NVIDIA | `company_api_nvidia` | `https://jobs.nvidia.com/api/pcsx/search` | Intern, New College Graduate, Academic, Regular Employee (fixed term) | internship, new_grad |
 
 IBM uses a POST JSON search API with career area filters (Software Engineering, Infrastructure & Technology, Data & Analytics, Cloud).
 
 Microsoft uses a GET API with `filter_seniority` params, paginated (20 per page, up to 200 results per seniority level), sorted by timestamp.
+
+NVIDIA uses the public Eightfold GET search API with `domain=nvidia.com`,
+`sort_by=timestamp`, and four repeated `filter_job_type` parameters: `intern (fixed term)`,
+`new college graduate`, `academic (fixed term)`, and `regular employee (fixed term)`.
+
+- Advances `start` by the actual returned page length (currently 10), bounded to 20 pages / 200 records.
+- Stops after a dated page crosses before yesterday UTC, retaining the boundary page for deduplication. This covers today's date in every scheduling timezone; the shared runner still permits only same-day delivery in `SCHEDULE_TIMEZONE`.
+- Routes by title or the structured Intern department; normalizes New College Grad wording for classification while preserving the original title. Rejects senior roles and records without an early-career signal.
+- Keeps all explicit U.S. locations, normalizes country-first labels, and rejects remote jobs without U.S. evidence.
+- Uses `atsJobId` / `displayJobId` (falling back to `id`) for source identity, `positionUrl` for a sanitized NVIDIA job link, and `postedTs` for the UTC posting date.
+- Validates API status, schema, count, applied filters, sort order, and pagination progress. Failures never return a partial successful snapshot.
+- Read-only live smoke check: `python -m scripts.smoke_nvidia_source --show 10`.
 
 ## Direct ATS Board Feeds
 

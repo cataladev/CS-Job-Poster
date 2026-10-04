@@ -33,7 +33,7 @@ and stay the same when its repository moves to a new recruiting year.
 `DS-1` groups all direct scrapers. Current ATS source IDs use
 `direct_<provider>_<board hash>` for Greenhouse, Lever, Ashby, SmartRecruiters,
 Workday, Oracle, Optiver, ByteDance, Rippling, and Amazon. First-party company
-adapters use `company_api_<company>`; IBM is currently registered.
+adapters use `company_api_<company>`; IBM, Microsoft, and NVIDIA are currently registered.
 
 ## Posting behavior
 
