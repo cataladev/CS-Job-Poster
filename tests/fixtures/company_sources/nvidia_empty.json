@@ -1,0 +1,12 @@
+{
+  "status": 200,
+  "error": {"message": "", "body": ""},
+  "data": {
+    "count": 0,
+    "positions": [],
+    "sortBy": "timestamp",
+    "appliedFilters": {
+      "jobType": ["intern (fixed term)", "new college graduate", "academic (fixed term)", "regular employee (fixed term)"]
+    }
+  }
+}
