@@ -21,7 +21,7 @@ Each feed has a `FeedDefinition` with source ID, parser, provider, and poll inte
 
 ### Company Source Loop (`CompanySourcePipeline`)
 
-Polls every `company_source_poll_interval_seconds`. Runs registered first-party company API adapters with bounded concurrency. Currently: IBM, Microsoft.
+Polls every `company_source_poll_interval_seconds`. Runs registered first-party company API adapters with bounded concurrency. Currently: IBM, Microsoft, NVIDIA.
 
 Each adapter implements the `CompanySource` protocol: `__init__(http_client)` and `async fetch() -> CompanySourceResult`. The runner handles feed state, baseline tracking, and error recording.
 

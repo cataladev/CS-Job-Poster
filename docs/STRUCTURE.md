@@ -56,6 +56,7 @@ Core application code.
 - `runner.py` -- CompanySourceRunner and CompanySourcePipeline
 - `ibm.py` -- IBM careers API adapter
 - `microsoft.py` -- Microsoft careers API adapter
+- `nvidia.py` -- NVIDIA careers API adapter
 
 ### job_bot/sources/
 
@@ -119,6 +120,7 @@ Test suite. Fixtures in `tests/fixtures/`.
 - `test_log_threads.py`
 - `test_microsoft_company_source.py`
 - `test_mvp_runtime.py`
+- `test_nvidia_company_source.py`
 - `test_pipeline.py`
 - `test_postgres_backend.py`
 - `test_process_tracking.py`
@@ -145,6 +147,9 @@ Test suite. Fixtures in `tests/fixtures/`.
 - `microsoft_empty.json`
 - `microsoft_malformed.json`
 - `microsoft_page_1.json`
+- `nvidia_empty.json`
+- `nvidia_page_1.json`
+- `nvidia_page_2.json`
 
 ## scripts/
 
@@ -154,6 +159,7 @@ Utility and smoke-test scripts.
 - `import_sqlite_to_postgres.py`
 - `smoke_ibm_source.py`
 - `smoke_jobright_source.py`
+- `smoke_nvidia_source.py`
 - `test_ibm_database_workflow.py`
 - `test_microsoft_api.py`
 - `wait_for_postgres.py`

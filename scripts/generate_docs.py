@@ -73,6 +73,7 @@ KNOWN_DESCRIPTIONS: dict[str, str] = {
     "job_bot/company_sources/runner.py": "CompanySourceRunner and CompanySourcePipeline",
     "job_bot/company_sources/companies/ibm.py": "IBM careers API adapter",
     "job_bot/company_sources/companies/microsoft.py": "Microsoft careers API adapter",
+    "job_bot/company_sources/companies/nvidia.py": "NVIDIA careers API adapter",
     # utils
     "job_bot/utils/feed_normalization.py": "URL sanitization, location validation, text cleaning",
     "job_bot/utils/http.py": "AsyncHttpClient with retries and proxy support",

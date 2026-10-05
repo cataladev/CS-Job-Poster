@@ -3,11 +3,13 @@ from __future__ import annotations
 from job_bot.company_sources.base import CompanySource
 from job_bot.company_sources.companies.ibm import IBMSource
 from job_bot.company_sources.companies.microsoft import MicrosoftSource
+from job_bot.company_sources.companies.nvidia import NvidiaSource
 from job_bot.utils.http import AsyncHttpClient
 
 COMPANY_SOURCE_REGISTRY: dict[str, type[CompanySource]] = {
     "ibm": IBMSource,
     "microsoft": MicrosoftSource,
+    "nvidia": NvidiaSource,
 }
 
 

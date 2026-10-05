@@ -1,0 +1,97 @@
+{
+  "status": 200,
+  "error": {"message": "", "body": ""},
+  "data": {
+    "count": 11,
+    "sortBy": "timestamp",
+    "appliedFilters": {
+      "jobType": ["intern (fixed term)", "new college graduate", "academic (fixed term)", "regular employee (fixed term)"]
+    },
+    "positions": [
+      {
+        "id": 893397725773,
+        "displayJobId": "JR2025792",
+        "atsJobId": "JR2025792",
+        "name": "PhD Research Intern, Embodied and Agentic AI - 2027",
+        "locations": ["US, CA, Santa Clara", "US, CA, Remote", "Germany, Berlin"],
+        "standardizedLocations": ["Santa Clara, CA, US", "CA,US", "Berlin, Berlin, DE"],
+        "department": "Intern",
+        "workLocationOption": "remote_local",
+        "postedTs": 1790899200,
+        "creationTs": 1789344000,
+        "positionUrl": "/careers/job/893397725773"
+      },
+      {
+        "id": 893393154096,
+        "displayJobId": "JR2012698",
+        "atsJobId": "JR2012698",
+        "name": "Research Scientist, Fundamental Generative AI - New College Grad 2026",
+        "locations": ["US, CA, Santa Clara"],
+        "standardizedLocations": ["Santa Clara, CA, US"],
+        "department": "Research Staff Member",
+        "postedTs": 1790899200,
+        "positionUrl": "/careers/job/893393154096"
+      },
+      {
+        "id": 900000000003,
+        "displayJobId": "JRTEST3",
+        "name": "Research Assistant",
+        "locations": ["Remote - US"],
+        "department": "Intern",
+        "postedTs": 1790899200,
+        "positionUrl": "/careers/job/900000000003"
+      },
+      {
+        "id": 900000000004,
+        "name": "Image Processing Libraries Intern",
+        "locations": ["Poland, Warsaw"],
+        "standardizedLocations": ["Warsaw, Masovian Voivodeship, PL"],
+        "postedTs": 1790899200,
+        "positionUrl": "/careers/job/900000000004"
+      },
+      {
+        "id": 900000000005,
+        "name": "Senior Software Engineer",
+        "locations": ["US, CA, Santa Clara"],
+        "postedTs": 1790899200,
+        "positionUrl": "/careers/job/900000000005"
+      },
+      {
+        "id": 900000000006,
+        "name": "Software Engineer Intern",
+        "locations": [],
+        "workLocationOption": "remote",
+        "postedTs": 1790899200,
+        "positionUrl": "/careers/job/900000000006"
+      },
+      {
+        "id": 900000000007,
+        "name": "Software Engineer Intern",
+        "locations": ["US, CA, Santa Clara"],
+        "postedTs": 1790899200,
+        "positionUrl": "https://evil.example.org/careers/job/900000000007"
+      },
+      {
+        "id": 900000000008,
+        "name": "",
+        "locations": ["US, CA, Santa Clara"],
+        "postedTs": 1790899200,
+        "positionUrl": "/careers/job/900000000008"
+      },
+      {
+        "id": 900000000009,
+        "name": "Software Engineer Intern",
+        "locations": ["US, CA, Santa Clara"],
+        "postedTs": null,
+        "positionUrl": "/careers/job/900000000009"
+      },
+      {
+        "id": 900000000010,
+        "name": "Software Engineer",
+        "locations": ["US, CA, Santa Clara"],
+        "postedTs": 1790899200,
+        "positionUrl": "/careers/job/900000000010"
+      }
+    ]
+  }
+}

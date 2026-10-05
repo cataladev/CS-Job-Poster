@@ -13,8 +13,8 @@ digest-alert roles, plus personal company and location targets.
 - Ticks every minute by default. Each feed states its own cadence, so the fast tick
   serves Jobright without dragging the rest along: Jobright is polled every minute,
   the GitHub repository feeds every five.
-- Polls registered first-party company APIs independently every hour by default; IBM is
-  the first registered company source.
+- Polls registered first-party company APIs independently every hour by default:
+  IBM, Microsoft, and NVIDIA.
 - Runs the GitHub and Jobright core feeds in their own loop, so a slow
   direct-employer sweep cannot delay new internship or new-grad Discord posts.
 - Derives 309 unique direct employer boards from the bundled company seed: Greenhouse,
@@ -93,6 +93,13 @@ outbox, and Discord delivery path. They never backfill Discord: only listings da
 today in `SCHEDULE_TIMEZONE` may be delivered, including on the first run or after an
 adapter's query expands. Older and undated rows may be retained for deduplication but
 remain suppressed.
+
+NVIDIA's adapter calls the public `jobs.nvidia.com/api/pcsx/search` endpoint with
+newest-first sorting and repeated job-type filters from its careers page. It retains
+U.S. internships and new-grad roles, including titles using "New College Grad," and
+uses the same company-source schedule and same-day delivery rule. See
+[docs/SOURCES.md](docs/SOURCES.md#company-api-sources) for request and pagination details.
+Run `python -m scripts.smoke_nvidia_source --show 10` for a read-only live check.
 
 The fixed feed definitions live in `job_bot/github_feeds.py`. `config/sources.yaml`
 is deliberately not a runtime switchboard for the MVP. The Jobright integration names

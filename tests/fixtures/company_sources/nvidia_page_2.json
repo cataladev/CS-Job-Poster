@@ -1,0 +1,24 @@
+{
+  "status": 200,
+  "error": {"message": "", "body": ""},
+  "data": {
+    "count": 11,
+    "sortBy": "timestamp",
+    "appliedFilters": {
+      "jobType": ["intern (fixed term)", "new college graduate", "academic (fixed term)", "regular employee (fixed term)"]
+    },
+    "positions": [
+      {
+        "id": 893395087798,
+        "displayJobId": "JR2017083",
+        "atsJobId": "JR2017083",
+        "name": "Systems Software Engineer - New College Grad 2026",
+        "locations": ["US, OR, Hillsboro"],
+        "standardizedLocations": ["Hillsboro, OR, US"],
+        "department": "Engineer, Sys SW",
+        "postedTs": 1790812800,
+        "positionUrl": "/careers/job/893395087798"
+      }
+    ]
+  }
+}
